@@ -1,4 +1,5 @@
 import type { Page } from 'patchright'
+import { createHash } from 'node:crypto'
 import { PATH, SEL } from './core/selectors'
 import { judgeListRow, newestGraded, shouldInspectHistory, skipFullScore, type HistoryRow } from './core/homework'
 import { inWindow } from './core/homework'
@@ -26,26 +27,50 @@ export type DetectedHomework = {
 }
 
 export type DetectedCourse = {
+  key: string
   name: string
   status: string
   homeworks: DetectedHomework[]
 }
 
-export async function listCourses(page: Page, local_id: string, slot: SlotState): Promise<{ name: string; href: string }[]> {
+export type ListedCourse = { name: string; href: string; key: string }
+
+function courseKey(href: string): string {
+  const url = new URL(href, 'https://l.shou.org.cn')
+  const param = (name: string) => [...url.searchParams].find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] || ''
+  const id = param('courseOpenId')
+  return id ? `course:${id}:${param('minorCourseOpenId')}` : `href:${createHash('sha256').update(url.pathname + url.search).digest('hex')}`
+}
+
+export async function listCourses(page: Page, local_id: string, slot: SlotState): Promise<ListedCourse[]> {
   emitProgress({ local_id, slot, account: 'scanning_courses', action: '确认我的课程', bankCount: 0, aiCount: 0, click: 'tab-courseList' })
   const tab = page.locator(SEL.tabCourseList)
   if (!(await tab.getAttribute('class') || '').includes('is-active')) {
     await tab.click()
   }
   await page.locator(SEL.courseItem).first().waitFor({ timeout: 15000 }).catch(() => {})
-  const items = page.locator(SEL.courseItem)
-  const n = await items.count()
-  const out: { name: string; href: string }[] = []
-  for (let i = 0; i < n; i++) {
-    const it = items.nth(i)
-    const name = ((await it.locator(SEL.courseName).innerText()) || '').replace(/\s+/g, ' ').trim()
-    const href = (await it.locator(SEL.courseLink).getAttribute('href')) || ''
-    out.push({ name, href })
+  const out: ListedCourse[] = []
+  const seen = new Set<string>()
+  const sources = [
+    { items: page.locator('.box-card .el-card__body .el-tabs__content > .course-item'), pinned: true },
+    { items: page.locator(SEL.courseItem), pinned: false },
+  ]
+  for (const { items, pinned } of sources) {
+    const n = await items.count()
+    for (let i = 0; i < n; i++) {
+      const it = items.nth(i)
+      const name = ((await it.locator(SEL.courseName).innerText()) || '').replace(/\s+/g, ' ').trim()
+      const href = (await it.locator(SEL.courseLink).getAttribute('href')) || ''
+      if (!href || !name) continue
+      if (pinned) {
+        const url = new URL(href, 'https://l.shou.org.cn')
+        if (!/^形势与政策[（(]\d+[）)]$/.test(name) || !url.pathname.toLowerCase().endsWith('/study/learncatalognew.aspx') || ![...url.searchParams.keys()].some((key) => key.toLowerCase() === 'courseopenid')) continue
+      }
+      const key = courseKey(href)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ name, href, key })
+    }
   }
   emitProgress({
     local_id,
@@ -117,6 +142,7 @@ async function parseSection(page: Page, id: '#onlineHomework' | '#phasedTest', s
 export async function detectCourse(opts: {
   portal: Page
   href: string
+  key: string
   courseName: string
   local_id: string
   slot: SlotState
@@ -125,7 +151,7 @@ export async function detectCourse(opts: {
   mode?: 'answer' | 'extract'
   answerRoundLimit?: number
 }): Promise<DetectedCourse> {
-  const { portal, href, courseName, local_id, slot, index, total, mode = 'answer', answerRoundLimit = 10 } = opts
+  const { portal, href, key, courseName, local_id, slot, index, total, mode = 'answer', answerRoundLimit = 10 } = opts
   emitProgress({
     local_id,
     slot,
@@ -164,7 +190,7 @@ export async function detectCourse(opts: {
   if (!emptyPhased) homeworks = homeworks.concat(await parseSection(coursePage, SEL.phasedTest, 'phasedTest', answerRoundLimit))
   if (emptyOnline && emptyPhased) {
     await coursePage.close()
-    return { name: courseName, status: '无作业', homeworks: [] }
+    return { key, name: courseName, status: '无作业', homeworks: [] }
   }
   for (const hw of homeworks) {
     if (!hw.previewHref) {
@@ -199,7 +225,7 @@ export async function detectCourse(opts: {
     }
   }
   await coursePage.close()
-  return { name: courseName, status: '已检测', homeworks }
+  return { key, name: courseName, status: '已检测', homeworks }
 }
 
 async function readHistory(page: Page): Promise<HistoryRow[]> {

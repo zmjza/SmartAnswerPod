@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN" style=""><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0" name="viewport"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><style>
+  @layer base {
+    html, body {
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      overscroll-behavior: none;
+    }
+    main > :first-child {
+      margin-top: 0 !important;
+    }
+    main > :last-child {
+      margin-bottom: 0 !important;
+    }
+  }
+  ::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* 入场动效 Keyframes */
+  @keyframes fadeInDown {
+    from {
+      opacity: 0;
+      transform: translateY(-12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes pulseSubtle {
+    0%, 100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.55;
+      transform: scale(0.92);
+    }
+  }
+
+  @keyframes rotateJiggle {
+    0% { transform: rotate(0deg); }
+    25% { transform: rotate(-8deg); }
+    75% { transform: rotate(8deg); }
+    100% { transform: rotate(0deg); }
+  }
+
+  /* 动画辅助类 */
+  .anim-fade-down {
+    animation: fadeInDown 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  .anim-fade-up {
+    animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  .anim-fade-up-delay-1 {
+    animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
+  }
+  .anim-fade-up-delay-2 {
+    animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.18s both;
+  }
+  .anim-fade-up-delay-3 {
+    animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) 0.25s both;
+  }
+  .anim-fade-up-delay-4 {
+    animation: fadeInUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+  }
+
+  /* 呼吸灯动画 */
+  .status-pulse-dot {
+    animation: pulseSubtle 2.6s ease-in-out infinite;
+  }
+
+  /* 连通性测试图标 hover 摆动 */
+  .group-test-btn:hover .icon-jiggle {
+    animation: rotateJiggle 0.45s ease-in-out infinite alternate;
+  }
+
+  /* 无障碍：尊重减少动效偏好 */
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after {
+      animation-delay: -1ms !important;
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+      background-attachment: initial !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
+    }
+  }
+</style><script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script><script id="tailwind-config">tailwind.config={darkMode:"class",theme:{extend:{colors:{"background":"#F8FAFC","surface":"#FFFFFF","on-surface":"#0f172a","primary":"#4F46E5","primary-hover":"#4338CA","secondary":"#6366F1","border-subtle":"#EDE9FE","border-default":"#E2E8F0"},fontFamily:{"body":["Geist", "sans-serif"],"mono":["JetBrains Mono", "monospace"]}}}}</script></head><body class="bg-[#F8FAFC] font-body text-slate-800 antialiased selection:bg-[#4F46E5] selection:text-white min-h-screen relative overflow-x-hidden">
+<!-- Header Chrome -->
+<header class="fixed top-0 left-0 right-0 z-50 bg-white border-b border-slate-200/90 shadow-sm anim-fade-down"><div class="h-16 w-full max-w-[1440px] mx-auto px-8 flex items-center justify-between"><div class="flex items-center gap-6"><div class="flex items-center gap-3"><span class="w-2.5 h-2.5 rounded-full bg-[#4F46E5] ring-4 ring-indigo-100"></span><span class="text-base text-slate-900 tracking-tight font-bold select-none">开大自动答题桌面端</span></div><div class="hidden xl:flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-slate-50 text-slate-600 font-mono text-xs border border-slate-200 select-none"><span class="">CPU 18%</span><span class="text-slate-300">·</span><span class="">内存 42%</span><span class="text-slate-300">·</span><span class="">本软件 180MB</span><span class="text-slate-300">·</span><span class="">浏览器 1</span><span class="text-slate-300">·</span><span class="flex items-center gap-1.5 text-slate-900 font-semibold"><span class="w-1.5 h-1.5 rounded-full bg-[#4F46E5]"></span>压力正常</span></div></div><div class="flex items-center gap-5"><nav class="flex items-center gap-1 p-1 bg-slate-100 rounded-full border border-slate-200"><a class="px-5 py-1.5 rounded-full text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 transition-all duration-200" data-path="workbench" href="#">工作台</a><a class="px-5 py-1.5 rounded-full text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 transition-all duration-200" data-path="question-bank" href="#">题库</a><a class="px-5 py-1.5 rounded-full text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 transition-all duration-200" data-path="students" href="#">学生账号</a><a aria-current="page" class="px-5 py-1.5 rounded-full transition-all duration-200 bg-[#4F46E5] text-white text-xs shadow-sm font-bold shadow-indigo-500/20" data-path="settings" href="#">设置</a></nav><div class="h-4 w-px bg-slate-200"></div><div class="w-9 h-9 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center font-medium border border-slate-200 hover:border-slate-300 hover:bg-slate-200/60 transition-all cursor-pointer"><span class="material-symbols-outlined text-[19px]">person</span></div></div></div></header>
+<main class="relative z-10 w-full pt-16 min-h-screen"><div class="flex flex-col w-full">
+<!-- Main Content Area (Retaining only Connection Configuration & Runtime Defaults) -->
+<div class="w-full max-w-[1140px] mx-auto px-8 py-7 flex flex-col gap-6"><div class="bg-white px-7 py-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 anim-fade-up hover:shadow-md transition-all duration-300"><div class="flex items-center gap-4"><div class="w-11 h-11 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-[#4F46E5] shadow-sm"><span class="material-symbols-outlined text-[24px]">tune</span></div><div><div class="flex items-center gap-2.5"><h1 class="text-[18px] font-bold text-slate-900 tracking-tight leading-none">系统偏好设置</h1><span class="px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold bg-indigo-50 text-[#4F46E5] border border-indigo-100">v2.4.0 稳定版</span></div><p class="text-xs text-slate-500 mt-1 font-mono">System Configuration &amp; Orchestration Console</p></div></div><div class="flex items-center gap-3"><div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium text-emerald-600 bg-emerald-50 border border-emerald-200"><span class="relative flex h-2 w-2"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 ring-4 ring-emerald-100"></span></span><span class="font-mono font-semibold">服务状态：已就绪</span></div><button class="group-test-btn inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-slate-50 hover:bg-slate-100/80 hover:border-slate-300 text-slate-700 text-xs font-semibold border border-slate-200 shadow-sm transition-all duration-200 active:scale-95" type="button"><span class="icon-jiggle material-symbols-outlined text-[16px] text-slate-500 transition-transform">electrical_services</span><span>连通性测试</span></button></div></div><div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start"><div class="lg:col-span-7 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col overflow-hidden anim-fade-up-delay-1 hover:shadow-md transition-all duration-300"><div class="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between"><div class="flex items-center gap-2.5"><div class="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-[#4F46E5]"><span class="material-symbols-outlined text-[18px]">hub</span></div><div><span class="text-xs font-bold text-slate-900 tracking-wide block">云端与接口连接</span><span class="text-[10px] text-slate-400 font-mono">CREDENTIALS &amp; ENDPOINTS</span></div></div><span class="font-mono text-[11px] text-emerald-600 font-semibold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">AES-256 加密</span></div><div class="p-6 flex flex-col gap-5"><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><label class="text-xs font-bold text-slate-700 flex items-center gap-1.5" for="siliconflow-key"><span class="material-symbols-outlined text-[16px] text-[#4F46E5]">psychology</span><span>硅基流动 API Key</span></label><span class="text-[11px] font-mono text-slate-400">DeepSeek / 满血模型调用凭据</span></div><div class="relative flex items-center rounded-xl transition-all duration-200 focus-within:ring-2 focus-within:ring-indigo-100 focus-within:border-indigo-500"><input class="w-full h-10 pl-3.5 pr-20 rounded-xl bg-slate-50/80 border border-slate-200 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:bg-white focus:border-indigo-500 transition-all duration-200" id="siliconflow-key" placeholder="sk-xxxxxxxxxxxxxxxx" type="password" value="示例 API Key（请在设置页填写）"/><div class="absolute right-1.5 flex items-center gap-0.5"><button class="text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 p-1.5 rounded-md transition-all active:scale-90" title="复制" type="button"><span class="material-symbols-outlined text-[16px]">content_copy</span></button><button class="text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 p-1.5 rounded-md transition-all active:scale-90" onclick="const i = document.getElementById('siliconflow-key'); i.type = i.type === 'password' ? 'text' : 'password';" title="显隐" type="button"><span class="material-symbols-outlined text-[17px]">visibility</span></button></div></div></div><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><label class="text-xs font-bold text-slate-700 flex items-center gap-1.5" for="supabase-url"><span class="material-symbols-outlined text-[16px] text-[#4F46E5]">cloud_done</span><span>Supabase Project URL</span></label><span class="text-[11px] font-mono text-slate-400">题库与同步数据终端</span></div><div class="relative flex items-center rounded-xl transition-all duration-200 focus-within:ring-2 focus-within:ring-indigo-100 focus-within:border-indigo-500"><input class="w-full h-10 pl-3.5 pr-12 rounded-xl bg-slate-50/80 border border-slate-200 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:bg-white focus:border-indigo-500 transition-all duration-200" id="supabase-url" placeholder="https://xxxx.supabase.co" type="text" value="https://your-project.supabase.co"/><div class="absolute right-2 text-emerald-600 flex items-center"><span class="material-symbols-outlined text-[18px]">check_circle</span></div></div></div><div class="flex flex-col gap-1.5"><div class="flex items-center justify-between"><label class="text-xs font-bold text-slate-700 flex items-center gap-1.5" for="supabase-anon"><span class="material-symbols-outlined text-[16px] text-[#4F46E5]">key</span><span>Supabase Anon Public Key</span></label><span class="text-[11px] font-mono text-slate-400">客户端安全交互鉴权</span></div><div class="relative flex items-center rounded-xl transition-all duration-200 focus-within:ring-2 focus-within:ring-indigo-100 focus-within:border-indigo-500"><input class="w-full h-10 pl-3.5 pr-20 rounded-xl bg-slate-50/80 border border-slate-200 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:bg-white focus:border-indigo-500 transition-all duration-200" id="supabase-anon" placeholder="Anon Public Key" type="password" value="示例 Public Key（请在设置页填写）"/><div class="absolute right-1.5 flex items-center gap-0.5"><button class="text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 p-1.5 rounded-md transition-all active:scale-90" title="复制" type="button"><span class="material-symbols-outlined text-[16px]">content_copy</span></button><button class="text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 p-1.5 rounded-md transition-all active:scale-90" onclick="const i = document.getElementById('supabase-anon'); i.type = i.type === 'password' ? 'text' : 'password';" title="显隐" type="button"><span class="material-symbols-outlined text-[17px]">visibility</span></button></div></div></div></div><div class="px-6 py-3 bg-slate-50/70 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500"><div class="flex items-center gap-2"><span class="material-symbols-outlined text-[16px] text-slate-400">lock</span><span>所有安全令牌均注入系统安全密钥区</span></div><span class="font-mono text-[11px] text-slate-400">TLS 1.3 / mTLS</span></div></div><div class="lg:col-span-5 flex flex-col gap-6"><div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col anim-fade-up-delay-2 hover:shadow-md transition-all duration-300"><div class="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between"><div class="flex items-center gap-2.5"><div class="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-[#4F46E5]"><span class="material-symbols-outlined text-[18px]">speed</span></div><div><span class="text-xs font-bold text-slate-900 tracking-wide block">任务执行与并发控制</span><span class="text-[10px] text-slate-400 font-mono">EXECUTION &amp; WORKERS</span></div></div><span class="font-mono text-[11px] text-slate-400 font-medium">DYNAMIC</span></div><div class="p-6 flex flex-col gap-4"><div class="grid grid-cols-2 gap-3.5"><div class="p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 flex flex-col justify-between gap-3"><div class="flex items-center justify-between"><span class="text-xs font-bold text-slate-700">账号并发</span><span class="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-slate-200/70 text-slate-600">Max 8</span></div><div class="flex items-center justify-between bg-white rounded-xl p-1.5 border border-slate-200 shadow-sm"><button class="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 hover:scale-105 text-slate-700 flex items-center justify-center font-bold text-sm transition-transform duration-150 active:scale-95 cursor-pointer select-none" onclick="const el=document.getElementById('account-concurrency'); el.value=Math.max(1, parseInt(el.value||1)-1);" type="button">-</button><div class="flex flex-col items-center leading-none"><input class="w-10 text-center font-mono text-base bg-transparent focus:outline-none text-[#4F46E5] font-bold pointer-events-none" id="account-concurrency" readonly="" type="number" value="2"/><span class="text-[10px] text-slate-400 font-mono mt-0.5">线程</span></div><button class="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 hover:scale-105 text-slate-700 flex items-center justify-center font-bold text-sm transition-transform duration-150 active:scale-95 cursor-pointer select-none" onclick="const el=document.getElementById('account-concurrency'); el.value=Math.min(8, parseInt(el.value||1)+1);" type="button">+</button></div><div class="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden"><div class="bg-[#4F46E5] h-1.5 rounded-full transition-all duration-300" style="width: 25%;"></div></div></div><div class="p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 flex flex-col justify-between gap-3"><div class="flex items-center justify-between"><span class="text-xs font-bold text-slate-700">单账号课程并发</span><span class="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-slate-200/70 text-slate-600">Max 6</span></div><div class="flex items-center justify-between bg-white rounded-xl p-1.5 border border-slate-200 shadow-sm"><button class="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 hover:scale-105 text-slate-700 flex items-center justify-center font-bold text-sm transition-transform duration-150 active:scale-95 cursor-pointer select-none" onclick="const el=document.getElementById('course-concurrency'); el.value=Math.max(1, parseInt(el.value||1)-1);" type="button">-</button><div class="flex flex-col items-center leading-none"><input class="w-10 text-center font-mono text-base bg-transparent focus:outline-none text-[#4F46E5] font-bold pointer-events-none" id="course-concurrency" readonly="" type="number" value="1"/><span class="text-[10px] text-slate-400 font-mono mt-0.5">任务</span></div><button class="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 hover:scale-105 text-slate-700 flex items-center justify-center font-bold text-sm transition-transform duration-150 active:scale-95 cursor-pointer select-none" onclick="const el=document.getElementById('course-concurrency'); el.value=Math.min(6, parseInt(el.value||1)+1);" type="button">+</button></div><div class="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden"><div class="bg-[#4F46E5] h-1.5 rounded-full transition-all duration-300" style="width: 16.6%;"></div></div></div></div><div class="flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-slate-50/70 border border-slate-200/80"><div class="flex items-center gap-2"><span class="material-symbols-outlined text-[16px] text-emerald-600">tune</span><span class="text-xs text-slate-600 font-medium">自适应负载调度机制</span></div><span class="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-600 font-mono"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500 status-pulse-dot"></span>已启用</span></div></div></div><div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col anim-fade-up-delay-3 hover:shadow-md transition-all duration-300"><div class="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between"><div class="flex items-center gap-2.5"><div class="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-[#4F46E5]"><span class="material-symbols-outlined text-[18px]">terminal</span></div><div><span class="text-xs font-bold text-slate-900 tracking-wide block">运行环境与调试</span><span class="text-[10px] text-slate-400 font-mono">RUNTIME &amp; ENVIRONMENT</span></div></div><span class="font-mono text-[11px] text-slate-400 font-medium">DEBUG</span></div><div class="p-5 flex flex-col gap-3"><div class="flex items-center justify-between p-3 rounded-xl bg-slate-50/60 border border-slate-200 hover:bg-slate-50 transition-colors"><div class="flex items-center gap-3"><div class="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-slate-600"><span class="material-symbols-outlined text-[18px]">visibility</span></div><div class="flex flex-col"><span class="text-xs font-bold text-slate-800">显示浏览器窗口</span><span class="text-[11px] text-slate-400 mt-0.5">关闭则默认静默后台 Headless 运行</span></div></div><label class="relative inline-flex items-center cursor-pointer select-none shrink-0 group"><input class="sr-only peer" id="browser-toggle" type="checkbox"/><div class="w-11 h-6 bg-slate-200 group-hover:bg-slate-300/80 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-5 peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all after:duration-300 after:shadow-sm peer-checked:bg-[#4F46E5] transition-colors duration-200"></div></label></div><div class="flex items-center justify-between p-3 rounded-xl bg-slate-50/60 border border-slate-200 hover:bg-slate-50 transition-colors"><div class="flex items-center gap-3"><div class="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-[#4F46E5]"><span class="material-symbols-outlined text-[18px]">assignment</span></div><div class="flex flex-col"><span class="text-xs font-bold text-slate-800">详细运行日志</span><span class="text-[11px] text-slate-400 mt-0.5">实时记录模型研判与答题交互过程</span></div></div><label class="relative inline-flex items-center cursor-pointer select-none shrink-0 group"><input checked="" class="sr-only peer" id="log-toggle" type="checkbox"/><div class="w-11 h-6 bg-slate-200 group-hover:bg-slate-300/80 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-5 peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all after:duration-300 after:shadow-sm peer-checked:bg-[#4F46E5] transition-colors duration-200"></div></label></div></div></div></div></div><div class="bg-white rounded-2xl border border-slate-200 shadow-sm px-7 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 anim-fade-up-delay-4 hover:shadow-md transition-all duration-300"><div class="flex items-center gap-2.5 text-slate-500 text-xs font-mono"><span class="w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-emerald-100 status-pulse-dot"></span><span>配置修改后本地实时热生效 · 无需重启桌面客户端</span></div><div class="flex items-center gap-3"><button class="h-9 px-4 rounded-full bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 text-xs font-semibold border border-slate-200 shadow-sm transition-all duration-150 active:scale-95" type="button">恢复默认</button><div class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-emerald-50 text-emerald-600 text-xs font-semibold border border-emerald-200 transition-all duration-300" id="save-hint"><span class="material-symbols-outlined text-[16px]">check_circle</span><span>已保存最新配置</span></div><button class="h-9 px-6 rounded-full bg-[#4F46E5] hover:bg-[#4338CA] hover:-translate-y-0.5 hover:shadow-lg hover:shadow-indigo-500/25 text-white text-xs font-bold shadow-sm transition-all duration-200 active:translate-y-0 active:scale-[0.98] flex items-center gap-2" id="save-btn" type="button"><span class="material-symbols-outlined text-[16px]">save</span><span>保存并应用配置</span></button></div></div></div>
+<script>
+    (function() {
+      const btn = document.getElementById('save-btn');
+      const hint = document.getElementById('save-hint');
+      if (btn && hint) {
+        btn.addEventListener('click', () => {
+          hint.classList.remove('opacity-0', 'scale-95');
+          hint.classList.add('opacity-100', 'scale-100');
+          btn.classList.add('scale-95');
+          setTimeout(() => btn.classList.remove('scale-95'), 120);
+          setTimeout(() => {
+            hint.classList.remove('opacity-100');
+            hint.classList.add('opacity-75');
+          }, 3000);
+        });
+      }
+    })();
+</script>
+</div></main>
+</body></html>

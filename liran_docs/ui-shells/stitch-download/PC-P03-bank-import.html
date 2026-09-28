@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>开大自动答题桌面端 - 题库导入</title>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+    @layer base {
+      html, body {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        overscroll-behavior: none;
+      }
+    }
+    ::-webkit-scrollbar {
+      display: none;
+    }
+
+    /* Keyframes & Micro-interactions */
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(16px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes pulseDot {
+      0%, 100% {
+        transform: scale(1);
+        opacity: 1;
+      }
+      50% {
+        transform: scale(1.4);
+        opacity: 0.7;
+      }
+    }
+
+    @keyframes iconBounce {
+      0%, 100% {
+        transform: translateY(0);
+      }
+      50% {
+        transform: translateY(3px);
+      }
+    }
+
+    @keyframes shimmerSweep {
+      0% {
+        transform: translateX(-100%);
+      }
+      100% {
+        transform: translateX(250%);
+      }
+    }
+
+    .animate-fadeInUp {
+      animation: fadeInUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    .animate-stagger-1 { animation-delay: 0.05s; }
+    .animate-stagger-2 { animation-delay: 0.12s; }
+    .animate-stagger-3 { animation-delay: 0.18s; }
+    .animate-stagger-4 { animation-delay: 0.24s; }
+
+    .pulse-dot {
+      animation: pulseDot 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+
+    .btn-import:hover .import-icon {
+      animation: iconBounce 0.8s ease infinite;
+    }
+
+    .shimmer-track {
+      position: relative;
+      overflow: hidden;
+    }
+    .shimmer-track::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.45) 50%, transparent 100%);
+      animation: shimmerSweep 2.2s infinite ease-in-out;
+      pointer-events: none;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, ::after, ::before {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+  </style>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              DEFAULT: "#4F46E5",
+              hover: "#4338CA",
+              subtle: "#EEF2FF"
+            }
+          },
+          fontFamily: {
+            sans: ["Geist", "system-ui", "sans-serif"],
+            mono: ["JetBrains Mono", "monospace"]
+          },
+          boxShadow: {
+            "luminous": "0 20px 50px -12px rgba(79, 70, 229, 0.08), 0 2px 8px -2px rgba(15, 23, 42, 0.04)"
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-[#F8FAFC] font-sans text-zinc-900 antialiased selection:bg-[#4F46E5] selection:text-white h-screen w-full flex flex-col justify-between relative overflow-hidden select-none">
+<!-- Minimal Floating Header -->
+<header class="fixed top-0 left-0 right-0 z-50 bg-white/90 backdrop-blur-md border-b border-zinc-200/80">
+<div class="h-14 w-full max-w-[1360px] mx-auto px-6 lg:px-10 flex items-center justify-between">
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-2.5">
+<span class="w-2.5 h-2.5 rounded-full bg-[#4F46E5] ring-4 ring-indigo-100"></span>
+<span class="font-semibold text-[15px] text-zinc-900 tracking-tight select-none">开大自动答题桌面端</span>
+</div>
+<div class="hidden xl:flex items-center gap-2 px-3.5 py-1 rounded-full bg-white border border-zinc-200 text-zinc-500 font-mono text-[12px] select-none shadow-xs">
+<span class="">CPU 18%</span>
+<span class="text-zinc-300">·</span>
+<span class="">内存 42%</span>
+<span class="text-zinc-300">·</span>
+<span class="">本软件 180MB</span>
+<span class="text-zinc-300">·</span>
+<span class="">浏览器 1</span>
+<span class="text-zinc-300">·</span>
+<span class="flex items-center gap-1.5 text-zinc-800 font-medium">
+<span class="w-1.5 h-1.5 rounded-full bg-[#10B981] pulse-dot"></span>压力正常
+          </span>
+</div>
+</div>
+<div class="flex items-center gap-5">
+<nav class="flex items-center gap-1.5 bg-zinc-100/90 p-1 rounded-full">
+<a class="px-3.5 py-1 rounded-full text-[13px] font-medium text-zinc-600 hover:text-zinc-900 hover:bg-white/60 transition-all duration-150" href="#">工作台</a>
+<a class="px-3.5 py-1 rounded-full text-[13px] font-semibold bg-[#4F46E5] text-white shadow-sm transition-all duration-150 cursor-default" href="#">题库</a>
+<a class="px-3.5 py-1 rounded-full text-[13px] font-medium text-zinc-600 hover:text-zinc-900 hover:bg-white/60 transition-all duration-150" href="#">学生账号</a>
+<a class="px-3.5 py-1 rounded-full text-[13px] font-medium text-zinc-600 hover:text-zinc-900 hover:bg-white/60 transition-all duration-150" href="#">设置</a>
+</nav>
+<div class="w-8 h-8 rounded-full bg-zinc-900 flex items-center justify-center text-white shadow-sm hover:bg-zinc-800 transition-colors cursor-pointer" title="用户资料">
+<span class="material-symbols-outlined text-[18px]">person</span>
+</div>
+</div>
+</div>
+</header>
+<!-- Main Canvas: Neo-Minimal Centered Card -->
+<main class="w-full flex-1 flex flex-col items-center justify-center pt-14 pb-4 px-4 z-10">
+<div class="w-full max-w-[640px] flex flex-col items-center my-auto">
+<div class="w-full bg-[#FFFFFF] rounded-3xl shadow-luminous border border-zinc-200/80 p-8 sm:p-9 flex flex-col gap-6 relative overflow-hidden transition-all duration-300 animate-fadeInUp">
+<!-- File Selection Box (Interactive Dropzone) -->
+<div class="flex items-center justify-between p-3.5 pl-4 rounded-2xl bg-[#F8FAFC] border-2 border-dashed border-zinc-200 hover:border-indigo-400 hover:bg-indigo-50/20 transition-all duration-200 cursor-pointer group" id="dropzone">
+<div class="flex items-center gap-3.5 min-w-0">
+<div class="w-11 h-11 rounded-2xl bg-white border border-zinc-200 group-hover:border-indigo-200 flex items-center justify-center shadow-xs text-[#4F46E5] shrink-0 transition-transform duration-200 group-hover:scale-105">
+<span class="material-symbols-outlined text-[24px]">description</span>
+</div>
+<div class="flex flex-col min-w-0">
+<div class="flex items-center gap-2">
+<span class="font-semibold text-[15px] text-zinc-900 truncate tracking-tight font-mono">questions.json</span>
+<span class="inline-flex items-center px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-[#4F46E5] font-medium font-mono text-[11px]">有效 · UTF-8 · 240 KB</span>
+</div>
+<span class="font-mono text-[12px] text-zinc-500 mt-0.5">本地合法题库文件已挂载 · 支持点击重选或拖拽</span>
+</div>
+</div>
+<button class="shrink-0 px-4 py-1.5 rounded-full bg-white hover:bg-zinc-50 border border-zinc-300 text-zinc-800 text-[12px] font-medium shadow-xs transition-all duration-150 hover:scale-[1.02] active:scale-[0.98] hover:border-zinc-400" id="reselect-btn" type="button">重新选择</button>
+</div>
+<!-- Primary Action Button -->
+<div>
+<button class="btn-import w-full h-13 py-3.5 rounded-full bg-[#4F46E5] hover:bg-[#4338CA] active:scale-[0.985] text-white font-semibold text-[15px] sm:text-[16px] tracking-wide shadow-[0_8px_20px_-4px_rgba(79,70,229,0.35)] hover:shadow-[0_12px_28px_-4px_rgba(79,70,229,0.45)] hover:-translate-y-0.5 transition-all duration-200 flex items-center justify-center gap-2 group cursor-pointer" id="import-btn" type="button">
+<span class="material-symbols-outlined text-[20px] text-white import-icon transition-transform">file_download</span>
+<span id="btn-text">开始导入</span>
+</button>
+</div>
+<!-- Status Banner -->
+<div class="flex items-center justify-between px-4 py-3 rounded-full bg-indigo-50/70 border border-indigo-100 text-zinc-900 transition-all duration-300" id="status-banner">
+<div class="flex items-center gap-2.5">
+<span class="material-symbols-outlined text-[#4F46E5] text-[20px] transition-transform duration-300" id="status-icon">check_circle</span>
+<span class="text-[13px] font-semibold text-zinc-900 tracking-tight" id="status-text">导入完成：已成功更新题库 · 耗时 420ms</span>
+</div>
+<span class="font-mono text-[11px] text-[#4F46E5] font-semibold px-2.5 py-0.5 rounded-full bg-white border border-indigo-200 shadow-xs">已写入本地数据库</span>
+</div>
+<!-- Four Core Metrics Cards -->
+<div class="flex flex-col gap-3.5">
+<div class="grid grid-cols-4 gap-2.5">
+<!-- 新增 12 题 -->
+<div class="flex flex-col items-center justify-center py-3.5 px-2 rounded-2xl bg-[#F8FAFC] border border-zinc-200 hover:border-indigo-300 hover:bg-white hover:-translate-y-0.5 hover:shadow-xs transition-all duration-200 group cursor-default">
+<div class="flex items-center gap-1.5 mb-1">
+<span class="w-1.5 h-1.5 rounded-full bg-[#4F46E5] group-hover:scale-125 transition-transform"></span>
+<span class="text-[12px] text-zinc-800 font-medium">新增</span>
+</div>
+<div class="flex items-baseline gap-0.5 my-0.5">
+<span class="font-mono text-[24px] font-bold text-[#4F46E5] tracking-tight leading-tight">12</span>
+<span class="text-[11px] text-zinc-500 font-normal">题</span>
+</div>
+<span class="font-mono text-[10px] text-[#4F46E5] font-medium bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded-full mt-0.5 truncate group-hover:bg-indigo-100/70 transition-colors">独立题干</span>
+</div>
+<!-- 合并 4 题 -->
+<div class="flex flex-col items-center justify-center py-3.5 px-2 rounded-2xl bg-[#F8FAFC] border border-zinc-200 hover:border-indigo-300 hover:bg-white hover:-translate-y-0.5 hover:shadow-xs transition-all duration-200 group cursor-default">
+<div class="flex items-center gap-1.5 mb-1">
+<span class="w-1.5 h-1.5 rounded-full bg-[#6366F1] group-hover:scale-125 transition-transform"></span>
+<span class="text-[12px] text-zinc-700 font-medium">合并</span>
+</div>
+<div class="flex items-baseline gap-0.5 my-0.5">
+<span class="font-mono text-[24px] font-bold text-zinc-900 tracking-tight leading-tight">4</span>
+<span class="text-[11px] text-zinc-500 font-normal">题</span>
+</div>
+<span class="font-mono text-[10px] text-[#6366F1] font-medium bg-indigo-50/60 border border-indigo-100 px-1.5 py-0.5 rounded-full mt-0.5 truncate group-hover:bg-indigo-100/70 transition-colors">打乱选项集合并</span>
+</div>
+<!-- 冲突 1 题 -->
+<div class="flex flex-col items-center justify-center py-3.5 px-2 rounded-2xl bg-[#F8FAFC] border border-zinc-200 hover:border-amber-300 hover:bg-white hover:-translate-y-0.5 hover:shadow-xs transition-all duration-200 group cursor-default">
+<div class="flex items-center gap-1.5 mb-1">
+<span class="w-1.5 h-1.5 rounded-full bg-[#F59E0B] pulse-dot"></span>
+<span class="text-[12px] text-zinc-700 font-medium">冲突</span>
+</div>
+<div class="flex items-baseline gap-0.5 my-0.5">
+<span class="font-mono text-[24px] font-bold text-zinc-900 tracking-tight leading-tight">1</span>
+<span class="text-[11px] text-zinc-500 font-normal">题</span>
+</div>
+<span class="font-mono text-[10px] text-[#D97706] font-medium bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full mt-0.5 truncate group-hover:bg-amber-100/70 transition-colors">需人工复核</span>
+</div>
+<!-- 缺字段跳过 2 题 -->
+<div class="flex flex-col items-center justify-center py-3.5 px-2 rounded-2xl bg-[#F8FAFC] border border-zinc-200 hover:border-zinc-300 hover:bg-white hover:-translate-y-0.5 hover:shadow-xs transition-all duration-200 group cursor-default">
+<div class="flex items-center gap-1.5 mb-1">
+<span class="w-1.5 h-1.5 rounded-full bg-zinc-400 group-hover:scale-125 transition-transform"></span>
+<span class="text-[12px] text-zinc-700 font-medium">缺字段跳过</span>
+</div>
+<div class="flex items-baseline gap-0.5 my-0.5">
+<span class="font-mono text-[24px] font-bold text-zinc-900 tracking-tight leading-tight">2</span>
+<span class="text-[11px] text-zinc-500 font-normal">题</span>
+</div>
+<span class="font-mono text-[10px] text-zinc-600 font-medium bg-zinc-100 border border-zinc-200 px-1.5 py-0.5 rounded-full mt-0.5 truncate group-hover:bg-zinc-200/70 transition-colors">格式缺失跳过</span>
+</div>
+</div>
+<!-- Segmented Import Progress Bar with Continuous Shimmer Wave -->
+<div class="w-full bg-zinc-100 h-2.5 rounded-full overflow-hidden flex p-0.5 gap-1 border border-zinc-200/60 shimmer-track" id="progress-bar-container">
+<div class="bg-[#4F46E5] h-full rounded-full transition-all duration-700" id="bar-added" style="width: 63.2%;" title="新增 63.2%"></div>
+<div class="bg-[#6366F1] h-full rounded-full transition-all duration-700" id="bar-merged" style="width: 21.0%;" title="合并 21.0%"></div>
+<div class="bg-[#F59E0B] h-full rounded-full transition-all duration-700" id="bar-conflict" style="width: 5.3%;" title="冲突 5.3%"></div>
+<div class="bg-zinc-300 h-full rounded-full transition-all duration-700" id="bar-skipped" style="width: 10.5%;" title="缺字段跳过 10.5%"></div>
+</div>
+</div>
+<!-- Footer Helper Info -->
+<div class="flex flex-col gap-2 pt-1 border-t border-zinc-100">
+<div class="flex items-center justify-between text-zinc-500 text-[12px]">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-[16px] text-[#4F46E5] shrink-0">info</span>
+<span>去重机制：按题干加排序后选项集合，选项顺序打乱仍合并 · 仅支持本地合法 JSON 标准格式</span>
+</div>
+<span class="font-mono text-[11px] text-zinc-600 font-medium bg-zinc-100 border border-zinc-200 px-2 py-0.5 rounded-full shrink-0">v2.4 合并策略</span>
+</div>
+<div class="flex items-center gap-1.5 text-[11px] text-zinc-400 pl-5">
+<span>·</span>
+<span>从开大自动上号抽题不在本页，请回到工作台学生卡切换「提取题库」模式。</span>
+</div>
+</div>
+</div>
+</div>
+</main>
+<script>
+  // Micro-interaction Demo logic
+  const importBtn = document.getElementById('import-btn');
+  const btnText = document.getElementById('btn-text');
+  const statusBanner = document.getElementById('status-banner');
+  const statusText = document.getElementById('status-text');
+  const statusIcon = document.getElementById('status-icon');
+  const barAdded = document.getElementById('bar-added');
+  const barMerged = document.getElementById('bar-merged');
+  const barConflict = document.getElementById('bar-conflict');
+  const barSkipped = document.getElementById('bar-skipped');
+  const dropzone = document.getElementById('dropzone');
+  const reselectBtn = document.getElementById('reselect-btn');
+
+  let isImporting = false;
+
+  importBtn?.addEventListener('click', function() {
+    if (isImporting) return;
+    isImporting = true;
+
+    // Reset progress animation
+    btnText.textContent = "正在校验并写入本地...";
+    importBtn.classList.add('opacity-90');
+    statusBanner.classList.add('opacity-50');
+    statusIcon.classList.add('animate-spin');
+    statusIcon.textContent = 'autorenew';
+    statusText.textContent = '解析 JSON 题干向量比对中...';
+
+    barAdded.style.width = '0%';
+    barMerged.style.width = '0%';
+    barConflict.style.width = '0%';
+    barSkipped.style.width = '0%';
+
+    setTimeout(() => {
+      barAdded.style.width = '63.2%';
+      barMerged.style.width = '21.0%';
+      barConflict.style.width = '5.3%';
+      barSkipped.style.width = '10.5%';
+    }, 100);
+
+    setTimeout(() => {
+      isImporting = false;
+      btnText.textContent = "开始导入";
+      importBtn.classList.remove('opacity-90');
+      statusBanner.classList.remove('opacity-50');
+      statusIcon.classList.remove('animate-spin');
+      statusIcon.textContent = 'check_circle';
+      statusText.textContent = '导入完成：已成功更新题库 · 耗时 420ms';
+    }, 900);
+  });
+
+  reselectBtn?.addEventListener('click', function(e) {
+    e.stopPropagation();
+    dropzone.classList.add('border-indigo-500', 'bg-indigo-50/40');
+    setTimeout(() => {
+      dropzone.classList.remove('border-indigo-500', 'bg-indigo-50/40');
+    }, 400);
+  });
+</script>
+</body></html>

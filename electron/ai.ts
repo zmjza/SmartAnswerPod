@@ -24,6 +24,37 @@ export type AiAttempt = {
   httpStatus?: number
 }
 
+export type AiGroupSlot = { id: string; stem: string; options: string[] }
+
+export function validateGroupSelection(texts: string[], slots: Pick<AiGroupSlot, 'id' | 'options'>[]): Record<string, string> | null {
+  if (texts.length !== slots.length || new Set(slots.map((slot) => slot.id)).size !== slots.length) return null
+  const selected: Record<string, string> = {}
+  for (const text of texts) {
+    const slot = slots.find((item) => item.options.some((option) => text === `${item.id} :: ${option}`))
+    if (!slot || selected[slot.id]) return null
+    selected[slot.id] = slot.options.find((option) => text === `${slot.id} :: ${option}`)!
+  }
+  return Object.keys(selected).length === slots.length ? selected : null
+}
+
+export async function askAiGroup(opts: {
+  hash: string
+  shared: string
+  slots: AiGroupSlot[]
+  onAttempt?: (attempt: AiAttempt) => void
+}): Promise<{ selected: Record<string, string> | null; model?: string; attempts: AiAttempt[] }> {
+  if (!opts.slots.length || opts.slots.some((slot) => !slot.id || !slot.stem || !slot.options.length))
+    return { selected: null, attempts: [] }
+  const options = opts.slots.flatMap((slot) => slot.options.map((text) => `${slot.id} :: ${text}`))
+  const stem = `${opts.shared}\n每个编号恰选一个答案，完整返回所有编号。\n` +
+    opts.slots.map((slot) => `${slot.id}. ${slot.stem}`).join('\n')
+  const response = await askAi({
+    hash: opts.hash, qtype: 'multiple', stem, options, onAttempt: opts.onAttempt,
+  })
+  return { selected: response.texts ? validateGroupSelection(response.texts, opts.slots) : null,
+    model: response.model, attempts: response.attempts }
+}
+
 export async function askAi(opts: {
   hash: string
   qtype: string

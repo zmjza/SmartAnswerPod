@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN" style=""><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>开大自动答题桌面端</title>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;family=Plus+Jakarta+Sans:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+    @layer base {
+      html, body { margin: 0; padding: 0; }
+      body { overscroll-behavior: none; }
+    }
+    ::-webkit-scrollbar { display: none; }
+
+    /* Staggered Entrance Animations */
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(14px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes pulseGlow {
+      0%, 100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+      50% {
+        opacity: 0.45;
+        transform: scale(0.92);
+      }
+    }
+
+    @keyframes progressShimmer {
+      0% {
+        transform: translateX(-100%);
+      }
+      100% {
+        transform: translateX(250%);
+      }
+    }
+
+    .animate-enter-1 {
+      animation: fadeInUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.05s both;
+    }
+    .animate-enter-2 {
+      animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.12s both;
+    }
+    .animate-enter-3 {
+      animation: fadeInUp 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.19s both;
+    }
+    .animate-enter-bottom {
+      animation: fadeInUp 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.25s both;
+    }
+
+    .status-pulse-green {
+      animation: pulseGlow 2.2s infinite ease-in-out;
+    }
+    .status-pulse-indigo {
+      animation: pulseGlow 1.8s infinite ease-in-out;
+    }
+    .status-pulse-amber {
+      animation: pulseGlow 1.6s infinite ease-in-out;
+    }
+
+    .progress-shimmer-bar {
+      position: relative;
+      overflow: hidden;
+    }
+    .progress-shimmer-bar::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      width: 40%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+      animation: progressShimmer 2.2s infinite ease-in-out;
+    }
+
+    /* Tactile button press & hover transitions */
+    .tactile-btn {
+      transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+    }
+    .tactile-btn:hover {
+      transform: translateY(-1px);
+    }
+    .tactile-btn:active {
+      transform: translateY(1px) scale(0.98);
+    }
+
+    /* Smooth popover transition */
+    .source-popover {
+      transform-origin: top right;
+      transition: opacity 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.18s;
+    }
+    .source-popover.hidden-popover {
+      opacity: 0;
+      transform: scale(0.95) translateY(-4px);
+      pointer-events: none;
+      visibility: hidden;
+    }
+    .source-popover.show-popover {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+      pointer-events: auto;
+      visibility: visible;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .animate-enter-1, .animate-enter-2, .animate-enter-3, .animate-enter-bottom {
+        animation: none !important;
+      }
+      .progress-shimmer-bar::after {
+        animation: none !important;
+      }
+      .status-pulse-green, .status-pulse-indigo, .status-pulse-amber {
+        animation: none !important;
+      }
+      .tactile-btn {
+        transition: none !important;
+      }
+    }
+  </style>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            "primary": "#4F46E5",
+            "primary-hover": "#4338CA",
+            "primary-light": "#EEF2FF",
+            "surface": "#FFFFFF",
+            "background": "#F5F3FF",
+            "border-soft": "#EDE9FE",
+            "accent-success": "#10B981",
+            "accent-warning": "#F59E0B",
+            "accent-dark": "#0F172A",
+            "on-surface": "#0F172A",
+            "on-surface-variant": "#64748B"
+          },
+          borderRadius: {
+            "DEFAULT": "1rem",
+            "2xl": "1.25rem",
+            "3xl": "1.75rem",
+            "4xl": "2rem",
+            "full": "9999px"
+          },
+          fontFamily: {
+            sans: ["Plus Jakarta Sans", "system-ui", "-apple-system", "sans-serif"],
+            mono: ["JetBrains Mono", "monospace"]
+          },
+          boxShadow: {
+            'card': '0 4px 20px -2px rgba(79, 70, 229, 0.05), 0 2px 6px -1px rgba(0, 0, 0, 0.04)',
+            'card-hover': '0 8px 24px -4px rgba(79, 70, 229, 0.1), 0 4px 8px -2px rgba(0, 0, 0, 0.04)',
+            'floating': '0 16px 36px -6px rgba(79, 70, 229, 0.12), 0 4px 12px rgba(15, 23, 42, 0.05)'
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-[#F5F3FF] font-sans text-slate-900 antialiased selection:bg-[#4F46E5] selection:text-white min-h-screen w-full flex flex-col justify-between relative overflow-x-hidden">
+<!-- Toast Notification Container -->
+<div class="fixed top-6 right-8 z-[100] transform transition-all duration-300 -translate-y-6 opacity-0 pointer-events-none flex items-center gap-2.5 px-4 py-2.5 rounded-xl bg-slate-900 text-white shadow-floating text-[13px] font-medium" id="toast">
+<span class="material-symbols-outlined text-[18px] text-[#10B981]" id="toast-icon">check_circle</span>
+<span id="toast-msg">操作已就绪</span>
+</div>
+<!-- TOP APP BAR: 纯净通透顶栏 -->
+<header class="sticky top-0 z-50 px-10 py-4 bg-white/95 backdrop-blur-md border-b border-[#EDE9FE] shadow-[0_1px_3px_rgba(79,70,229,0.04)] transition-all">
+<div class="max-w-[1600px] mx-auto flex items-center justify-between">
+<div class="flex items-center gap-8">
+<div class="flex items-center gap-3 cursor-pointer group">
+<div class="w-9 h-9 rounded-xl bg-[#4F46E5] flex items-center justify-center text-white shadow-sm transition-transform duration-200 group-hover:scale-105">
+<span class="material-symbols-outlined text-[19px]">auto_stories</span>
+</div>
+<span class="text-[17px] font-bold text-slate-900 tracking-tight select-none">开大自动答题桌面端</span>
+</div>
+<div class="hidden xl:flex items-center gap-3 px-4 py-1.5 rounded-full bg-[#FFFFFF] text-slate-500 text-[12px] font-mono border border-[#EDE9FE] shadow-sm select-none transition-all hover:border-[#C7D2FE]"><span class="text-slate-600 font-medium">CPU <span class="text-slate-900 font-semibold">18%</span></span><span class="w-1 h-1 rounded-full bg-[#EDE9FE]"></span><span class="text-slate-600 font-medium">内存 <span class="text-slate-900 font-semibold">42%</span></span><span class="w-1 h-1 rounded-full bg-[#EDE9FE]"></span><span class="">本软件 180MB</span><span class="w-1 h-1 rounded-full bg-[#EDE9FE]"></span><span class="" title="启动中+占用中+需验证，不含排队">浏览器 1</span><span class="w-1 h-1 rounded-full bg-[#EDE9FE]"></span><span class="flex items-center gap-1.5 text-[#10B981] font-sans font-semibold"><span class="relative flex h-2 w-2"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#10B981] opacity-60"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-[#10B981] status-pulse-green"></span></span>压力正常</span></div>
+</div>
+<div class="flex items-center gap-4">
+<nav class="flex items-center p-1 rounded-full bg-[#EDE9FE]/50 border border-[#EDE9FE]" id="header-nav">
+<a class="nav-tab px-4 py-1.5 rounded-full bg-[#4F46E5] text-white font-semibold text-[13px] shadow-sm transition-all tactile-btn" href="#">工作台</a>
+<a class="nav-tab px-4 py-1.5 rounded-full text-slate-600 hover:text-[#4F46E5] hover:bg-white text-[13px] font-medium transition-all tactile-btn" href="#">题库</a>
+<a class="nav-tab px-4 py-1.5 rounded-full text-slate-600 hover:text-[#4F46E5] hover:bg-white text-[13px] font-medium transition-all tactile-btn" href="#">学生账号</a>
+<a class="nav-tab px-4 py-1.5 rounded-full text-slate-600 hover:text-[#4F46E5] hover:bg-white text-[13px] font-medium transition-all tactile-btn" href="#">设置</a>
+</nav>
+<div class="w-9 h-9 rounded-full bg-[#0F172A] hover:bg-[#4F46E5] flex items-center justify-center text-white shadow-sm cursor-pointer transition-all duration-200 tactile-btn" title="个人设置">
+<span class="material-symbols-outlined text-[19px]">person</span>
+</div>
+</div>
+</div>
+</header>
+<!-- MAIN WORKSPACE: 三列纯色卡片布局 -->
+<main class="flex-1 w-full max-w-[1600px] mx-auto px-10 py-8 flex flex-col justify-center">
+<div class="grid grid-cols-[280px_minmax(0,1fr)_340px] gap-8 items-start"><!-- LEFT COLUMN: 课程目录导航 -->
+<aside class="flex flex-col bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-enter-1 transition-all hover:shadow-card">
+<div class="flex items-center justify-between px-4 py-3.5 border-b border-slate-100 bg-[#F8FAFC]">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-[17px] text-[#4F46E5]">menu_book</span>
+<span class="text-[13px] font-bold text-slate-900 tracking-tight">我的课程 (5)</span>
+</div>
+<button class="text-[11.5px] text-[#4F46E5] hover:text-[#4338CA] font-medium transition-colors tactile-btn active:scale-95" id="btn-select-all">全选执行</button>
+</div>
+<div class="p-2 flex flex-col gap-1" id="course-list">
+<!-- Active Course Item -->
+<div class="course-item group relative flex items-center justify-between p-3 rounded-xl bg-[#EEF2FF] border border-[#C7D2FE] cursor-pointer shadow-sm transition-all duration-200 hover:translate-x-0.5">
+<div class="flex items-center gap-2.5 min-w-0 pr-2">
+<span class="w-1.5 h-4 rounded-full bg-[#4F46E5]"></span>
+<span class="text-[13px] font-bold text-slate-900 truncate">社区管理实践</span>
+</div>
+<span class="px-2.5 py-0.5 rounded-full bg-[#10B981] text-white text-[11px] font-semibold tracking-wide whitespace-nowrap shadow-sm">已检测</span>
+</div>
+<!-- Course 2 -->
+<div class="course-item group flex items-center justify-between p-3 rounded-xl hover:bg-[#F8FAFC] transition-all duration-200 cursor-pointer border border-transparent hover:border-slate-100 hover:translate-x-0.5">
+<div class="flex items-center gap-2 min-w-0 pr-2">
+<span class="w-1.5 h-1.5 rounded-full bg-slate-300 group-hover:bg-[#4F46E5] transition-colors"></span>
+<span class="text-[13px] font-medium text-slate-700 group-hover:text-slate-900 truncate">社会保障理论与实务</span>
+</div>
+<span class="font-mono text-[11px] text-[#F59E0B] font-semibold bg-[#FEF3C7] border border-[#FDE68A] px-2 py-0.5 rounded-full whitespace-nowrap">回填中 12/40</span>
+</div>
+<!-- Course 3 -->
+<div class="course-item group flex items-center justify-between p-3 rounded-xl hover:bg-[#F8FAFC] transition-all duration-200 cursor-pointer border border-transparent hover:border-slate-100 hover:translate-x-0.5">
+<div class="flex items-center gap-2 min-w-0 pr-2">
+<span class="w-1.5 h-1.5 rounded-full bg-slate-300 group-hover:bg-[#4F46E5] transition-colors"></span>
+<span class="text-[13px] font-medium text-slate-700 group-hover:text-slate-900 truncate">形势与政策 (1)</span>
+</div>
+<span class="px-2.5 py-0.5 rounded-full bg-[#ECFDF5] text-[#10B981] border border-[#A7F3D0] text-[11px] font-medium whitespace-nowrap">已检测</span>
+</div>
+<!-- Course 4 -->
+<div class="course-item group flex items-center justify-between p-3 rounded-xl hover:bg-[#F8FAFC] transition-all duration-200 cursor-pointer border border-transparent hover:border-slate-100 hover:translate-x-0.5">
+<div class="flex items-center gap-2 min-w-0 pr-2">
+<span class="w-1.5 h-1.5 rounded-full bg-slate-200"></span>
+<span class="text-[13px] font-medium text-slate-400 group-hover:text-slate-600 truncate">社会工作实务</span>
+</div>
+<span class="text-[11px] text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full whitespace-nowrap">无作业</span>
+</div>
+<!-- Course 5 -->
+<div class="course-item group flex items-center justify-between p-3 rounded-xl hover:bg-[#F8FAFC] transition-all duration-200 cursor-pointer border border-transparent hover:border-slate-100 hover:translate-x-0.5">
+<div class="flex items-center gap-2 min-w-0 pr-2">
+<span class="w-1.5 h-1.5 rounded-full bg-slate-300"></span>
+<span class="text-[13px] font-medium text-slate-600 group-hover:text-slate-800 truncate">社区矫治基础</span>
+</div>
+<span class="text-[11px] text-slate-600 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full whitespace-nowrap">待检测</span>
+</div>
+</div>
+<div class="p-3 border-t border-slate-100 bg-[#F8FAFC] flex items-center justify-between text-[11.5px] text-slate-500">
+<span class="font-medium">已选 1/5 门科目</span>
+<button class="text-[#4F46E5] hover:text-[#4338CA] font-medium transition-colors tactile-btn active:scale-95" id="btn-select-pending">全选未完成</button>
+</div>
+</aside>
+<!-- CENTER COLUMN: 中央主工作区 (核心主角) -->
+<section class="flex flex-col bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden min-h-[560px] animate-enter-2 transition-all hover:shadow-card">
+<!-- Header Banner -->
+<div class="p-6 border-b border-slate-100 bg-white flex flex-col gap-4">
+<div class="flex flex-wrap items-center justify-between gap-3">
+<div class="flex items-center gap-3">
+<span class="w-1.5 h-6 rounded-full bg-[#4F46E5]"></span>
+<h1 class="text-[20px] font-bold text-slate-900 tracking-tight">社区管理实践 · 客观题结果</h1>
+</div>
+<div class="flex items-center gap-2">
+<div class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-[#4F46E5] text-white font-mono text-[12px] font-semibold shadow-sm transition-transform duration-150 hover:scale-105 select-none">
+<span class="material-symbols-outlined text-[15px]">database</span>
+<span>题库答题 28</span>
+</div>
+<div class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-[#EEF2FF] border border-[#C7D2FE] text-[#4F46E5] font-mono text-[12px] font-semibold transition-transform duration-150 hover:scale-105 select-none">
+<span class="material-symbols-outlined text-[15px] text-[#4F46E5]">smart_toy</span>
+<span>AI 答题 12</span>
+</div>
+</div>
+</div>
+<!-- Realtime Engine Status Capsule -->
+<div class="flex items-center justify-between px-3.5 py-2 rounded-xl bg-[#F8FAFC] border border-[#EDE9FE] transition-colors duration-200 hover:border-[#C7D2FE]">
+<div class="flex items-center gap-2 text-[12px]">
+<span class="relative flex h-2 w-2">
+<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#4F46E5] opacity-60"></span>
+<span class="relative inline-flex rounded-full h-2 w-2 bg-[#4F46E5] status-pulse-indigo"></span>
+</span>
+<span class="font-semibold text-[#4F46E5]">当前第 12 题 · AI 答题 · GLM-5.3</span>
+<span class="text-slate-400">（置信度高，正等待页面回填写入）</span>
+</div>
+<span class="font-mono text-[11.5px] font-semibold text-slate-500">30% 就绪</span>
+</div>
+<!-- Overall Progress bar -->
+<div class="flex flex-col gap-1.5">
+<div class="flex items-center justify-between text-[12px]">
+<span class="text-slate-500 font-medium">总进度概览</span>
+<span class="font-mono font-bold text-slate-900">12 <span class="text-slate-400 font-normal">/ 40 题</span> <span class="text-[#4F46E5] font-bold ml-1.5">30%</span></span>
+</div>
+<div class="w-full h-2 bg-slate-100 rounded-full overflow-hidden p-0.5">
+<div class="h-full bg-[#4F46E5] rounded-full progress-shimmer-bar transition-all duration-500" style="width: 30%;"></div>
+</div>
+</div>
+</div>
+<!-- Body Sections -->
+<div class="p-6 flex flex-col gap-6 flex-1 justify-between">
+<div class="flex flex-col gap-5">
+<!-- Group 1: 网上记分作业 -->
+<div class="flex flex-col gap-2.5">
+<div class="flex items-center justify-between px-1">
+<span class="text-[11.5px] font-bold text-slate-400 uppercase tracking-wider">网上记分作业</span>
+<span class="text-[11px] text-slate-400 font-mono">2 项</span>
+</div>
+<!-- Card 1: 记分作业一 -->
+<div class="flex items-center justify-between p-4 rounded-xl bg-[#F8FAFC] hover:bg-white border border-slate-200 transition-all duration-200 shadow-sm hover:shadow-card hover:border-[#C7D2FE]">
+<div class="flex items-center gap-3 min-w-0">
+<span class="w-2.5 h-2.5 rounded-full bg-[#10B981] ring-4 ring-[#D1FAE5]"></span>
+<span class="text-[14.5px] font-bold text-slate-900 tracking-tight truncate">记分作业一</span>
+</div>
+<div class="flex items-center gap-3">
+<span class="px-3 py-0.5 rounded-full bg-[#ECFDF5] text-[#10B981] text-[11.5px] font-semibold border border-[#A7F3D0]">已检测完成</span>
+<div class="relative">
+<button class="source-popover-trigger px-3 py-1 rounded-full text-slate-600 hover:text-[#4F46E5] hover:bg-white text-[12px] font-medium transition-all duration-150 flex items-center gap-1 shadow-sm border border-slate-200 bg-white tactile-btn">
+<span>查看来源</span>
+<span class="material-symbols-outlined text-[15px] transition-transform duration-200" id="popover-arrow">expand_more</span>
+</button>
+<div class="source-popover hidden-popover absolute right-0 top-full mt-2 w-64 p-4 rounded-2xl bg-white shadow-floating border border-[#EDE9FE] z-30 flex flex-col gap-2.5">
+<span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">来源明细 (题库 / AI / 空过)</span>
+<div class="flex items-center justify-between py-1 border-b border-[#F1F5F9]">
+<span class="text-[12px] text-slate-700 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-[#4F46E5]"></span>题库答题</span>
+<span class="font-mono text-[12px] font-bold text-slate-900">15 题</span>
+</div>
+<div class="flex items-center justify-between py-1 border-b border-[#F1F5F9]">
+<span class="text-[12px] text-slate-700 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-[#818CF8]"></span>AI 答题</span>
+<span class="font-mono text-[12px] font-bold text-[#4F46E5]">5 题</span>
+</div>
+<div class="flex items-center justify-between py-0.5">
+<span class="text-[12px] text-slate-500 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-slate-300"></span>空过</span>
+<span class="font-mono text-[12px] font-medium text-slate-400">0 题</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Card 2: 记分作业二 -->
+<div class="p-4 rounded-xl bg-[#F8FAFC] border border-[#C7D2FE] flex flex-col gap-2.5 shadow-sm transition-all duration-200 hover:shadow-card">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-3 min-w-0">
+<span class="relative flex h-2.5 w-2.5">
+<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#F59E0B] opacity-60"></span>
+<span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#F59E0B] status-pulse-amber"></span>
+</span>
+<span class="text-[14.5px] font-bold text-slate-900 tracking-tight truncate">记分作业二</span>
+</div>
+<div class="flex items-center gap-2.5">
+<span class="text-[12px] text-slate-500 font-medium">回填中</span>
+<span class="font-mono text-[12px] text-[#4F46E5] font-bold bg-[#EEF2FF] border border-[#C7D2FE] px-2.5 py-0.5 rounded-full">12 / 40 题</span>
+</div>
+</div>
+<div class="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden p-0.5">
+<div class="h-full bg-[#4F46E5] rounded-full progress-shimmer-bar transition-all duration-500" style="width: 30%;"></div>
+</div>
+<div class="flex items-center justify-between text-[11px] text-slate-400 pt-0.5">
+<span>当前项单选已全部判定完毕</span>
+<span class="font-mono">预估剩余 45s</span>
+</div>
+</div>
+</div>
+<!-- Group 2: 阶段性测验 -->
+<div class="flex flex-col gap-2.5">
+<span class="text-[11.5px] font-bold text-slate-400 uppercase tracking-wider px-1">阶段性测验</span>
+<div class="flex items-center justify-between p-3.5 px-4 rounded-xl bg-[#F8FAFC] border border-slate-200 text-slate-400 transition-all duration-200 hover:bg-white hover:border-slate-300">
+<span class="text-[13px] font-medium text-slate-600">阶段性测验一</span>
+<span class="text-[11px] text-slate-400 bg-slate-100 px-2.5 py-0.5 rounded-full">暂无数据</span>
+</div>
+</div>
+</div>
+<!-- Center footer notes -->
+<div class="pt-4 border-t border-slate-100 flex items-center justify-between text-slate-500 text-[12px]">
+<span class="font-mono">本单元自测共 2 份试卷</span>
+<div class="flex items-center gap-1.5 text-[#10B981] bg-[#ECFDF5] px-3 py-1 rounded-full border border-[#A7F3D0] transition-transform duration-150 hover:scale-[1.02] cursor-default">
+<span class="material-symbols-outlined text-[15px]">verified</span>
+<span class="text-[11.5px] font-semibold">自动化引擎就绪</span>
+</div>
+</div>
+</div>
+</section>
+<!-- RIGHT COLUMN: 学生卡与控制中心 -->
+<aside class="flex flex-col bg-white rounded-2xl border border-slate-200 shadow-sm p-5 gap-4 animate-enter-3 transition-all hover:shadow-card">
+<!-- Student Tabs -->
+<div class="flex items-center justify-between p-1 bg-[#F5F3FF] rounded-xl border border-[#EDE9FE]" id="student-switcher">
+<div class="student-pill flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-white text-[#4F46E5] shadow-sm cursor-pointer transition-all duration-200 select-none tactile-btn" data-student="0">
+<span class="w-1.5 h-1.5 rounded-full bg-[#10B981] status-pulse-green"></span>
+<span class="text-[12px] font-bold">张同学</span>
+<span class="font-mono text-[10px] text-slate-500">0000****0001</span>
+</div>
+<div class="student-pill flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-slate-500 hover:text-slate-800 cursor-pointer transition-all duration-200 select-none tactile-btn" data-student="1">
+<span class="w-1.5 h-1.5 rounded-full bg-[#F59E0B]"></span>
+<span class="text-[12px] font-medium">李同学</span>
+<span class="text-[10px] text-slate-400">(排队中)</span>
+</div>
+</div>
+<!-- Segmented Switchers -->
+<div class="flex flex-col gap-2.5 pb-2 border-b border-slate-100">
+<div class="flex items-center justify-between gap-2">
+<span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">执行环境</span>
+<div class="p-0.5 rounded-full bg-[#F5F3FF] flex items-center border border-[#EDE9FE]">
+<button class="mode-headless-btn px-2.5 py-1 rounded-full bg-[#4F46E5] text-white text-[11px] font-semibold shadow-sm transition-all duration-200 tactile-btn">无头浏览器</button>
+<button class="mode-visual-btn px-2.5 py-1 rounded-full text-slate-600 hover:text-[#4F46E5] text-[11px] font-medium transition-all duration-200 tactile-btn">可视化浏览器</button>
+</div>
+</div>
+<div class="flex items-center justify-between gap-2">
+<span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">工作模式</span>
+<div class="p-0.5 rounded-full bg-[#F5F3FF] flex items-center border border-[#EDE9FE]" id="work-mode-switcher">
+<button class="workmode-btn-ans px-3 py-1 rounded-full bg-[#4F46E5] text-white text-[11px] font-semibold shadow-sm transition-all duration-200 tactile-btn">答题</button>
+<button class="workmode-btn-ext px-3 py-1 rounded-full text-slate-600 hover:text-[#4F46E5] text-[11px] font-medium transition-all duration-200 tactile-btn">提取题库</button>
+</div>
+</div>
+</div>
+<!-- Dynamic Core Status -->
+<div class="flex flex-col gap-2.5 p-3.5 rounded-xl bg-[#F8FAFC] border border-slate-200 transition-all duration-200 hover:border-[#C7D2FE]">
+<div class="flex items-center gap-2">
+<span class="relative flex h-2.5 w-2.5">
+<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#4F46E5] opacity-60"></span>
+<span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#4F46E5] status-pulse-indigo"></span>
+</span>
+<span class="text-[13.5px] font-bold text-slate-900 tracking-tight" id="status-title">自动开答 · 第 12/40 题</span>
+</div>
+<div class="grid grid-cols-2 gap-2">
+<div class="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white border border-[#EDE9FE] shadow-sm transition-transform hover:scale-[1.02]">
+<span class="text-[11px] text-slate-500">题库答题</span>
+<span class="font-mono text-[12px] font-bold text-slate-900" id="stat-repo">28</span>
+</div>
+<div class="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white border border-[#EDE9FE] shadow-sm transition-transform hover:scale-[1.02]">
+<span class="text-[11px] text-[#4F46E5]">AI 答题</span>
+<span class="font-mono text-[12px] font-bold text-[#4F46E5]" id="stat-ai">12</span>
+</div>
+</div>
+</div>
+<!-- Student details & Parallel badges -->
+<div class="flex flex-col gap-2 px-1 text-[12px]" id="student-meta">
+<div class="flex items-center justify-between"><span class="text-slate-400">学员姓名</span><span class="font-semibold text-slate-900" id="student-name">张同学</span></div>
+<div class="flex items-center justify-between"><span class="text-slate-400">学员学号</span><span class="font-mono text-slate-700 font-medium" id="student-id">0000****0001</span></div>
+<div class="flex items-center justify-between"><span class="text-slate-400">修读专业</span><span class="font-medium text-slate-900" id="student-major">行政管理</span></div>
+<div class="flex items-center justify-between"><span class="text-slate-400">教学分校</span><span class="font-medium text-slate-900" id="student-campus">市区综合分校</span></div>
+</div>
+<div class="flex items-center gap-2">
+<span class="px-2.5 py-1 rounded-full bg-[#F5F3FF] text-[#4F46E5] font-mono text-[11px] font-medium border border-[#EDE9FE] transition-transform hover:scale-105">账号并行 2</span>
+<span class="px-2.5 py-1 rounded-full bg-[#F5F3FF] text-[#4F46E5] font-mono text-[11px] font-medium border border-[#EDE9FE] transition-transform hover:scale-105">课程并行 2</span>
+</div>
+<!-- Verification Warning Card -->
+<div class="p-3 rounded-xl bg-[#FEF3C7]/60 border border-[#FDE68A] flex flex-col gap-2">
+<div class="flex items-center gap-1.5 text-[11px] font-medium text-[#F59E0B]">
+<span class="material-symbols-outlined text-[15px]">info</span>
+<span>检测到人脸/验证码时需人工复核</span>
+</div>
+<div class="flex items-center gap-2">
+<button class="flex-1 py-1 rounded-lg bg-white text-slate-700 text-[11px] font-medium hover:text-[#4F46E5] border border-slate-200 shadow-sm transition-all tactile-btn" id="btn-open-browser">打开可视化浏览器</button>
+<button class="py-1 px-3 rounded-lg bg-[#10B981] hover:bg-[#059669] text-white text-[11px] font-medium shadow-sm transition-all tactile-btn" id="btn-verify-done">验证完毕</button>
+</div>
+</div>
+<!-- Quick Toolbar -->
+<div class="grid grid-cols-4 gap-1 pt-2 border-t border-slate-100">
+<button class="py-1.5 rounded-lg text-slate-600 hover:text-[#4F46E5] hover:bg-[#F5F3FF] text-[11px] font-medium transition-all flex flex-col items-center gap-0.5 tactile-btn" id="tool-refresh">
+<span class="material-symbols-outlined text-[16px]">refresh</span>
+<span>刷新</span>
+</button>
+<button class="py-1.5 rounded-lg text-slate-600 hover:text-[#F59E0B] hover:bg-[#FEF3C7]/40 text-[11px] font-medium transition-all flex flex-col items-center gap-0.5 tactile-btn" id="tool-stop">
+<span class="material-symbols-outlined text-[16px]">stop_circle</span>
+<span>停止</span>
+</button>
+<button class="py-1.5 rounded-lg text-slate-600 hover:text-[#4F46E5] hover:bg-[#F5F3FF] text-[11px] font-medium transition-all flex flex-col items-center gap-0.5 tactile-btn" id="tool-log">
+<span class="material-symbols-outlined text-[16px]">receipt_long</span>
+<span>日志</span>
+</button>
+<button class="py-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 text-[11px] font-medium transition-all flex flex-col items-center gap-0.5 tactile-btn" id="tool-delete">
+<span class="material-symbols-outlined text-[16px]">delete</span>
+<span>删除</span>
+</button>
+</div>
+</aside></div>
+</main>
+<!-- BOTTOM BAR: 纯色悬浮控制胶囊栏 -->
+<footer class="sticky bottom-6 z-40 px-10 pointer-events-none pb-6 animate-enter-bottom">
+<div class="max-w-[1600px] mx-auto flex justify-end"><div class="w-full pointer-events-auto flex items-center justify-between px-6 py-3 rounded-full bg-white/95 backdrop-blur-md shadow-floating border border-[#EDE9FE] transition-all hover:border-[#C7D2FE]">
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2 text-slate-600 select-none">
+<span class="material-symbols-outlined text-[19px] text-[#10B981]">verified_user</span>
+<span class="text-[13px] font-semibold text-slate-800">已选课程 1/5 · 待做完成 1/2</span>
+</div>
+<span class="w-1 h-1 rounded-full bg-slate-300"></span>
+<div class="flex items-center gap-1.5 text-[#10B981] font-mono text-[12px] font-medium">
+<span class="w-1.5 h-1.5 rounded-full bg-[#10B981] status-pulse-green"></span>
+<span>自动化引擎就绪</span>
+</div>
+</div>
+<button class="h-11 px-7 rounded-full bg-[#4F46E5] hover:bg-[#4338CA] text-white font-semibold text-[14px] flex items-center gap-2 shadow-card transition-all duration-200 tactile-btn" id="btn-primary-action" title="快捷键 ⌘R / Ctrl+R，占用中点击先停再重测">
+<span class="material-symbols-outlined text-[18px]" id="play-icon">play_arrow</span>
+<span id="play-text">登录并刷新课程</span>
+<span class="text-[11px] font-mono text-[#C7D2FE] font-normal ml-0.5">⌘R</span>
+</button>
+</div></div>
+</footer>
+<script>
+    (function() {
+      // Toast notification utility
+      let toastTimer = null;
+      function showToast(message, icon = 'check_circle', color = '#10B981') {
+        const toast = document.getElementById('toast');
+        const msgEl = document.getElementById('toast-msg');
+        const iconEl = document.getElementById('toast-icon');
+        if (!toast || !msgEl || !iconEl) return;
+
+        msgEl.textContent = message;
+        iconEl.textContent = icon;
+        iconEl.style.color = color;
+
+        toast.classList.remove('-translate-y-6', 'opacity-0', 'pointer-events-none');
+        toast.classList.add('translate-y-0', 'opacity-100');
+
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          toast.classList.add('-translate-y-6', 'opacity-0', 'pointer-events-none');
+          toast.classList.remove('translate-y-0', 'opacity-100');
+        }, 2200);
+      }
+
+      // Popover Trigger Micro-interaction
+      const trigger = document.querySelector('.source-popover-trigger');
+      const popover = document.querySelector('.source-popover');
+      const arrow = document.getElementById('popover-arrow');
+      if (trigger && popover) {
+        let isVisible = false;
+        const setPopover = (val) => {
+          isVisible = val;
+          if (isVisible) {
+            popover.classList.remove('hidden-popover');
+            popover.classList.add('show-popover');
+            if (arrow) arrow.style.transform = 'rotate(180deg)';
+          } else {
+            popover.classList.remove('show-popover');
+            popover.classList.add('hidden-popover');
+            if (arrow) arrow.style.transform = 'rotate(0deg)';
+          }
+        };
+
+       trigger.addEventListener('mouseenter', () => setPopover(true));
+       trigger.parentElement.addEventListener('mouseleave', () => setPopover(false));
+        trigger.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setPopover(!isVisible);
+        });
+      }
+
+      // Top Header Navigation Tabs
+      const navTabs = document.querySelectorAll('#header-nav .nav-tab');
+      navTabs.forEach(tab => {
+        tab.addEventListener('click', (e) => {
+          e.preventDefault();
+          navTabs.forEach(t => {
+            t.className = 'nav-tab px-4 py-1.5 rounded-full text-slate-600 hover:text-[#4F46E5] hover:bg-white text-[13px] font-medium transition-all tactile-btn';
+          });
+          tab.className = 'nav-tab px-4 py-1.5 rounded-full bg-[#4F46E5] text-white font-semibold text-[13px] shadow-sm transition-all tactile-btn';
+        });
+      });
+
+      // Browser mode switcher toggle
+      const headlessBtn = document.querySelector('.mode-headless-btn');
+      const visualBtn = document.querySelector('.mode-visual-btn');
+      if (headlessBtn && visualBtn) {
+        headlessBtn.addEventListener('click', () => {
+          headlessBtn.className = 'mode-headless-btn px-2.5 py-1 rounded-full bg-[#4F46E5] text-white text-[11px] font-semibold shadow-sm transition-all duration-200 tactile-btn';
+          visualBtn.className = 'mode-visual-btn px-2.5 py-1 rounded-full text-slate-600 hover:text-[#4F46E5] text-[11px] font-medium transition-all duration-200 tactile-btn';
+          showToast('已切换至无头后台运行模式', 'devices', '#4F46E5');
+        });
+        visualBtn.addEventListener('click', () => {
+          visualBtn.className = 'mode-visual-btn px-2.5 py-1 rounded-full bg-[#4F46E5] text-white text-[11px] font-semibold shadow-sm transition-all duration-200 tactile-btn';
+          headlessBtn.className = 'mode-headless-btn px-2.5 py-1 rounded-full text-slate-600 hover:text-[#4F46E5] text-[11px] font-medium transition-all duration-200 tactile-btn';
+          showToast('已切换至可视化浏览器模式', 'desktop_windows', '#4F46E5');
+        });
+      }
+
+      // Work mode switcher (答题 / 提取题库)
+      const ansBtn = document.querySelector('.workmode-btn-ans');
+      const extBtn = document.querySelector('.workmode-btn-ext');
+      if (ansBtn && extBtn) {
+        ansBtn.addEventListener('click', () => {
+          ansBtn.className = 'workmode-btn-ans px-3 py-1 rounded-full bg-[#4F46E5] text-white text-[11px] font-semibold shadow-sm transition-all duration-200 tactile-btn';
+          extBtn.className = 'workmode-btn-ext px-3 py-1 rounded-full text-slate-600 hover:text-[#4F46E5] text-[11px] font-medium transition-all duration-200 tactile-btn';
+          showToast('模式已设为：智能答题', 'task_alt', '#4F46E5');
+        });
+        extBtn.addEventListener('click', () => {
+          extBtn.className = 'workmode-btn-ext px-3 py-1 rounded-full bg-[#4F46E5] text-white text-[11px] font-semibold shadow-sm transition-all duration-200 tactile-btn';
+          ansBtn.className = 'workmode-btn-ans px-3 py-1 rounded-full text-slate-600 hover:text-[#4F46E5] text-[11px] font-medium transition-all duration-200 tactile-btn';
+          showToast('模式已设为：提取题库', 'cloud_download', '#4F46E5');
+        });
+      }
+
+      // Student Switcher Tabs
+      const studentPills = document.querySelectorAll('#student-switcher .student-pill');
+      const studentData = [
+        { name: '张同学', id: '0000****0001', major: '行政管理', campus: '市区综合分校' },
+        { name: '李同学', id: '0000****0892', major: '社会工作', campus: '浦东学习中心' }
+      ];
+
+      studentPills.forEach(pill => {
+        pill.addEventListener('click', () => {
+          const idx = parseInt(pill.getAttribute('data-student') || '0', 10);
+          studentPills.forEach((p, i) => {
+            if (i === idx) {
+              p.className = 'student-pill flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-white text-[#4F46E5] shadow-sm cursor-pointer transition-all duration-200 select-none tactile-btn';
+            } else {
+              p.className = 'student-pill flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-slate-500 hover:text-slate-800 cursor-pointer transition-all duration-200 select-none tactile-btn';
+            }
+          });
+
+          const current = studentData[idx];
+          if (current) {
+            document.getElementById('student-name').textContent = current.name;
+            document.getElementById('student-id').textContent = current.id;
+            document.getElementById('student-major').textContent = current.major;
+            document.getElementById('student-campus').textContent = current.campus;
+            showToast(`已切换至学员：${current.name}`, 'account_circle', '#4F46E5');
+          }
+        });
+      });
+
+      // Quick Toolbar Buttons Feedback
+      const toolRefresh = document.getElementById('tool-refresh');
+      const toolStop = document.getElementById('tool-stop');
+      const toolLog = document.getElementById('tool-log');
+      const toolDelete = document.getElementById('tool-delete');
+
+      if (toolRefresh) {
+        toolRefresh.addEventListener('click', () => {
+          const icon = toolRefresh.querySelector('.material-symbols-outlined');
+          if (icon) {
+            icon.classList.add('animate-spin');
+            setTimeout(() => icon.classList.remove('animate-spin'), 700);
+          }
+          showToast('正在同步最新试卷数据...', 'sync', '#4F46E5');
+        });
+      }
+
+      if (toolStop) {
+        toolStop.addEventListener('click', () => {
+          showToast('已安全暂停当前答题任务', 'pause_circle', '#F59E0B');
+        });
+      }
+
+      if (toolLog) {
+        toolLog.addEventListener('click', () => {
+          showToast('实时引擎日志：0 报错 · 正常回填中', 'receipt_long', '#4F46E5');
+        });
+      }
+
+      if (toolDelete) {
+        toolDelete.addEventListener('click', () => {
+          showToast('已清除当前排队任务', 'delete', '#ba1a1a');
+        });
+      }
+
+      // Verification Card Buttons
+      const openBrowserBtn = document.getElementById('btn-open-browser');
+      const verifyDoneBtn = document.getElementById('btn-verify-done');
+      if (openBrowserBtn) {
+        openBrowserBtn.addEventListener('click', () => {
+          showToast('已唤起 Chromium 交互窗口', 'open_in_new', '#4F46E5');
+        });
+      }
+      if (verifyDoneBtn) {
+        verifyDoneBtn.addEventListener('click', () => {
+          showToast('人工复核完成，自动化已继续', 'verified', '#10B981');
+        });
+      }
+
+      // Select All Buttons
+      const btnSelectAll = document.getElementById('btn-select-all');
+      const btnSelectPending = document.getElementById('btn-select-pending');
+      if (btnSelectAll) {
+        btnSelectAll.addEventListener('click', () => {
+          showToast('已选中全部 5 门科目', 'checklist', '#4F46E5');
+        });
+      }
+      if (btnSelectPending) {
+        btnSelectPending.addEventListener('click', () => {
+          showToast('已全选未完成科目（共 2 门）', 'filter_list', '#4F46E5');
+        });
+      }
+
+      // Primary Bottom Action Button
+      const primaryActionBtn = document.getElementById('btn-primary-action');
+      if (primaryActionBtn) {
+        let isRunning = false;
+        primaryActionBtn.addEventListener('click', () => {
+          isRunning = !isRunning;
+          const playIcon = document.getElementById('play-icon');
+          const playText = document.getElementById('play-text');
+          if (isRunning) {
+            if (playIcon) playIcon.textContent = 'autorenew';
+            if (playText) playText.textContent = '正在执行全流程刷新...';
+            playIcon.classList.add('animate-spin');
+            showToast('已触发登录验证并同步新题库', 'play_arrow', '#4F46E5');
+            setTimeout(() => {
+              isRunning = false;
+              if (playIcon) {
+                playIcon.textContent = 'play_arrow';
+                playIcon.classList.remove('animate-spin');
+              }
+              if (playText) playText.textContent = '登录并刷新课程';
+              showToast('课程与题库同步完成', 'check_circle', '#10B981');
+            }, 1800);
+          }
+        });
+      }
+
+      // Keyboard Shortcut ⌘R / Ctrl+R
+      window.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'r') {
+          e.preventDefault();
+          if (primaryActionBtn) primaryActionBtn.click();
+        }
+      });
+    })();
+  </script>
+</body></html>

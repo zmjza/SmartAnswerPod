@@ -29,6 +29,7 @@ export const HOMEWORK = [
   'skip_attempts_exhausted',
   'skip_full_score',
   'skip_no_history',
+  'skip_bank_miss',
   'todo',
   'previewing',
   'gate_queued',

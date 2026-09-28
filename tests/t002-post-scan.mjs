@@ -3,7 +3,7 @@ import { build } from 'esbuild'
 
 const fixture = {
   events: [], portalWaiting: false, qrWaiting: false, qrOpen: true,
-  homeworkClicks: 0, submitted: false, released: false, held: false,
+  homeworkClicks: 0, submitted: false, released: false, held: false, noAnswerPage: false,
   accounts: [{ local_id: 'student-1', name: '测试学生', username: 'student-1', password: 'fake', display_mode: 'headless', work_mode: 'answer', course_scope: 'all', answer_round_limit: 1 }],
 }
 globalThis.__t002 = fixture
@@ -15,7 +15,7 @@ class FakeLocator {
   async click() {
     if (this.selector.includes('assignment/preview.aspx')) {
       fixture.homeworkClicks++
-      if (fixture.homeworkClicks > 1) this.page.path = '/study/assignment/preview.aspx'
+      if (fixture.homeworkClicks > 1 && !fixture.noAnswerPage) this.page.path = '/study/assignment/preview.aspx'
     }
   }
   async screenshot() { return Buffer.from('internal-qr') }
@@ -37,7 +37,7 @@ class FakePage {
   async close() {}
 }
 
- const context = { pages: () => [context.portal, context.preview, context.answer], newPage: async () => new FakePage('history', context), waitForEvent: async () => context.answer, portal: null, preview: null, answer: null }
+ const context = { pages: () => [context.portal, context.preview, context.answer], newPage: async () => new FakePage('history', context), waitForEvent: async () => { if (fixture.noAnswerPage) await new Promise(resolve => setTimeout(resolve, 100)); return context.answer }, portal: null, preview: null, answer: null }
 context.portal = new FakePage('portal', context)
 context.preview = new FakePage('preview', context)
 context.answer = new FakePage('answer', context)
@@ -95,6 +95,8 @@ const modules = {
   ),
   "./ai": "export const resetAsked = () => {}",
   "./review.ts": mock(
+    "export const readReviewedQuestions = async () => []",
+    "export const contradictoryReferenceHashes = () => new Set()",
     "export const extractReviewedQuestions = async () => ({})",
     "export const reviewResults = async () => { globalThis.__t002.events.push('reviewing'); return { reviewed: 1, matched: 1, graded: 1, inserted: 1, conflicts: 0, deleted: 0, wrong: 0, bankWrong: 0, aiWrong: 0, deleteFailed: 0, pendingCandidates: [], pendingInsertHashes: [], pendingDeleteHashes: [], score: 100 } }",
   ),
@@ -120,15 +122,19 @@ const waitFor = async (check, label) => {
 
 const run = runner.loginAndRefresh(['student-1'])
 await waitFor(() => fixture.portalWaiting, '门户验证等待')
+assert.equal(runner.snapshot().students[0].verified, false)
 assert.deepEqual((await runner.signalVerified('student-1')).ok, true)
 await waitFor(() => fixture.homeworkClicks === 1 && fixture.events.includes('needs_verify'), '作业二维码验证等待')
+assert.equal(runner.snapshot().students[0].verified, false)
 const denied = await runner.signalVerified('student-1')
 assert.equal(denied.ok, false, '二维码仍显示时不得放行')
+assert.equal(runner.snapshot().students[0].verified, false)
 assert.match(denied.error, /验证|扫码|二维码/)
 assert.equal(fixture.events.includes('answering'), false, '验证失败时不得作答')
 assert.equal(runner.snapshot().students[0].slot, 'occupying_verify')
 fixture.qrOpen = false
 assert.deepEqual((await runner.signalVerified('student-1')).ok, true)
+assert.equal(runner.snapshot().students[0].verified, true)
  let timeoutId
  const timeout = new Promise((_, reject) => { timeoutId = setTimeout(() => reject(new Error(JSON.stringify(fixture.events))), 3000) })
  try { await Promise.race([run, timeout]) } finally { clearTimeout(timeoutId) }
@@ -151,9 +157,25 @@ const completedAnswers = fixture.events.filter((event) => event === 'answering')
 assert.equal(runner.startStudent('student-1').ok, true)
 await waitFor(() => fixture.portalWaiting, '重新扫描门户验证等待')
 await runner.stopStudent('student-1')
+assert.equal(runner.snapshot().students[0].verified, false)
 assert.equal(runner.snapshot().students[0].account, 'stopped')
 assert.equal(runner.snapshot().students[0].slot, 'released')
 assert.equal(runner.snapshot().students[0].configLocked, false)
 assert.equal(fixture.released, true)
 assert.equal(fixture.events.filter((event) => event === 'answering').length, completedAnswers, '验证等待中停止不得继续作答')
+fixture.noAnswerPage = true
+fixture.qrOpen = false
+fixture.submitted = false
+fixture.homeworkClicks = 0
+fixture.portalWaiting = false
+context.preview.path = '/study/assignment-preview.aspx'
+context.answer.path = '/study/assignment-preview.aspx'
+const withoutRoute = runner.loginAndRefresh(['student-1'])
+await waitFor(() => fixture.portalWaiting, '无作答页时门户验证等待')
+assert.equal((await runner.signalVerified('student-1')).ok, true)
+await waitFor(() => fixture.homeworkClicks === 1, '无二维码的做作业点击')
+await new Promise(resolve => setTimeout(resolve, 20))
+assert.equal(runner.snapshot().students[0].verified, false, '无二维码且未进入作答页不得授权')
+await withoutRoute
+assert.equal(runner.snapshot().students[0].account, 'round_ended')
 console.log('T002 扫码后完整内部模拟链路通过')

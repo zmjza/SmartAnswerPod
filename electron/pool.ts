@@ -129,6 +129,21 @@ export async function acquire(local_id: string, visual: boolean): Promise<{ ok: 
   })
   context.setDefaultTimeout(20000)
   context.setDefaultNavigationTimeout(30000)
+  const schoolOrigin = process.env.KAIDA_E2E_USERDATA && process.env.KAIDA_E2E_SCHOOL_ORIGIN
+  if (schoolOrigin && new URL(schoolOrigin).hostname === '127.0.0.1') {
+    await context.route((url) => ['learning.shou.org.cn', 'l.shou.org.cn', 'iam.shou.org.cn'].includes(url.hostname), async (route) => {
+      const request = route.request()
+      const url = new URL(request.url())
+      try {
+        const response = await fetch(schoolOrigin + url.pathname + url.search, {
+          method: request.method(),
+          headers: { 'x-kaida-test-host': url.hostname, 'content-type': request.headers()['content-type'] || 'text/plain' },
+          body: request.postData() || undefined,
+        })
+        await route.fulfill({ status: response.status, headers: { 'content-type': response.headers.get('content-type') || 'text/html; charset=utf-8' }, body: Buffer.from(await response.arrayBuffer()) })
+      } catch { await route.abort() }
+    })
+  }
   const windowIndex = held.size
   held.set(local_id, { context, mode })
   context.on('close', () => {

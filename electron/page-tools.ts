@@ -71,7 +71,9 @@ export async function waitQuestionComplete(page: Page, dataNum: string, expected
 }
 
 export async function verifyAnswerSheet(page: Page, plan: { no: string; expected: string[] }[]): Promise<void> {
-  const numbers = await page.locator(SEL.questionBody).evaluateAll((bodies) => bodies.map((body) => body.getAttribute('data-num') || ''))
+  const numbers = await page.locator(SEL.questionBody).evaluateAll((bodies) => bodies
+    .filter((body) => !['7', '8', '9', '11'].includes(body.getAttribute('data-questiontype') || ''))
+    .map((body) => body.getAttribute('data-num') || ''))
   if (!numbers.length || numbers.length !== plan.length || new Set(numbers).size !== numbers.length ||
       new Set(plan.map((q) => q.no)).size !== plan.length || numbers.some((no) => !plan.some((q) => q.no === no))) {
     throw new Error('整卷复核失败：题目数量或题号不一致，禁止提交')
@@ -96,13 +98,14 @@ export async function incompleteQuestionNos(page: Page, questionNos: string[]): 
 
 export async function buildAnswerPlan(
   page: Page,
-  results: { no: string; source: string; qtype: QType | 'unknown'; selected: string[] }[],
+  results: { no: string; pageNo?: string; source: string; qtype: QType | 'unknown'; selected: string[] }[],
 ): Promise<{ no: string; expected: string[] }[]> {
   const plan: { no: string; expected: string[] }[] = []
   for (const result of results) {
+    const pageNo = result.pageNo || result.no
     const qtype = result.qtype === 'unknown' ? undefined : result.qtype
     const selected = new Set(result.selected.map((text) => normalizeOption(text, qtype)))
-    const options = await page.locator('.e-q-body[data-num="' + result.no + '"] li.e-a').evaluateAll((items) =>
+    const options = await page.locator('.e-q-body[data-num="' + pageNo + '"] li.e-a').evaluateAll((items) =>
       items.map((li) => ({ index: li.getAttribute('data-index') || '', text: (li as HTMLElement).innerText })))
     const expected = options
       .filter((option) => selected.has(normalizeOption(option.text, qtype)))
@@ -110,7 +113,7 @@ export async function buildAnswerPlan(
     if (result.source !== '空过' && (!expected.length || expected.length !== selected.size || expected.some((index) => !index))) {
       throw new Error('整卷复核失败：第 ' + result.no + ' 题答案无法定位')
     }
-    plan.push({ no: result.no, expected })
+    plan.push({ no: pageNo, expected })
   }
   return plan
 }

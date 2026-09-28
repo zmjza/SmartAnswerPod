@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { CourseScope, DisplayMode, PageId, WorkMode } from '../types/shell'
-import { selectedStudentId, useKaida } from '../useKaida'
+import { selectedStudentId, selectStudentId, resolveSelectedStudentId, useKaida } from '../useKaida'
 import { overflowStudentIndexes, visibleStudentIndexes } from '../student-switcher'
 import { homeworkScoreLabel } from '../../electron/core/live-view'
-import { pageForCourse, pageSlice, pageCountForCourses } from '../../electron/core/course-pager'
+import { pageForCourse, pageGroups, pageSlice, pageCountForCourses } from '../../electron/core/course-pager'
 
 const emit = defineEmits<{ go: [PageId] }>()
 function go(id: PageId) {
@@ -18,12 +18,12 @@ const courseScope = ref<CourseScope>('all')
 const answerRoundLimit = ref(10)
 const needsVerify = ref(false)
 const popoverOn = ref(false)
-const activeStudent = ref(0)
-const selectedCourseName = ref('')
+const selectedCourseKey = ref('')
 const studentMoreOn = ref(false)
 const coursePage = ref(1)
-let lastCoursePageKey = ''
-const coursePageSize = 5
+const homeworkPage = ref(1)
+const coursePageSize = 7
+const homeworkPageSize = 4
 const toastMsg = ref('操作已就绪')
 const toastShow = ref(false)
 type HistoryItem = { attempt: number; submittedAt: string; status: string; score: number | null; completed: boolean; viewable: boolean; displayState: 'viewable' | 'ungraded' | 'unfinished' | 'continue_only' | 'no_view' }
@@ -31,6 +31,7 @@ const historyOpen = ref(false)
 const historyLoading = ref(false)
 const historyError = ref('')
 const historyHomework = ref('')
+const historyCourseKey = ref('')
 const historyRows = ref<HistoryItem[]>([])
 const historyPaperImage = ref('')
 const logOpen = ref(false)
@@ -39,6 +40,8 @@ const qrOpen = ref(false)
 const qrLoading = ref(false)
 const qrError = ref('')
 const qrSnapshot = ref<QrSnapshotPayload | null>(null)
+let qrRequest = 0
+let historyRequest = 0
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 
 const studentMeta = computed(() => {
@@ -65,60 +68,69 @@ const studentMeta = computed(() => {
       extractHistoryCompleted: s.extractHistoryCompleted,
       extractCurrentHistory: s.extractCurrentHistory,
       needsVerify: s.needsVerify,
+      verified: s.verified,
       configLocked: s.configLocked,
       displayMode: s.displayMode,
       workMode: s.workMode,
       courseScope: s.courseScope,
       selectedCourseNames: s.selectedCourseNames,
+      selectedCourseKeys: s.selectedCourseKeys,
       awaitingCourseSelection: s.awaitingCourseSelection,
       answerRoundLimit: s.answerRoundLimit,
       courses: s.courses || [],
       groups: s.groups || [],
       activeCourseName: s.activeCourseName || '',
+      activeCourseKey: s.activeCourseKey || '',
       logs: s.logs || [],
       courseLogs: s.courseLogs || [],
     }))
   }
-  return [{ local_id: '', name: '未选择学生', id: '', major: '', campus: '', headline: '等待添加学生账号', action: '等待添加学生账号', account: 'idle', bankCount: 0, aiCount: 0, extractTotals: { added: 0, merged: 0, skipped: 0, conflict: 0, failed: 0 }, extractTotalCourses: 0, extractCompletedCourses: 0, extractTotalHomeworks: 0, extractCompletedHomeworks: 0, extractHistoryPages: 0, extractHistoryTotal: 0, extractHistoryCompleted: 0, extractCurrentHistory: '', needsVerify: false, configLocked: false, displayMode: 'headless' as const, workMode: 'answer' as const, courseScope: 'all' as const, selectedCourseNames: [], awaitingCourseSelection: false, answerRoundLimit: 10, courses: [], groups: [], activeCourseName: '', logs: [], courseLogs: [] }]
+  return []
 })
-const currentStudent = computed(() => studentMeta.value[activeStudent.value] ?? studentMeta.value[0])
+const emptyStudent = { local_id: '', name: '未选择学生', id: '', major: '', campus: '', headline: '等待添加学生账号', action: '等待添加学生账号', account: 'idle', bankCount: 0, aiCount: 0, extractTotals: { added: 0, merged: 0, skipped: 0, conflict: 0, failed: 0 }, extractTotalCourses: 0, extractCompletedCourses: 0, extractTotalHomeworks: 0, extractCompletedHomeworks: 0, extractHistoryPages: 0, extractHistoryTotal: 0, extractHistoryCompleted: 0, extractCurrentHistory: '', needsVerify: false, verified: false, configLocked: false, displayMode: 'headless' as const, workMode: 'answer' as const, courseScope: 'all' as const, selectedCourseNames: [], selectedCourseKeys: [], awaitingCourseSelection: false, answerRoundLimit: 10, courses: [], groups: [], activeCourseName: '', activeCourseKey: '', logs: [], courseLogs: [] }
+const activeStudent = computed(() => studentMeta.value.findIndex((student) => student.local_id === selectedStudentId.value))
+const currentStudent = computed(() => studentMeta.value.find((student) => student.local_id === selectedStudentId.value) ?? emptyStudent)
 const hasLiveStudents = computed(() => Boolean(snap.value?.students?.length))
 const allCourseRows = computed(() => hasLiveStudents.value ? currentStudent.value.courses : [])
 const coursePageCount = computed(() => pageCountForCourses(allCourseRows.value, coursePageSize))
 const courseRows = computed(() => pageSlice(allCourseRows.value, coursePageSize, coursePage.value))
-const currentCourseName = computed(() => {
-  if (selectedCourseName.value && allCourseRows.value.some((course) => course.name === selectedCourseName.value)) return selectedCourseName.value
-  const liveName = currentStudent.value.activeCourseName
-  if (liveName && allCourseRows.value.some((course) => course.name === liveName)) return liveName
-  if (selectedCourseName.value && allCourseRows.value.some((course) => course.name === selectedCourseName.value)) return selectedCourseName.value
-  return allCourseRows.value[0]?.name || ''
-})
+const currentCourse = computed(() =>
+  allCourseRows.value.find((course) => (course.key || course.name) === selectedCourseKey.value)
+  || allCourseRows.value.find((course) => (course.key || course.name) === currentStudent.value.activeCourseKey)
+  || allCourseRows.value.find((course) => course.name === currentStudent.value.activeCourseName)
+  || allCourseRows.value[0],)
+const currentCourseName = computed(() => currentCourse.value?.name || '')
+const currentCourseKey = computed(() => currentCourse.value?.key || currentCourseName.value)
 const currentGroups = computed(() => {
   if (!hasLiveStudents.value) return []
   const liveGroups = currentStudent.value.groups
-  const course = currentStudent.value.courses.find((item) => item.name === currentCourseName.value)
+  const course = currentCourse.value
   if (course?.groups?.length) return course.groups
-  if (liveGroups.length && currentStudent.value.activeCourseName === currentCourseName.value) return liveGroups
+  if (liveGroups.length && (currentStudent.value.activeCourseKey ? currentStudent.value.activeCourseKey === currentCourseKey.value : currentStudent.value.activeCourseName === currentCourseName.value)) return liveGroups
   return []
 })
 const currentHomeworkTotal = computed(() => currentGroups.value.reduce((sum, group) => sum + group.rows.length, 0))
+const homeworkPageCount = computed(() => Math.max(1, Math.ceil(currentHomeworkTotal.value / homeworkPageSize)))
+const visibleHomeworkGroups = computed(() => pageGroups(currentGroups.value, homeworkPageSize, homeworkPage.value))
 const currentAnsweredTotal = computed(() => currentGroups.value.reduce((sum, group) => sum + group.rows.reduce((n, row) => n + row.questions.length, 0), 0))
 const currentQuestionTotal = computed(() => currentGroups.value.reduce((sum, group) => sum + group.rows.reduce((n, row) => n + (row.questionTotal || row.questions.length), 0), 0))
 const completedCourses = computed(() => allCourseRows.value.filter((c) => ['本轮可做作业已完成', '无作业'].includes(c.status)).length)
 const machine = computed(() => snap.value?.machine || { cpu: '--', memory: '--', app: '--', browsers: 0, pressure: '等待主进程' })
 const bankCount = computed(() => currentStudent.value.bankCount ?? 0)
 const aiCount = computed(() => currentStudent.value.aiCount ?? 0)
-const selectedCourseSet = computed(() => new Set(currentStudent.value.selectedCourseNames || []))
-const selectedCourseTotal = computed(() => studentMeta.value.reduce((sum, student) => sum + (student.selectedCourseNames?.length || 0), 0))
-const selectedStudentTotal = computed(() => studentMeta.value.filter((student) => (student.selectedCourseNames?.length || 0) > 0).length)
+const selectedCourseSet = computed(() => new Set(currentStudent.value.selectedCourseKeys || currentStudent.value.selectedCourseNames || []))
+const selectedCourseTotal = computed(() => studentMeta.value.reduce((sum, student) => sum + (student.selectedCourseKeys || student.selectedCourseNames || []).length, 0))
+const selectedStudentTotal = computed(() => studentMeta.value.filter((student) => (student.selectedCourseKeys || student.selectedCourseNames || []).length > 0).length)
 const unselectedStudentNames = computed(() => studentMeta.value
-  .filter((student) => student.awaitingCourseSelection && !(student.selectedCourseNames?.length || 0))
+  .filter((student) => student.awaitingCourseSelection && !(student.selectedCourseKeys || student.selectedCourseNames || []).length)
   .map((student) => student.name))
 const waitingForCourseSelection = computed(() => studentMeta.value.some((student) => student.awaitingCourseSelection))
-const canOpenCourseLog = computed(() => Boolean(currentCourseName.value) && !(currentStudent.value.awaitingCourseSelection && currentStudent.value.courseScope === 'selected' && !selectedCourseName.value))
+const canOpenCourseLog = computed(() => Boolean(currentCourseName.value) && !(currentStudent.value.awaitingCourseSelection && currentStudent.value.courseScope === 'selected' && !selectedCourseKey.value))
 const controlsLocked = computed(() => Boolean(snap.value?.running))
 const studentConfigLocked = computed(() => Boolean(currentStudent.value.configLocked))
-const currentCourseLogs = computed(() => (currentStudent.value.courseLogs || []).filter((log) => log.courseName === currentCourseName.value).slice().reverse())
+const currentCourseLogs = computed(() => (currentStudent.value.courseLogs || []).filter((log) =>
+  log.courseKey ? log.courseKey === currentCourseKey.value : log.courseName === currentCourseName.value && allCourseRows.value.filter((course) => course.name === log.courseName).length === 1,
+).slice().reverse())
 watch(currentStudent, (s) => {
   displayMode.value = s.displayMode
   workMode.value = s.workMode
@@ -127,31 +139,49 @@ watch(currentStudent, (s) => {
   needsVerify.value = s.needsVerify
 }, { immediate: true })
 
-watch([selectedStudentId, studentMeta], ([id, students]) => {
-  const index = students.findIndex((student) => student.local_id === id)
-  if (index >= 0) activeStudent.value = index
+watch([selectedStudentId, studentMeta], async ([id, students]) => {
+  const selected = resolveSelectedStudentId(id, students)
+  if (!id) {
+    if (selected) selectStudentId(selected)
+    return
+  }
+  if (students.some((student) => student.local_id === id)) return
+  const accounts = await window.kaida?.listAccounts().catch(() => null)
+  if (accounts && selectedStudentId.value === id && !accounts.some((account) => account.local_id === id)) {
+    selectStudentId(students[0]?.local_id || '')
+  }
 }, { immediate: true })
 
 watch(needsVerify, (v) => {
   if (v) showToast('请扫微信码，然后点绿色「验证完毕」')
 })
 
-watch(studentMeta, (rows) => {
-  if (activeStudent.value >= rows.length) activeStudent.value = Math.max(0, rows.length - 1)
+watch(() => [selectedStudentId.value, currentStudent.value.activeCourseKey || currentStudent.value.activeCourseName], ([studentId, activeCourse], [previousStudentId, previousCourse]) => {
+  if (activeCourse && (studentId === previousStudentId && activeCourse !== previousCourse || !previousStudentId)) {
+    coursePage.value = pageForCourse(allCourseRows.value, coursePageSize, activeCourse)
+  }
 })
-watch(() => [currentStudent.value.activeCourseName, allCourseRows.value.map((course) => course.name).join('\u0000')], ([activeCourse, courseNames]) => {
-  const nextKey = `${activeCourse}\u0001${courseNames}`
-  if (nextKey === lastCoursePageKey) return
-  lastCoursePageKey = nextKey
-  if (activeCourse) coursePage.value = pageForCourse(allCourseRows.value, coursePageSize, activeCourse)
-  else coursePage.value = Math.min(coursePage.value, coursePageCount.value)
+watch(coursePageCount, (count) => { coursePage.value = Math.min(coursePage.value, count) })
+watch(homeworkPageCount, (count) => { homeworkPage.value = Math.min(homeworkPage.value, count) })
+watch(currentCourseKey, () => {
+  homeworkPage.value = 1
+  historyRequest++
+  historyOpen.value = false
+  historyPaperImage.value = ''
+  logOpen.value = false
 })
-watch(() => currentStudent.value.local_id, () => {
-  selectedCourseName.value = ''
+watch(selectedStudentId, () => {
+  selectedCourseKey.value = ''
   coursePage.value = 1
+  homeworkPage.value = 1
+  qrRequest++
+  historyRequest++
   qrOpen.value = false
   qrSnapshot.value = null
-})
+  historyOpen.value = false
+  historyPaperImage.value = ''
+  logOpen.value = false
+}, { flush: 'sync' })
 onMounted(() => {
   document.addEventListener('click', onDocClick)
 })
@@ -235,19 +265,27 @@ async function loginRefresh() {
   showToast(result?.ok ? '本轮课程刷新已结束' : (result?.error || '登录并刷新课程失败'))
 }
 async function openQr() {
+  const id = currentId()
+  if (!id) return
+  const request = ++qrRequest
   qrOpen.value = true
   qrLoading.value = true
   qrError.value = ''
   qrSnapshot.value = null
-  const result = await window.kaida?.getQrSnapshot(currentId())
+  const result = await window.kaida?.getQrSnapshot(id)
+  if (request !== qrRequest || currentId() !== id) return
   qrLoading.value = false
   if (!result?.ok || !result.snapshot) qrError.value = result?.error || '二维码读取失败'
   else qrSnapshot.value = result.snapshot
 }
 async function refreshQr() {
+  const id = currentId()
+  if (!id) return
+  const request = ++qrRequest
   qrLoading.value = true
   qrError.value = ''
-  const result = await window.kaida?.refreshQrSnapshot(currentId())
+  const result = await window.kaida?.refreshQrSnapshot(id)
+  if (request !== qrRequest || currentId() !== id) return
   qrLoading.value = false
   if (!result?.ok || !result.snapshot) qrError.value = result?.error || '二维码刷新失败'
   else qrSnapshot.value = result.snapshot
@@ -258,7 +296,10 @@ async function copyQr() {
   showToast(result?.ok ? '二维码图片已复制' : (result?.error || '二维码复制失败'))
 }
 async function verifyDone() {
-  const result = await window.kaida?.verifyDone(currentId())
+  const id = currentId()
+  if (!id) return
+  const result = await window.kaida?.verifyDone(id)
+  if (currentId() !== id) return
   if (!result?.ok) {
     qrError.value = result?.error || '验证状态复核失败'
     showToast(qrError.value)
@@ -270,7 +311,9 @@ async function verifyDone() {
   showToast('验证状态已确认，自动化继续')
 }
 function selectStudent(i: number) {
-  activeStudent.value = i
+  const id = studentMeta.value[i]?.local_id
+  if (!id) return
+  selectStudentId(id)
   studentMoreOn.value = false
   showToast('已切换至学员：' + (studentMeta.value[i]?.name || ''))
 }
@@ -307,17 +350,21 @@ function pillDotClass(i: number) {
   if (s?.needsVerify || /排队/.test(s?.headline || '')) return 'w-1.5 h-1.5 rounded-full bg-[#F59E0B]'
   return 'w-1.5 h-1.5 rounded-full bg-slate-300'
 }
-async function selectCourse(name: string) {
-  selectedCourseName.value = name
+async function selectCourse(key: string) {
+  selectedCourseKey.value = key
+  const name = allCourseRows.value.find((course) => (course.key || course.name) === key)?.name || key
   if (courseScope.value !== 'selected' || !currentStudent.value.awaitingCourseSelection) {
     showToast('已切换课程：' + name)
     return
   }
-  const names = new Set(currentStudent.value.selectedCourseNames || [])
-  if (names.has(name)) names.delete(name)
-  else names.add(name)
-  const result = await window.kaida?.setSelectedCourses(currentId(), [...names])
-  if (result?.ok && Array.isArray(result.selectedNames)) selectedCourseName.value = result.selectedNames.includes(name) ? name : (result.selectedNames[0] || '')
+  const keys = new Set(currentStudent.value.selectedCourseKeys || currentStudent.value.selectedCourseNames || [])
+  if (keys.has(key)) keys.delete(key)
+  else keys.add(key)
+  const result = await window.kaida?.setSelectedCourses(currentId(), [...keys])
+  if (result?.ok) {
+    const selected = result.selectedKeys || result.selectedNames || []
+    selectedCourseKey.value = selected.includes(key) ? key : (selected[0] || '')
+  }
   showToast(result?.ok ? `本学生已选择 ${result.selected || 0} 门课程` : (result?.error || '课程选择失败'))
 }
 async function primaryAction() {
@@ -330,21 +377,30 @@ async function primaryAction() {
   loginRefresh()
 }
 async function openHistoryScores(homeworkName: string) {
+  const id = currentId()
+  const request = ++historyRequest
+  const courseKey = currentCourseKey.value
   historyOpen.value = true
   historyLoading.value = true
   historyError.value = ''
   historyHomework.value = homeworkName
+  historyCourseKey.value = courseKey
   historyRows.value = []
   historyPaperImage.value = ''
-  const result = await window.kaida?.getHomeworkHistory(currentId(), currentCourseName.value, homeworkName)
+  const result = await window.kaida?.getHomeworkHistory(id, courseKey, homeworkName)
+  if (request !== historyRequest || currentId() !== id) return
   historyLoading.value = false
   if (!result?.ok) historyError.value = result?.error || '历史成绩读取失败'
   else historyRows.value = result.items
 }
 async function openHistoryPaper(row: HistoryItem) {
+  const id = currentId()
+  const request = ++historyRequest
+  const courseKey = historyCourseKey.value
   historyLoading.value = true
   historyError.value = ''
-  const result = await window.kaida?.getHistoryPaperImage(currentId(), currentCourseName.value, historyHomework.value, row.submittedAt)
+  const result = await window.kaida?.getHistoryPaperImage(id, courseKey, historyHomework.value, row.submittedAt)
+  if (request !== historyRequest || currentId() !== id) return
   historyLoading.value = false
   if (!result?.ok || !result.image) historyError.value = result?.error || '历史答卷读取失败'
   else historyPaperImage.value = result.image
@@ -375,6 +431,7 @@ function statusLabel(status: string) {
     waiting_grade: '等待批阅', reviewing: '校对中', extracting: '提取中', extracting_done: '提取完成', pending_writeback: '待回写', done_100: '已满分',
     skip_weight0: '权重 0% 跳过', skip_non_objective: '非客观题跳过', skip_out_of_window: '不在时间窗',
     skip_attempts_exhausted: '次数用尽', skip_full_score: '已满分跳过', skip_no_history: '无历史链接跳过', submit_failed: '提交失败',
+    skip_bank_miss: '听力题库缺项',
     not_full_next_time: '下次继续', spin_stopped: '已停止空转', todo: '待作答', '检测中': '检测中',
   }
   return labels[status] || status
@@ -407,7 +464,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <div v-else class="text-center text-sm text-rose-600">{{ qrError || '暂无可用二维码' }}</div>
 </div>
 <div class="flex flex-col gap-3 text-xs">
-<div class="rounded-xl border border-slate-200 bg-slate-50 p-3"><span class="text-slate-400">学生</span><p class="mt-1 font-semibold text-slate-800">{{ currentStudent.name }} · {{ currentStudent.id }}</p></div>
+<div class="rounded-xl border border-slate-200 bg-slate-50 p-3"><span class="text-slate-400">学生</span><p class="mt-1 font-semibold text-slate-800">{{ currentStudent.name }} · {{ currentStudent.id }} <span v-if="currentStudent.verified" class="text-emerald-700" aria-label="已授权">已授权</span></p></div>
 <div class="rounded-xl border border-slate-200 bg-slate-50 p-3"><span class="text-slate-400">课程 / 作业</span><p class="mt-1 font-semibold text-slate-800">{{ qrSnapshot?.courseName || currentCourseName || '等待识别' }}</p><p class="mt-1 text-slate-600">{{ qrSnapshot?.homeworkName || '等待识别' }}</p></div>
 <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-700"><p class="font-semibold">{{ qrSnapshot?.status || '等待二维码' }}</p><p v-if="qrSnapshot" class="mt-1 font-mono text-[10px]">二维码 v{{ qrSnapshot.version }} · 程序 {{ qrSnapshot.appVersion }}</p></div>
 <p v-if="qrError && qrSnapshot" class="rounded-xl bg-rose-50 p-3 text-rose-600">{{ qrError }}</p>
@@ -500,15 +557,15 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 </div>
 </div>
 <div class="h-[360px] overflow-y-auto p-2 flex flex-col gap-1" id="course-list">
-<div v-for="course in courseRows" :key="course.name" class="course-item group relative flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all duration-200 hover:translate-x-0.5" :class="selectedCourseSet.has(course.name) ? 'bg-[#EEF2FF] border border-[#818CF8] shadow-sm' : course.name === currentCourseName ? 'bg-[#F8FAFC] border border-[#C7D2FE]' : 'border border-transparent hover:bg-[#F8FAFC] hover:border-slate-100'" @click="selectCourse(course.name)">
+<div v-for="course in courseRows" :key="course.key || course.name" class="course-item group relative flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all duration-200 hover:translate-x-0.5" :class="selectedCourseSet.has(course.key || course.name) ? 'bg-[#EEF2FF] border border-[#818CF8] shadow-sm' : (course.key || course.name) === currentCourseKey ? 'bg-[#F8FAFC] border border-[#C7D2FE]' : 'border border-transparent hover:bg-[#F8FAFC] hover:border-slate-100'" @click="selectCourse(course.key || course.name)">
 <div class="flex items-center gap-2.5 min-w-0 pr-2">
-<span v-if="courseScope === 'selected' && currentStudent.awaitingCourseSelection" class="material-symbols-outlined text-[17px]" :class="selectedCourseSet.has(course.name) ? 'text-[#4F46E5]' : 'text-slate-300'">{{ selectedCourseSet.has(course.name) ? 'check_box' : 'check_box_outline_blank' }}</span>
-<span v-else class="w-1.5 h-4 rounded-full" :class="course.name === currentCourseName ? 'bg-[#4F46E5]' : 'bg-slate-300 group-hover:bg-[#4F46E5]'" />
-<span class="text-[13px] truncate" :class="selectedCourseSet.has(course.name) || course.name === currentCourseName ? 'font-bold text-slate-900' : 'font-medium text-slate-700 group-hover:text-slate-900'">{{ course.name }}</span>
+<span v-if="courseScope === 'selected' && currentStudent.awaitingCourseSelection" class="material-symbols-outlined text-[17px]" :class="selectedCourseSet.has(course.key || course.name) ? 'text-[#4F46E5]' : 'text-slate-300'">{{ selectedCourseSet.has(course.key || course.name) ? 'check_box' : 'check_box_outline_blank' }}</span>
+<span v-else class="w-1.5 h-4 rounded-full" :class="(course.key || course.name) === currentCourseKey ? 'bg-[#4F46E5]' : 'bg-slate-300 group-hover:bg-[#4F46E5]'" />
+<span class="text-[13px] truncate" :class="selectedCourseSet.has(course.key || course.name) || (course.key || course.name) === currentCourseKey ? 'font-bold text-slate-900' : 'font-medium text-slate-700 group-hover:text-slate-900'">{{ course.name }}</span>
 </div>
 <div class="flex items-center gap-1.5 shrink-0">
 <span class="font-mono text-[10px] text-slate-400 whitespace-nowrap">库{{ course.bankCount || 0 }} · AI{{ course.aiCount || 0 }}</span>
-<span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap" :class="course.name === currentCourseName ? 'bg-[#4F46E5] text-white' : 'bg-slate-100 text-slate-500'">{{ statusLabel(course.status) }}</span>
+<span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap" :class="(course.key || course.name) === currentCourseKey ? 'bg-[#4F46E5] text-white' : 'bg-slate-100 text-slate-500'">{{ statusLabel(course.status) }}</span>
 </div>
 </div>
 </div>
@@ -519,7 +576,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 </div>
 <div class="p-3 border-t border-slate-100 bg-[#F8FAFC] flex items-center justify-between text-[11.5px] text-slate-500">
 <span class="font-medium">已处理 {{ completedCourses }}/{{ allCourseRows.length }} 门课程</span>
-<span class="text-[#4F46E5] font-medium">{{ courseScope === 'selected' ? `已选 ${currentStudent.selectedCourseNames?.length || 0} 门` : '按顺序执行' }}</span>
+<span class="text-[#4F46E5] font-medium">{{ courseScope === 'selected' ? `已选 ${(currentStudent.selectedCourseKeys || currentStudent.selectedCourseNames || []).length} 门` : '按顺序执行' }}</span>
 </div>
 </aside>
 <!-- CENTER COLUMN: 中央主工作区 (核心主角) -->
@@ -574,7 +631,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <!-- Body Sections -->
 <div class="p-6 flex flex-col gap-6 flex-1 justify-between">
 <div class="flex flex-col gap-5">
-<div v-for="group in currentGroups" :key="group.title" class="flex flex-col gap-2.5">
+<div v-for="group in visibleHomeworkGroups" :key="group.title" class="flex flex-col gap-2.5">
 <div class="flex items-center justify-between px-1">
 <span class="text-[11.5px] font-bold text-slate-400 uppercase tracking-wider">{{ group.title }}</span>
 <span class="text-[11px] text-slate-400 font-mono">{{ group.rows.length }} 项</span>
@@ -611,6 +668,11 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 </div>
 </div>
 <div v-if="!currentGroups.length" class="p-4 rounded-xl bg-[#F8FAFC] border border-slate-200 text-[13px] text-slate-400">等待课程检测结果</div>
+</div>
+<div v-if="homeworkPageCount > 1" class="flex items-center justify-center gap-2 border-t border-slate-100 pt-3">
+<button type="button" aria-label="上一页作业" :disabled="homeworkPage <= 1" @click="homeworkPage--"><span class="material-symbols-outlined text-[16px]">chevron_left</span></button>
+<span class="font-mono text-[10px]">{{ homeworkPage }}/{{ homeworkPageCount }}</span>
+<button type="button" aria-label="下一页作业" :disabled="homeworkPage >= homeworkPageCount" @click="homeworkPage++"><span class="material-symbols-outlined text-[16px]">chevron_right</span></button>
 </div>
 <!-- Center footer notes -->
 <div class="pt-4 border-t border-slate-100 flex items-center justify-between text-slate-500 text-[12px]">
@@ -696,7 +758,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 </div>
 <!-- Student details & Parallel badges -->
 <div class="flex flex-col gap-2 px-1 text-[12px]" id="student-meta">
-<div class="flex items-center justify-between"><span class="text-slate-400">学员姓名</span><span class="font-semibold text-slate-900" id="student-name">{{ currentStudent.name }}</span></div>
+<div class="flex items-center justify-between"><span class="text-slate-400">学员姓名</span><span class="flex items-center gap-1.5 font-semibold text-slate-900" id="student-name">{{ currentStudent.name }}<span v-if="currentStudent.verified" class="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700" aria-label="已授权">已授权</span></span></div>
 <div class="flex items-center justify-between"><span class="text-slate-400">学员学号</span><span class="font-mono text-slate-700 font-medium" id="student-id">{{ currentStudent.id }}</span></div>
 <div class="flex items-center justify-between"><span class="text-slate-400">登录账号</span><span class="font-mono text-slate-700 font-medium" id="student-account">{{ currentStudent.id }}</span></div>
 </div>

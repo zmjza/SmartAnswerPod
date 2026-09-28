@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { app } from 'electron'
 import { assertNoSecretKey, decryptFromFile, encryptToFile } from './secrets'
 import { normalizeRunLimit } from './core/attempts'
@@ -80,6 +81,7 @@ type Blob = {
   accounts: LocalAccount[]
   writeback: WritebackItem[]
   extract_writeback: ExtractWritebackItem[]
+  reference_hashes?: string[]
   bank_access?: BankAccessState
 }
 
@@ -192,6 +194,27 @@ export function saveExtractWriteback(items: ExtractWritebackItem[]) {
   const cur = load()
   const result = encryptToFile(filePath(), { ...cur, extract_writeback: items })
   if (!result.ok) throw new ExtractWritebackSaveError()
+}
+
+export function isReferenceHashProtected(hash: string): boolean {
+  if (!hash || !existsSync(filePath())) return false
+  const fallback = {} as Blob
+  const cur = decryptFromFile(filePath(), fallback)
+  if (cur === fallback || !cur.settings || !Array.isArray(cur.accounts) || !Array.isArray(cur.writeback) ||
+      (cur.reference_hashes !== undefined && !Array.isArray(cur.reference_hashes))) {
+    throw new Error('参考答案保护记录无法读取')
+  }
+  return (cur.reference_hashes || []).includes(hash)
+}
+
+export function protectReferenceHash(hash: string): boolean {
+  if (!hash) return false
+  try { isReferenceHashProtected(hash) } catch { return false }
+  const cur = load()
+  if (cur.reference_hashes?.includes(hash)) return true
+  const result = encryptToFile(filePath(), { ...cur, reference_hashes: [...(cur.reference_hashes || []), hash] })
+  if (!result.ok) return false
+  try { return isReferenceHashProtected(hash) } catch { return false }
 }
 
 export function profileDir(local_id: string) {

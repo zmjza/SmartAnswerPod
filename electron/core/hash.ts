@@ -37,6 +37,14 @@ export function normalizeStem(raw: string): string {
   return stripStemPrefix(collapseSpace(toHalfWidth(raw)))
 }
 
+export function englishSlotStem(shared: string, rawType: string | number, ordinal: number, child: string): string {
+  return `${normalizeStem(shared)}\n[父题型 ${rawType}][子题 ${ordinal}] ${normalizeStem(child)}`
+}
+
+export function englishMatchStem(shared: string, ordinal: number, leftItem: string): string {
+  return `${normalizeStem(shared)}\n[匹配槽 ${ordinal}] ${normalizeStem(leftItem)}`
+}
+
 export function normalizeOption(raw: string, qtype?: QType): string {
   let t = stripOptionPrefix(collapseSpace(toHalfWidth(raw)))
   if (qtype === 'judge' || /^(正确|错误|对|错)$/.test(t)) {

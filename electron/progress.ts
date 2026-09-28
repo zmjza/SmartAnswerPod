@@ -9,6 +9,7 @@ export type ProgressEvent = {
   courseIndex?: number
   courseTotal?: number
   courseName?: string
+  courseKey?: string
   homeworkName?: string
   homework?: HomeworkState
   questionNo?: number

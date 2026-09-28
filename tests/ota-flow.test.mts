@@ -72,8 +72,8 @@ test('发布配置同时生成 macOS 自动更新 ZIP 与 DMG', async () => {
 test('macOS Squirrel 安装更新后自动重新启动应用', async () => {
   const { readFile } = await import('node:fs/promises')
   const ota = await readFile(new URL('../electron/ota.ts', import.meta.url), 'utf8')
-  assert.match(ota, /autoUpdater\.autoRunAppAfterInstall\s*=\s*true/)
-  assert.match(ota, /autoUpdater\.autoInstallOnAppQuit\s*=\s*false/)
+  assert.match(ota, /updater\.autoRunAppAfterInstall\s*=\s*true/)
+  assert.match(ota, /updater\.autoInstallOnAppQuit\s*=\s*false/)
 })
 
 test('ad-hoc 更新使用跨版本稳定的应用要求', async () => {
@@ -89,7 +89,7 @@ test('ad-hoc 更新使用跨版本稳定的应用要求', async () => {
 test('下载进度事件只注册一次，避免重复广播', async () => {
   const { readFile } = await import('node:fs/promises')
   const ota = await readFile(new URL('../electron/ota.ts', import.meta.url), 'utf8')
-  assert.equal(ota.match(/autoUpdater\.on\('download-progress'/g)?.length, 1)
+  assert.equal(ota.match(/updater\.on\('download-progress'/g)?.length, 1)
 })
 
 test('发布配置使用 ad-hoc bundle 签名且发布门禁不依赖 Developer ID', async () => {

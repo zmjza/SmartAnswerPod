@@ -14,12 +14,18 @@ function dumpSubmit(ev: string, extra?: Record<string, unknown>) {
 
 export async function submitHomework(opts: {
   page: Page
+  verifiedComposite?: boolean
   local_id: string
   slot: SlotState
   account: AccountState
   homeworkName: string
 }): Promise<{ ok: boolean; incomplete?: boolean }> {
   const { page, local_id, slot, account, homeworkName } = opts
+  const hasComposite = await page.locator('.e-q-body[data-questiontype="7"], .e-q-body[data-questiontype="8"], .e-q-body[data-questiontype="9"], .e-q-body[data-questiontype="11"]').count() > 0
+  if (hasComposite && !opts.verifiedComposite) {
+    emitProgress({ local_id, slot, account, action: '英语复合题未逐项复核，禁止提交', homeworkName, homework: 'submit_failed', bankCount: 0, aiCount: 0 })
+    return { ok: false, incomplete: true }
+  }
   emitProgress({
     local_id, slot, account, action: '点击提交作业', homeworkName, homework: 'submitting',
     bankCount: 0, aiCount: 0, click: '#submitHomeWork',

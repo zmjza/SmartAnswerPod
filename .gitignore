@@ -1,1 +1,12 @@
 .DS_Store
+node_modules/
+dist/
+dist-electron/
+release/
+.env
+.env.*
+*.log
+.playwright/
+playwright-report/
+coverage/
+pw-profiles/

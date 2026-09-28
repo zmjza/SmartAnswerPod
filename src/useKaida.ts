@@ -7,6 +7,10 @@ export function selectStudentId(localId: string) {
   selectedStudentId.value = localId
 }
 
+export function resolveSelectedStudentId(currentId: string, students: { local_id: string }[]): string {
+  return currentId || students[0]?.local_id || ''
+}
+
 export type LiveStudent = {
   local_id: string
   name: string
@@ -18,6 +22,7 @@ export type LiveStudent = {
   workMode: 'answer' | 'extract'
   courseScope: 'all' | 'selected'
   selectedCourseNames: string[]
+  selectedCourseKeys?: string[]
   awaitingCourseSelection: boolean
   answerRoundLimit: number
   slot: 'queued' | 'launching' | 'occupied' | 'occupying_verify' | 'released'
@@ -36,13 +41,15 @@ export type LiveStudent = {
   extractHistoryCompleted: number
   extractCurrentHistory: string
   needsVerify: boolean
+  verified: boolean
   configLocked: boolean
   queued: boolean
   logs: string[]
-  courseLogs: { time: string; level: 'info' | 'running' | 'success' | 'warning' | 'error'; courseName: string; homeworkName: string; action: string; result: string; reason: string }[]
-  courses: { name: string; status: string; bankCount?: number; aiCount?: number; groups?: LiveHomeworkGroup[] }[]
+  courseLogs: { time: string; level: 'info' | 'running' | 'success' | 'warning' | 'error'; courseName: string; courseKey?: string; homeworkName: string; action: string; result: string; reason: string }[]
+  courses: { name: string; key?: string; status: string; bankCount?: number; aiCount?: number; groups?: LiveHomeworkGroup[] }[]
   groups: LiveHomeworkGroup[]
   activeCourseName?: string
+  activeCourseKey?: string
 }
 
 export type LiveSnap = {

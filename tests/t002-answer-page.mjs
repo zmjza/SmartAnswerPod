@@ -45,7 +45,7 @@ const built = await build({ entryPoints: ['electron/answer.ts'], bundle: true, p
     plugin.onLoad({ filter: /.*/, namespace: 'local-external' }, args => ({
       contents: args.path === './bank'
         ? "export const lookupByHash=async()=>{const f=globalThis.__answerState; f.bankCalls++; return f.bankCalls===2 ? null : {answer_texts:f.bankCalls===1 ? ['甲'] : ['丙','丁']}}"
-        : "export const askAi=async()=>{globalThis.__answerState.aiCalls++; return {texts:['正确'],model:'local',failed:false,attempts:[]}}; export const retryAsked=()=>{}",
+        : "export const askAi=async()=>{globalThis.__answerState.aiCalls++; return {texts:['正确'],model:'local',failed:false,attempts:[]}}; export const askAiGroup=async()=>({selected:null,attempts:[]}); export const retryAsked=()=>{}",
       loader: 'js',
     }))
   },

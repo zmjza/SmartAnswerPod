@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>开大自动答题桌面端 - 学生账号管理</title>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              DEFAULT: "#4F46E5",
+              hover: "#4338CA",
+              light: "#EEF2FF",
+              subtle: "#E0E7FF"
+            },
+            surface: "#FFFFFF",
+            background: "#F8FAFC",
+            "surface-container-low": "#F1F5F9",
+            "surface-container": "#E2E8F0",
+            "on-surface": "#0F172A",
+            "on-surface-variant": "#64748B"
+          },
+          fontFamily: {
+            sans: ["Geist", "-apple-system", "BlinkMacSystemFont", "PingFang SC", "Segoe UI", "Roboto", "sans-serif"],
+            mono: ["JetBrains Mono", "monospace"]
+          }
+        }
+      }
+    }
+  </script>
+<style>
+    @layer base {
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow-x: hidden;
+      }
+    }
+    ::-webkit-scrollbar {
+      display: none;
+    }
+
+    /* Keyframes for entrance & micro-interactions */
+    @keyframes fadeInDown {
+      from {
+        opacity: 0;
+        transform: translateY(-8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(12px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes pulseDot {
+      0%, 100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+      50% {
+        opacity: 0.35;
+        transform: scale(0.8);
+      }
+    }
+
+    @keyframes progressGrow {
+      from {
+        width: 0%;
+      }
+    }
+
+    .anim-fade-down {
+      animation: fadeInDown 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+
+    .anim-fade-up {
+      animation: fadeInUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+
+    .anim-delay-1 { animation-delay: 0.08s; }
+    .anim-delay-2 { animation-delay: 0.16s; }
+    .anim-delay-3 { animation-delay: 0.24s; }
+    .anim-delay-4 { animation-delay: 0.32s; }
+    .anim-delay-5 { animation-delay: 0.4s; }
+
+    .pulse-indicator {
+      animation: pulseDot 2s ease-in-out infinite;
+    }
+
+    .pulse-indicator-fast {
+      animation: pulseDot 1.4s ease-in-out infinite;
+    }
+
+    .progress-bar-fill {
+      animation: progressGrow 0.85s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+    }
+
+    /* Accessibility respect */
+    @media (prefers-reduced-motion: reduce) {
+      *, ::before, ::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-[#F8FAFC] text-[#0F172A] font-sans antialiased selection:bg-[#4F46E5] selection:text-white min-h-screen flex flex-col justify-between">
+<!-- 1. 全局顶部 Header (fadeInDown 动效) -->
+<header class="fixed top-0 left-0 right-0 z-50 h-12 bg-white border-b border-slate-200/80 px-6 flex items-center justify-between shadow-[0_1px_3px_rgba(0,0,0,0.02)] anim-fade-down">
+<!-- 左侧品牌与指标卡 -->
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-2.5 group cursor-pointer">
+<span class="w-2.5 h-2.5 rounded-full bg-[#4F46E5] transition-transform duration-200 group-hover:scale-125"></span>
+<span class="text-sm font-semibold tracking-tight text-slate-900 select-none group-hover:text-[#4F46E5] transition-colors duration-150">开大自动答题桌面端</span>
+</div>
+<!-- 系统指标胶囊 -->
+<div class="hidden xl:flex items-center gap-2 px-3 py-1 rounded-full bg-slate-100 border border-slate-200 text-[11px] font-mono text-slate-600 select-none hover:border-slate-300 transition-colors">
+<span class="hover:text-slate-900 transition-colors">CPU 18%</span>
+<span class="text-slate-300">·</span>
+<span class="hover:text-slate-900 transition-colors">内存 42%</span>
+<span class="text-slate-300">·</span>
+<span class="hover:text-slate-900 transition-colors">本软件 180MB</span>
+<span class="text-slate-300">·</span>
+<span class="hover:text-slate-900 transition-colors">浏览器 1</span>
+<span class="text-slate-300">·</span>
+<span class="flex items-center gap-1.5 text-slate-800 font-medium font-sans">
+<span class="w-1.5 h-1.5 rounded-full bg-[#10B981] pulse-indicator"></span>
+          压力正常
+        </span>
+</div>
+</div>
+<!-- 右侧全局导航胶囊栏 & 用户头像 -->
+<div class="flex items-center gap-4">
+<nav class="flex items-center gap-1 p-1 rounded-full bg-slate-100 border border-slate-200/80">
+<a class="px-3.5 py-1 rounded-full text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-white active:scale-95 transition-all duration-150" href="#">工作台</a>
+<a class="px-3.5 py-1 rounded-full text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-white active:scale-95 transition-all duration-150" href="#">题库</a>
+<!-- 当前激活：学生账号 -->
+<a aria-current="page" class="px-3.5 py-1 rounded-full text-xs font-semibold bg-[#4F46E5] text-white shadow-sm active:scale-95 transition-all duration-150" href="#">学生账号</a>
+<a class="px-3.5 py-1 rounded-full text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-white active:scale-95 transition-all duration-150" href="#">设置</a>
+</nav>
+<div class="h-4 w-px bg-slate-200"></div>
+<button class="w-7 h-7 rounded-full bg-[#4F46E5] flex items-center justify-center text-white hover:bg-[#4338CA] hover:scale-105 active:scale-95 transition-all shadow-sm" title="当前操作员" type="button">
+<span class="material-symbols-outlined text-[16px]">person</span>
+</button>
+</div>
+</header>
+<!-- 页面主体容器 (无任何渐变纯色系统 #F8FAFC) -->
+<main class="w-full pt-12 flex-1 flex flex-col justify-between bg-[#F8FAFC]">
+<div class="w-full max-w-[1440px] mx-auto px-8 py-6 flex flex-col gap-6">
+<!-- 顶部标题与操作区 (anim-fade-up) -->
+<div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pt-1 anim-fade-up">
+<div class="flex items-center gap-3">
+<div class="flex items-center gap-2.5">
+<span class="w-2.5 h-2.5 rounded-full bg-[#4F46E5] ring-4 ring-[#EEF2FF] animate-pulse"></span>
+<h1 class="text-xl font-bold tracking-tight text-slate-900">学生账号管理</h1>
+</div>
+<div class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-white border border-slate-200 text-xs font-mono text-slate-600 shadow-sm hover:border-indigo-200 transition-colors">
+<span class="w-1.5 h-1.5 rounded-full bg-[#4F46E5]"></span>
+<span class="">已注册 2 名学员</span>
+</div>
+</div>
+<!-- 搜索输入框交互强化 -->
+<div class="flex flex-1 max-w-md mx-0 lg:mx-4 relative items-center group">
+<span class="material-symbols-outlined absolute left-3.5 text-[18px] text-slate-400 group-hover:text-slate-600 group-focus-within:text-[#4F46E5] transition-colors duration-200">search</span>
+<input class="w-full pl-10 pr-9 py-1.5 rounded-full bg-white text-slate-900 placeholder:text-slate-400 text-xs border border-slate-200 shadow-sm focus:outline-none focus:border-[#4F46E5] focus:ring-2 focus:ring-[#EEF2FF] transition-all duration-200" placeholder="搜索姓名、学号 (如 0000****0001)、专业分校..." type="text"/>
+<button class="absolute right-3 text-slate-300 hover:text-slate-600 hover:rotate-90 active:scale-90 transition-all duration-200 flex items-center justify-center" title="清空搜索" type="button">
+<span class="material-symbols-outlined text-[15px]">close</span>
+</button>
+</div>
+<!-- 头部快捷操作按钮 -->
+<div class="flex items-center gap-2.5 shrink-0">
+<button class="group flex items-center gap-2 px-4 py-2 rounded-full bg-white border border-slate-200 hover:border-indigo-300 text-slate-700 shadow-sm hover:bg-slate-50 hover:-translate-y-0.5 active:scale-95 transition-all duration-200 text-xs font-medium" type="button">
+<span class="material-symbols-outlined text-[17px] text-[#4F46E5] transition-transform duration-200 group-hover:-translate-y-0.5">upload_file</span>
+<span class="">导入 Excel 批量名单</span>
+</button>
+<button class="group flex items-center gap-2 px-4 py-2 rounded-full bg-[#4F46E5] text-white hover:bg-[#4338CA] shadow-sm hover:shadow-md hover:-translate-y-0.5 active:scale-95 transition-all duration-200 text-xs font-medium" type="button">
+<span class="material-symbols-outlined text-[17px] text-white transition-transform duration-300 group-hover:rotate-90">add</span>
+<span class="">+ 新增学员</span>
+</button>
+</div>
+</div>
+<!-- 搜索栏与筛选胶囊群 (anim-fade-up anim-delay-1) -->
+<div class="w-full flex items-center justify-between gap-3 p-1.5 bg-white rounded-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.02)] anim-fade-up anim-delay-1">
+<div class="flex items-center gap-1.5 overflow-x-auto">
+<button class="px-3.5 py-1.5 rounded-lg bg-[#4F46E5] text-white text-xs font-medium shadow-sm whitespace-nowrap active:scale-95 transition-all duration-150" type="button">全部学员 (2)</button>
+<button class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-[#EEF2FF] hover:text-[#4F46E5] text-slate-600 text-xs font-medium whitespace-nowrap active:scale-95 transition-all duration-150" type="button">当前绑定执行中 (1)</button>
+<button class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-[#EEF2FF] hover:text-[#4F46E5] text-slate-600 text-xs font-medium whitespace-nowrap active:scale-95 transition-all duration-150" type="button">排队就绪待命 (1)</button>
+</div>
+<span class="text-[11px] text-slate-400 pr-2 hidden sm:inline-flex items-center gap-1.5 font-mono select-none">
+<span class="w-1.5 h-1.5 rounded-full bg-[#10B981] pulse-indicator"></span> 自动任务队列运转正常
+</span>
+</div>
+<!-- 主内容三列卡片网格 -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+<!-- 卡片 1：张同学（占用中 / 当前激活）(anim-fade-up anim-delay-2) -->
+<div class="group relative flex flex-col justify-between p-6 rounded-2xl bg-white border border-slate-200 shadow-[0_2px_8px_rgba(0,0,0,0.04)] hover:shadow-lg hover:border-indigo-200 hover:-translate-y-1 transition-all duration-200 anim-fade-up anim-delay-2">
+<div class="flex flex-col gap-4">
+<div class="flex items-start justify-between">
+<div class="flex items-center gap-3">
+<div class="w-11 h-11 rounded-full bg-[#4F46E5] text-white flex items-center justify-center text-base font-semibold shadow-sm transition-transform duration-200 group-hover:scale-105">张</div>
+<div class="flex flex-col">
+<div class="flex items-center gap-2">
+<span class="text-sm font-bold text-slate-900">张同学</span>
+<span class="px-2 py-0.5 rounded-full bg-[#EEF2FF] text-[#4F46E5] font-mono text-[10px] font-semibold tracking-wide">当前激活 / 占用中</span>
+</div>
+<span class="font-mono text-xs text-slate-400 tracking-wider">0000****0001</span>
+</div>
+</div>
+<!-- 在线呼吸脉冲指示器 -->
+<div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-100 text-[#10B981] text-xs font-medium">
+<span class="w-1.5 h-1.5 rounded-full bg-[#10B981] pulse-indicator-fast"></span>
+<span class="">在线 · 会话有效</span>
+</div>
+</div>
+<!-- 元信息模块，悬停时底色微调增强层次感 -->
+<div class="p-3.5 rounded-xl bg-slate-50 border border-slate-100 flex flex-col gap-2 text-xs transition-colors duration-150 group-hover:bg-slate-50/90 group-hover:border-slate-200/80">
+<div class="flex items-center justify-between text-slate-500">
+<span class="">专业校区</span>
+<span class="text-slate-900 font-medium">行政管理 · 市区分校</span>
+</div>
+<div class="flex items-center justify-between text-slate-500">
+<span class="">绑定题库</span>
+<span class="text-slate-900 font-medium">社区管理实践等 3 门</span>
+</div>
+<div class="flex items-center justify-between text-slate-500">
+<span class="">上次答题</span>
+<span class="text-slate-900 font-mono">10分钟前 · 得分 98</span>
+</div>
+</div>
+<!-- 动效进度条 (学期进度 80%) -->
+<div class="flex flex-col gap-1.5">
+<div class="flex justify-between font-mono text-xs text-slate-500">
+<span class="">8/10 门完结 (80%)</span>
+<span class="text-[#4F46E5] font-semibold">80%</span>
+</div>
+<div class="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+<div class="h-full bg-[#4F46E5] rounded-full progress-bar-fill" style="width: 80%"></div>
+</div>
+</div>
+</div>
+<div class="pt-4 mt-3 border-t border-slate-100 flex flex-col gap-2">
+<div class="flex items-center justify-between">
+<button class="flex items-center gap-1 text-slate-600 hover:text-[#4F46E5] text-xs font-medium active:scale-95 transition-all duration-150" type="button">
+<span class="material-symbols-outlined text-[16px]">edit_note</span>
+<span class="">编辑配置</span>
+</button>
+<div class="flex items-center gap-2">
+<button class="flex items-center gap-1 px-3 py-1 rounded-full bg-slate-100 text-slate-400 hover:text-red-600 hover:bg-red-50 hover:border-red-200 text-xs font-medium active:scale-95 transition-all duration-150 group/del" title="占用中删除需先停止并释放名额" type="button">
+<span class="material-symbols-outlined text-[15px] group-hover/del:scale-110 transition-transform">delete</span>
+<span class="">删除</span>
+</button>
+</div>
+</div>
+<span class="text-[10px] text-slate-400 flex items-center gap-1 select-none">
+<span class="material-symbols-outlined text-[12px] text-amber-500">info</span> 提示：占用中删除需先停止并释放名额
+</span>
+</div>
+</div>
+<!-- 卡片 2：李同学（排队中 / 就绪·待切换）(anim-fade-up anim-delay-3) -->
+<div class="group relative flex flex-col justify-between p-6 rounded-2xl bg-white border border-slate-200 shadow-[0_2px_8px_rgba(0,0,0,0.04)] hover:shadow-lg hover:border-indigo-200 hover:-translate-y-1 transition-all duration-200 anim-fade-up anim-delay-3">
+<div class="flex flex-col gap-4">
+<div class="flex items-start justify-between">
+<div class="flex items-center gap-3">
+<div class="w-11 h-11 rounded-full bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center text-base font-semibold shadow-sm transition-transform duration-200 group-hover:scale-105">李</div>
+<div class="flex flex-col">
+<div class="flex items-center gap-2">
+<span class="text-sm font-bold text-slate-900">李同学</span>
+<span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 font-mono text-[10px] tracking-wide">排队中等待浏览器名额</span>
+</div>
+<span class="font-mono text-xs text-slate-400 tracking-wider">0000****0002</span>
+</div>
+</div>
+<div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 border border-slate-200 text-slate-600 text-xs font-medium">
+<span class="w-1.5 h-1.5 rounded-full bg-amber-400 pulse-indicator"></span>
+<span class="">就绪 · 待切换</span>
+</div>
+</div>
+<div class="p-3.5 rounded-xl bg-slate-50 border border-slate-100 flex flex-col gap-2 text-xs transition-colors duration-150 group-hover:bg-slate-50/90 group-hover:border-slate-200/80">
+<div class="flex items-center justify-between text-slate-500">
+<span class="">专业校区</span>
+<span class="text-slate-900 font-medium">工商企业管理 · 区级分校</span>
+</div>
+<div class="flex items-center justify-between text-slate-500">
+<span class="">绑定题库</span>
+<span class="text-slate-900 font-medium">基础会计学等 4 门</span>
+</div>
+<div class="flex items-center justify-between text-slate-500">
+<span class="">上次答题</span>
+<span class="text-slate-900 font-mono">昨日 16:40 · 得分 92</span>
+</div>
+</div>
+<!-- 动效进度条 (学期进度 33%) -->
+<div class="flex flex-col gap-1.5">
+<div class="flex justify-between font-mono text-xs text-slate-500">
+<span class="">4/12 门完结 (33%)</span>
+<span class="text-slate-700 font-semibold">33%</span>
+</div>
+<div class="w-full h-1.5 rounded-full bg-slate-100 overflow-hidden">
+<div class="h-full bg-indigo-300 rounded-full progress-bar-fill" style="width: 33%"></div>
+</div>
+</div>
+</div>
+<div class="pt-4 mt-3 border-t border-slate-100 flex items-center justify-between">
+<button class="flex items-center gap-1 text-slate-600 hover:text-[#4F46E5] text-xs font-medium active:scale-95 transition-all duration-150" type="button">
+<span class="material-symbols-outlined text-[16px]">edit_note</span>
+<span class="">编辑配置</span>
+</button>
+<div class="flex items-center gap-2">
+<button class="px-3.5 py-1 rounded-full bg-[#4F46E5] text-white hover:bg-[#4338CA] hover:shadow hover:-translate-y-0.5 active:scale-95 text-xs font-medium transition-all duration-150 shadow-sm" type="button">切换当前</button>
+<button class="w-7 h-7 rounded-full flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 active:scale-90 transition-all duration-150" title="删除账号" type="button">
+<span class="material-symbols-outlined text-[16px]">delete</span>
+</button>
+</div>
+</div>
+</div>
+<!-- 卡片 3：手工添加模块 & Excel 导入区 (anim-fade-up anim-delay-4) -->
+<div class="relative flex flex-col justify-between p-5 rounded-2xl bg-white border border-slate-200 shadow-[0_2px_8px_rgba(0,0,0,0.03)] hover:shadow-lg hover:border-slate-300 transition-all duration-200 anim-fade-up anim-delay-4">
+<div class="flex flex-col gap-2.5">
+<div class="flex items-center justify-between pb-1.5 border-b border-slate-100">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-[17px] text-[#4F46E5]">person_add</span>
+<span class="text-xs font-bold text-slate-900">手工录入学员</span>
+</div>
+<span class="text-[10px] text-slate-400 font-mono">MANUAL INPUT</span>
+</div>
+<div class="grid grid-cols-3 gap-2">
+<div class="flex flex-col gap-1">
+<label class="text-[11px] font-medium text-slate-600">姓名</label>
+<input class="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#EEF2FF] focus:border-[#4F46E5] focus:bg-white transition-all duration-200" placeholder="如 张明" type="text"/>
+</div>
+<div class="flex flex-col gap-1">
+<label class="text-[11px] font-medium text-slate-600">学号 / 账号</label>
+<input class="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-[#EEF2FF] focus:border-[#4F46E5] focus:bg-white transition-all duration-200" placeholder="如 20240101" type="text"/>
+</div>
+<div class="flex flex-col gap-1">
+<label class="text-[11px] font-medium text-slate-600">登录密码</label>
+<input class="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#EEF2FF] focus:border-[#4F46E5] focus:bg-white transition-all duration-200" placeholder="••••••••" type="password"/>
+</div>
+</div>
+<div class="flex items-center justify-between pt-0.5">
+<div class="flex items-center gap-1.5 text-[11px] text-emerald-600">
+<span class="material-symbols-outlined text-[14px]">check_circle</span>
+<span class="">信息校验合格，可直接保存</span>
+</div>
+<button class="px-3.5 py-1 rounded-lg bg-[#4F46E5] text-white hover:bg-[#4338CA] hover:shadow hover:-translate-y-0.5 active:scale-95 text-xs font-medium transition-all duration-150 shadow-sm" type="button">保存并添加</button>
+</div>
+</div>
+<div class="mt-3 pt-3 border-t border-slate-100 flex flex-col gap-2">
+<!-- Excel 拖拽区交互提升 -->
+<div class="border-2 border-dashed border-indigo-200 hover:border-[#4F46E5] hover:bg-[#EEF2FF]/40 rounded-xl p-3 flex flex-col items-center justify-center text-center bg-slate-50/50 transition-all duration-200 cursor-pointer group active:scale-[0.99]">
+<div class="flex items-center gap-2 mb-1">
+<span class="material-symbols-outlined text-[20px] text-[#4F46E5] group-hover:scale-110 group-hover:-translate-y-0.5 transition-transform duration-200">cloud_upload</span>
+<span class="text-xs font-semibold text-slate-800 group-hover:text-[#4F46E5] transition-colors">批量导入 Excel / CSV</span>
+</div>
+<p class="text-[11px] text-slate-500 leading-snug">拖拽包含【姓名、学号、密码】三列标准 .xlsx / .csv 文件至此</p>
+</div>
+<div class="flex items-start gap-1.5 p-2 rounded-lg bg-slate-50 border border-slate-200 text-[10px] text-slate-500 leading-normal">
+<span class="material-symbols-outlined text-[13px] text-amber-500 shrink-0 mt-0.5">warning</span>
+<span class="">导入规范：跳过表头，缺列或空文件提示格式错误。</span>
+</div>
+</div>
+</div>
+</div>
+<!-- 底部三张纯色系统特性说明卡片 (纯紫、纯蓝、纯青) (anim-fade-up anim-delay-5) -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1 anim-fade-up anim-delay-5">
+<div class="p-4 rounded-xl bg-white border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.02)] flex items-start gap-3 hover:-translate-y-1 hover:border-indigo-200 hover:shadow-md transition-all duration-200 cursor-default">
+<div class="w-8 h-8 rounded-lg bg-[#EEF2FF] border border-indigo-100 flex items-center justify-center shrink-0 text-[#4F46E5] transition-transform duration-200 group-hover:scale-105">
+<span class="material-symbols-outlined text-[18px]">lock</span>
+</div>
+<div class="flex flex-col">
+<span class="text-xs font-semibold text-slate-900">本地沙箱隔离</span>
+<p class="text-[11px] text-slate-500 mt-0.5 leading-relaxed">密码仅存本地沙箱环境并采用对称加密存储，绝不上报云端。</p>
+</div>
+</div>
+<div class="p-4 rounded-xl bg-white border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.02)] flex items-start gap-3 hover:-translate-y-1 hover:border-blue-200 hover:shadow-md transition-all duration-200 cursor-default">
+<div class="w-8 h-8 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center shrink-0 text-[#2563EB] transition-transform duration-200 group-hover:scale-105">
+<span class="material-symbols-outlined text-[18px]">sync_saved_locally</span>
+</div>
+<div class="flex flex-col">
+<span class="text-xs font-semibold text-slate-900">Token 智能续期</span>
+<p class="text-[11px] text-slate-500 mt-0.5 leading-relaxed">后台静默维持鉴权状态，检测过期自动唤起模拟心跳完成自动补全。</p>
+</div>
+</div>
+<div class="p-4 rounded-xl bg-white border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.02)] flex items-start gap-3 hover:-translate-y-1 hover:border-emerald-200 hover:shadow-md transition-all duration-200 cursor-default">
+<div class="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 text-[#10B981] transition-transform duration-200 group-hover:scale-105">
+<span class="material-symbols-outlined text-[18px]">swap_calls</span>
+</div>
+<div class="flex flex-col">
+<span class="text-xs font-semibold text-slate-900">防风控轮换</span>
+<p class="text-[11px] text-slate-500 mt-0.5 leading-relaxed">单生答毕 30-180s 随机伪装防风控，按次序自动轮转并释放浏览器名额。</p>
+</div>
+</div>
+</div>
+</div>
+<!-- 底部状态行规范 -->
+<footer class="w-full border-t border-slate-200/80 bg-white py-3 mt-4">
+<div class="w-full max-w-[1440px] mx-auto px-8 flex flex-col sm:flex-row items-center justify-between text-[11px] font-mono text-slate-500 gap-2">
+<div class="flex items-center gap-2">
+<span class="hover:text-slate-700 transition-colors">DESKTOP RUNTIME v2.4.0</span>
+<span class="text-slate-300">/</span>
+<span class="hover:text-slate-700 transition-colors">STUDENT PROFILE STORAGE: ENCRYPTED</span>
+</div>
+<div class="flex items-center gap-4">
+<span class="flex items-center gap-1.5">
+<span class="w-1.5 h-1.5 rounded-full bg-[#10B981] pulse-indicator"></span>
+<span class="hover:text-slate-700 transition-colors">MULTI-INSTANCE READY</span>
+</span>
+<span class="text-slate-300">/</span>
+<span class="hover:text-slate-700 transition-colors">LAST AUDIT: TODAY 08:30:12</span>
+</div>
+</div>
+</footer>
+</main>
+</body></html>

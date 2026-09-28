@@ -202,6 +202,11 @@ test('可选课程只生成选中课程队列，全部模式保留全部课程',
   assert.deepEqual(selectCoursesForRun(courses, 'selected', []), [])
 })
 
+test('同名不同课程 ID 只执行选中的课程', () => {
+  const courses = [{ key: 'course:1:', name: '形势与政策' }, { key: 'course:2:', name: '形势与政策' }]
+  assert.deepEqual(selectCoursesForRun(courses, 'selected', ['course:2:']), [courses[1]])
+})
+
 test('可选课程必须等全部目标学生扫描完成，并且至少选中一门才可开始', () => {
   assert.equal(selectedRunReadiness([
     { awaiting: true, selectedCount: 1 },
@@ -334,6 +339,7 @@ test('本次得分保留零分和小数，未批阅不冒充零分，新轮不�
   assert.equal(homeworkScoreLabel({ attempt: 1, score: 0, status: 'reviewing' }), '第 1 次 · 本次得分：0 分')
   assert.equal(homeworkScoreLabel({ attempt: 2, score: null, status: 'waiting_grade' }), '第 2 次 · 本次得分：等待批阅')
   assert.equal(homeworkScoreLabel({ attempt: 2, score: null, status: 'answering' }), '第 2 次 · 本次得分：尚未出分')
+  assert.equal(homeworkScoreLabel({ attempt: 1, score: null, status: 'skip_bank_miss' }), '本次得分：尚未作答')
 })
 
 test('错题删除必须确认旧答案消失，不能把 HTTP 成功当删除成功', async () => {
@@ -351,9 +357,11 @@ test('全部作业收尾才算课程完成，逐题快照不重复计数', () =>
   assert.equal(courseOutcome(['done_100', 'todo']), '尚未完成')
   assert.equal(courseOutcome(['done_100', 'pending_writeback']), '待回写')
   assert.equal(courseOutcome(['done_100', 'submit_failed']), '有失败待处理')
+  assert.equal(courseOutcome(['done_100', 'skip_bank_miss']), '有失败待处理')
   assert.equal(courseOutcome(['done_100', 'skip_full_score']), '本轮可做作业已完成')
   assert.equal(courseOutcome(['done_100', 'skip_attempts_exhausted']), '暂不可完成')
   assert.equal(courseOutcome(['skip_out_of_window']), '暂不可完成')
+  assert.equal(isKnownHomework('skip_bank_miss'), true)
   const row = upsertHomework([], 'onlineHomework', '测试作业', 'answering')[0].rows[0]
   recordQuestion(row, { no: 1, stem: '测试题', source: 'AI' }, 10)
   assert.equal(row.questions.length, 1)

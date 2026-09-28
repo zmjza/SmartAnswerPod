@@ -36,7 +36,7 @@ const built = await build({
   plugins: [{ name: "local-settings", setup(plugin) {
     plugin.onResolve({ filter: /store$/ }, args => ({ path: args.path, namespace: "local-store" }))
     plugin.onLoad({ filter: /.*/, namespace: "local-store" }, () => ({
-      contents: "export const getSettings = () => ({ supabase_url: globalThis.__reviewUrl, supabase_anon: 'fake' }); export const getWriteback = () => []", loader: "js",
+      contents: "export const getSettings = () => ({ supabase_url: globalThis.__reviewUrl, supabase_anon: 'fake' }); export const getWriteback = () => []; export const protectReferenceHash = () => true; export const isReferenceHashProtected = () => false", loader: "js",
     }))
   } }],
 })
@@ -44,7 +44,7 @@ const review = await import("data:text/javascript;base64," + Buffer.from(built.o
 const browser = await chromium.launch({ headless: true })
 const page = await browser.newPage()
 try {
-  const question = (no, stem, result, answer) => `
+  const question = (no, stem, result) => `
     <div class="e-q-body" data-questiontype="1"><div class="e-q">
       <div class="e-q-q">${stem}</div>
       <div class="e-q-l"><span class="e-q-${result}"></span></div>
@@ -52,11 +52,8 @@ try {
       <div class="e-a-g e-choice-a"><ul>
         <li class="e-a checked">A) 甲</li><li class="e-a">B) 乙</li>
       </ul></div>
-      <div class="e-a-ans"><div class="e-ans-ref"><div class="e-a-g">
-        <p class="checked">${answer}</p>
-      </div></div></div>
     </div></div>`
-  await page.setContent(question(1, "正确的第一题", "right", "甲") + question(2, "答错的第二题", "wrong", "乙"))
+  await page.setContent(question(1, "正确的第一题", "right") + question(2, "答错的第二题", "wrong"))
   const observed = await review.readReviewedQuestions(page)
   assert.equal(observed.length, 2)
   assert.deepEqual(observed.map(item => item.correct), [true, false])

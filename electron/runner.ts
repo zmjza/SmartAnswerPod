@@ -2,7 +2,7 @@ import type { BrowserContext, Page } from 'patchright'
 import { app, Notification } from 'electron'
 import { loginIam } from './login'
 import { detectCourse, listCourses, readHistory, type DetectedCourse, type DetectedHomework } from './detect'
-import { answerPage, type QResult } from './answer'
+import { answerPage, ListeningBankMissError, type QResult } from './answer'
 import { historyHasNew, submitHomework } from './submit'
 import { acquire, averageBrowserMemoryBytes, browserMemoryStatus, browserWindowVisible, getContext, isHeld, markOccupied, markVerify, release, slots, toolbarBrowserCount } from './pool'
 import { ExtractWritebackSaveError, getExtractWriteback, getSettings, getWriteback, listAccounts, patchAccount, saveExtractWriteback, saveWriteback, type ExtractWritebackItem, type LocalAccount } from './store'
@@ -14,7 +14,7 @@ import { resetAsked } from './ai'
 import os from 'node:os'
 import { pressureOf, formatMb, recommendConcurrency } from './core/machine'
 import { canClickDoHomework } from '../src/verify-gate'
-import { extractReviewedQuestions, reviewResults, type ReviewOutcome } from './review.ts'
+import { contradictoryReferenceHashes, extractReviewedQuestions, readReviewedQuestions, reviewResults, type ReviewedQuestion, type ReviewOutcome, type ReferenceStats } from './review.ts'
 import { historyDisplayState, newestHistory, newSubmission } from './core/homework.ts'
 import { mergeAccountWriteback, writebackDisposition } from './core/writeback.ts'
 import { upsertHomework, courseOutcome, recordQuestion, emptyExtractStats, addExtractStats, extractCompletionLabel, type ExtractStats, type LiveCourse, type LiveHomeworkGroup, type LiveQuestion } from './core/live-view.ts'
@@ -30,6 +30,7 @@ export type RuntimeCourseLog = {
   time: string
   level: RuntimeLogLevel
   courseName: string
+  courseKey?: string
   homeworkName: string
   action: string
   result: string
@@ -46,6 +47,7 @@ type StudentView = {
   workMode: 'answer' | 'extract'
   courseScope: CourseScope
   selectedCourseNames: string[]
+  selectedCourseKeys: string[]
   awaitingCourseSelection: boolean
   answerRoundLimit: number
   slot: SlotState
@@ -64,12 +66,14 @@ type StudentView = {
   extractHistoryCompleted: number
   extractCurrentHistory: string
   needsVerify: boolean
+  verified: boolean
   queued: boolean
   logs: string[]
   courseLogs: RuntimeCourseLog[]
   courses: (LiveCourse & { groups: LiveHomeworkGroup[] })[]
   groups: LiveHomeworkGroup[]
   activeCourseName: string
+  activeCourseKey: string
 }
 
 const views = new Map<string, StudentView>()
@@ -112,11 +116,13 @@ onProgress((event) => {
   v.headline = ACCOUNT_ZH[event.account]
   v.logs = [...v.logs.slice(-99), v.action]
   const courseName = event.courseName || v.activeCourseName || ''
+  const courseKey = event.courseKey || v.activeCourseKey || ''
   if (courseName) {
     v.courseLogs = [...v.courseLogs.slice(-499), {
       time: event.time,
       level: runtimeLogLevel(v.action),
       courseName,
+      courseKey,
       homeworkName: sanitizeRuntimeLogText(event.homeworkName || ''),
       action: v.action,
       result: ACCOUNT_ZH[event.account],
@@ -125,8 +131,10 @@ onProgress((event) => {
   }
   if (event.courseName) {
     v.activeCourseName = event.courseName
-    const course = v.courses.find((c) => c.name === event.courseName)
-    if (course) v.groups = course.groups
+    if (event.courseKey) v.activeCourseKey = event.courseKey
+    const course = v.courses.find((c) => c.key === (event.courseKey || v.activeCourseKey)) ||
+      (v.courses.filter((c) => c.name === event.courseName).length === 1 ? v.courses.find((c) => c.name === event.courseName) : undefined)
+    if (course) { v.groups = course.groups; v.activeCourseKey = course.key || '' }
   }
 })
 
@@ -143,6 +151,7 @@ function viewOf(a: LocalAccount): StudentView {
     workMode: a.work_mode,
     courseScope: a.course_scope,
     selectedCourseNames: [],
+    selectedCourseKeys: [],
     awaitingCourseSelection: false,
     answerRoundLimit: a.answer_round_limit,
     slot: 'queued',
@@ -161,12 +170,14 @@ function viewOf(a: LocalAccount): StudentView {
     extractHistoryCompleted: 0,
     extractCurrentHistory: '',
     needsVerify: false,
+    verified: false,
     queued: false,
     logs: [],
     courseLogs: [],
     courses: [],
     groups: [],
     activeCourseName: '',
+    activeCourseKey: '',
   }
   views.set(a.local_id, v)
   return v
@@ -185,6 +196,7 @@ function setState(v: StudentView, account: AccountState, action: string, slot?: 
     account: v.account,
     action,
     courseName: v.activeCourseName || undefined,
+    courseKey: v.activeCourseKey || undefined,
     bankCount: v.bankCount,
     aiCount: v.aiCount,
   })
@@ -201,8 +213,8 @@ function groupsForDetected(course: DetectedCourse): LiveHomeworkGroup[] {
   return [...groups.values()]
 }
 
-function syncHomeworkView(v: StudentView, courseName: string, hw: DetectedHomework, questions?: LiveQuestion[]) {
-  const course = v.courses.find((item) => item.name === courseName)
+function syncHomeworkView(v: StudentView, courseKey: string, hw: DetectedHomework, questions?: LiveQuestion[]) {
+  const course = v.courses.find((item) => (item.key || item.name) === courseKey)
   if (!course) return
   course.groups = upsertHomework(course.groups, hw.section, hw.name, hw.status, questions)
   const row = course.groups.find((g) => g.title === (hw.section === 'onlineHomework' ? '网上记分作业' : '阶段性测验'))?.rows.find((r) => r.name === hw.name)
@@ -220,7 +232,8 @@ function syncHomeworkView(v: StudentView, courseName: string, hw: DetectedHomewo
     else if (statuses.length && statuses.every((status) => status === 'extracting_done' || status.startsWith('skip_'))) course.status = '提取完成'
   }
   if (['clicking_do_homework', 'answering', 'submitting', 'waiting_grade', 'reviewing'].includes(hw.status)) course.status = hw.status
-  v.activeCourseName = courseName
+  v.activeCourseName = course.name
+  v.activeCourseKey = course.key || course.name
   v.groups = course.groups
 }
 
@@ -310,6 +323,7 @@ export function applyStudentSettingsToAll(local_id: string) {
         v.courseScope = patch.course_scope
         v.answerRoundLimit = patch.answer_round_limit
         if (courseScopeChanged) v.selectedCourseNames = []
+        if (courseScopeChanged) v.selectedCourseKeys = []
       }
       updated++
     } catch { failed.push(account.name) }
@@ -346,6 +360,8 @@ function clearVerification(local_id: string, finish: boolean) {
   const session = verificationSessions.get(local_id)
   verificationSessions.delete(local_id)
   qrSnapshots.delete(local_id)
+  const v = views.get(local_id)
+  if (v) v.verified = false
   if (finish) session?.finish()
 }
 
@@ -359,6 +375,7 @@ export async function waitForVerify(
   if (existing) return existing.promise
   const v = views.get(local_id)
   if (v) v.slot = 'occupying_verify'
+  if (v) v.verified = false
   markVerify(local_id)
   let finish!: () => void
   const promise = new Promise<void>((resolve) => { finish = resolve })
@@ -388,10 +405,14 @@ export async function waitForVerify(
 function resetVerificationGate(local_id: string) {
   unverifiedClicks.set(local_id, 0)
   verifiedAccounts.delete(local_id)
+  const v = views.get(local_id)
+  if (v) v.verified = false
 }
 
 function markHomeworkVerified(local_id: string) {
   verifiedAccounts.add(local_id)
+  const v = views.get(local_id)
+  if (v) v.verified = true
   unverifiedClicks.delete(local_id)
   const waiters = verificationWaiters.get(local_id)
   verificationWaiters.delete(local_id)
@@ -462,7 +483,7 @@ export async function signalVerified(local_id: string) {
   const acc = listAccounts().find((a) => a.local_id === local_id)
   const v = views.get(local_id)
   clearVerification(local_id, true)
-  markHomeworkVerified(local_id)
+  if (session.kind === 'homework') markHomeworkVerified(local_id)
   markOccupied(local_id)
   if (v && acc) {
     setState(v, v.account === 'needs_verify' ? 'auto_answering' : v.account, '验证完毕，继续', 'occupied')
@@ -494,27 +515,28 @@ export function setCourseScope(local_id: string, scope: CourseScope) {
   if (v) {
     v.courseScope = scope
     v.selectedCourseNames = []
+    v.selectedCourseKeys = []
   }
   return { ok: true }
 }
 
-export function setSelectedCourses(local_id: string, names: string[]) {
+export function setSelectedCourses(local_id: string, keys: string[]) {
   const v = views.get(local_id)
   const editableAfterStop = Boolean(v && !isStudentLocked(local_id) && v.account === 'stopped')
   if (!v || (selectionStartRequested && !editableAfterStop) || (!v.awaitingCourseSelection && !editableAfterStop)) {
     return { ok: false, error: '当前不在课程选择阶段' }
   }
-  const available = new Set(v.courses.map((course) => course.name))
-  v.selectedCourseNames = [...new Set(names)].filter((name) => available.has(name))
-  const selected = new Set(v.selectedCourseNames)
+  const selected = new Set(keys)
+  v.selectedCourseKeys = v.courses.filter((course) => selected.has(course.key || course.name) || (selected.has(course.name) && v.courses.filter((item) => item.name === course.name).length === 1)).map((course) => course.key || course.name)
+  v.selectedCourseNames = v.courses.filter((course) => v.selectedCourseKeys.includes(course.key || course.name)).map((course) => course.name)
   for (const course of v.courses) {
-    if (selected.has(course.name)) {
+    if (v.selectedCourseKeys.includes(course.key || course.name)) {
       if (course.status === '本轮未选择') course.status = '已检测'
     } else {
       course.status = '本轮未选择'
     }
   }
-  return { ok: true, selected: v.selectedCourseNames.length, selectedNames: [...v.selectedCourseNames] }
+  return { ok: true, selected: v.selectedCourseKeys.length, selectedNames: [...v.selectedCourseNames], selectedKeys: [...v.selectedCourseKeys] }
 }
 
 export function startSelectedCourseExecution() {
@@ -523,7 +545,7 @@ export function startSelectedCourseExecution() {
     .filter((v): v is StudentView => Boolean(v) && v!.courseScope === 'selected' && !['login_failed', 'stopped', 'round_ended'].includes(v!.account))
   const readiness = selectedRunReadiness(candidates.map((v) => ({
     awaiting: v.awaitingCourseSelection,
-    selectedCount: v.selectedCourseNames.length,
+    selectedCount: v.selectedCourseKeys.length,
   })))
   if (readiness === 'scanning') return { ok: false, error: '仍有学生正在扫描课程' }
   if (readiness === 'empty') return { ok: false, error: '请至少为一个学生选择一门课程' }
@@ -552,7 +574,9 @@ export type HistoryScoreItem = {
 }
 
 function previewHrefOf(local_id: string, courseName: string, homeworkName: string) {
-  const course = views.get(local_id)?.courses.find((item) => item.name === courseName)
+  const courses = views.get(local_id)?.courses || []
+  const course = courses.find((item) => item.key === courseName) ||
+    (courses.filter((item) => item.name === courseName).length === 1 ? courses.find((item) => item.name === courseName) : undefined)
   return course?.groups.flatMap((group) => group.rows).find((row) => row.name === homeworkName)?.previewHref || ''
 }
 
@@ -682,6 +706,7 @@ async function runOne(a: LocalAccount) {
   v.courseScope = a.course_scope
   v.answerRoundLimit = a.answer_round_limit
   v.selectedCourseNames = []
+  v.selectedCourseKeys = []
   v.awaitingCourseSelection = false
   v.bankCount = 0
   v.aiCount = 0
@@ -739,9 +764,10 @@ async function runOne(a: LocalAccount) {
   }
   await flushExtractWriteback(a, v)
   const courses = await listCourses(page, a.local_id, v.slot)
-  v.courses = courses.map((c) => ({ name: c.name, status: '待检测', groups: [] }))
+  v.courses = courses.map((c) => ({ key: c.key || c.name, name: c.name, status: '待检测', groups: [] }))
   v.groups = []
   v.activeCourseName = ''
+  v.activeCourseKey = ''
   emitProgress({
     local_id: a.local_id,
     slot: v.slot,
@@ -757,31 +783,46 @@ async function runOne(a: LocalAccount) {
     if (stopFlag.has(a.local_id)) return
     const chunk = courses.slice(i, i + parallel)
     for (const c of chunk) {
-      const row = v.courses.find((item) => item.name === c.name)
+      const row = v.courses.find((item) => item.key === (c.key || c.name))
       if (row) row.status = '检测中'
     }
-    const parts = await Promise.all(
-      chunk.map(async (c, j) => {
-        try {
-          return await detectCourse({
-          portal: page,
-          href: c.href,
-          courseName: c.name,
-          local_id: a.local_id,
-          slot: v.slot,
-          index: i + j + 1,
-          total: courses.length,
-          mode: a.work_mode,
-          answerRoundLimit: a.answer_round_limit,
-          })
-        } catch {
-          return { name: c.name, status: '检测失败', homeworks: [] } as DetectedCourse
-        }
-      }),
+   const parts = await Promise.all(
+     chunk.map(async (c, j) => {
+        let lastError: unknown
+       for (let attempt = 0; attempt < 2; attempt++) {
+         try {
+           return await detectCourse({
+             portal: page,
+             href: c.href,
+             key: c.key || c.name,
+             courseName: c.name,
+             local_id: a.local_id,
+             slot: v.slot,
+             index: i + j + 1,
+             total: courses.length,
+             mode: a.work_mode,
+             answerRoundLimit: a.answer_round_limit,
+           })
+         } catch (error) {
+           lastError = error
+           if (attempt === 0) await waitMs(300)
+         }
+      }
+      const reason = sanitizeRuntimeLogText(lastError instanceof Error ? lastError.message : '未知检测错误').slice(0, 180)
+       v.courseLogs = [...v.courseLogs.slice(-499), {
+         time: new Date().toISOString(), level: 'error', courseName: c.name, courseKey: c.key || c.name,
+         homeworkName: '', action: '课程检测失败', result: '检测失败', reason,
+       }]
+      v.logs = [...v.logs.slice(-99), '课程检测失败 · ' + c.name + ' · ' + reason]
+       emitProgress({ local_id: a.local_id, slot: v.slot, account: 'detecting',
+         action: '课程检测失败 · ' + c.name + ' · ' + reason, courseName: c.name, courseKey: c.key || c.name,
+         courseIndex: i + j + 1, courseTotal: courses.length, bankCount: v.bankCount, aiCount: v.aiCount })
+       return { key: c.key || c.name, name: c.name, status: '检测失败', homeworks: [] } as DetectedCourse
+     }),
     )
     for (const p of parts) {
       detected.push(p)
-      const idx = v.courses.findIndex((x) => x.name === p.name)
+      const idx = v.courses.findIndex((x) => x.key === (p.key || p.name))
       if (idx >= 0) {
         v.courses[idx].status = p.status
         v.courses[idx].bankCount = 0
@@ -789,6 +830,7 @@ async function runOne(a: LocalAccount) {
         v.courses[idx].groups = groupsForDetected(p)
       }
       v.activeCourseName = p.name
+      v.activeCourseKey = p.key || p.name
       v.groups = groupsForDetected(p)
       emitProgress({
         local_id: a.local_id,
@@ -796,14 +838,21 @@ async function runOne(a: LocalAccount) {
         account: v.account,
         action: '课程状态已更新',
         courseName: p.name,
-        courseIndex: courses.findIndex((course) => course.name === p.name) + 1,
+        courseKey: p.key || p.name,
+        courseIndex: courses.findIndex((course) => (course.key || course.name) === (p.key || p.name)) + 1,
         courseTotal: courses.length,
         bankCount: v.bankCount,
-        aiCount: v.aiCount,
+       aiCount: v.aiCount,
+     })
+      if (p.status === '检测失败') emitProgress({
+        local_id: a.local_id, slot: v.slot, account: 'detecting',
+        action: '课程检测失败，请查看课程日志', courseName: p.name, courseKey: p.key || p.name,
+        courseIndex: courses.findIndex((course) => (course.key || course.name) === (p.key || p.name)) + 1,
+        courseTotal: courses.length, bankCount: v.bankCount, aiCount: v.aiCount,
       })
-    }
-  }
-  setState(v, 'detected', '检测完成')
+   }
+ }
+ setState(v, 'detected', '检测完成')
   let runCourses = detected
   if (a.course_scope === 'selected') {
     v.awaitingCourseSelection = true
@@ -820,10 +869,10 @@ async function runOne(a: LocalAccount) {
     courseSelectionWaiters.delete(a.local_id)
     v.awaitingCourseSelection = false
     if (stopFlag.has(a.local_id)) return
-    runCourses = selectCoursesForRun(detected, 'selected', v.selectedCourseNames)
-    const selected = new Set(runCourses.map((course) => course.name))
+    runCourses = selectCoursesForRun(detected, 'selected', v.selectedCourseKeys)
+    const selected = new Set(runCourses.map((course) => course.key || course.name))
     for (const course of v.courses) {
-      if (!selected.has(course.name)) course.status = '本轮未选择'
+      if (!selected.has(course.key || course.name)) course.status = '本轮未选择'
     }
     if (!runCourses.length) {
       setState(v, 'round_ended', '本轮未选择课程', 'released')
@@ -844,6 +893,7 @@ async function runOne(a: LocalAccount) {
     v.extractHistoryTotal = 0
     v.extractHistoryCompleted = 0
     v.extractCurrentHistory = ''
+   const referenceTotals: ReferenceStats = { added: 0, updated: 0, merged: 0, retry: 0, contradictions: 0 }
     const jobs = extractionHomeworks
       .filter((hw) => Boolean(hw.page))
       .map((hw) => ({ course: runCourses.find((course) => course.homeworks.includes(hw))!, hw }))
@@ -868,12 +918,13 @@ async function runOne(a: LocalAccount) {
     }
     refreshTotals()
     refreshProgress()
-    await mapWithConcurrency(jobs, parallel, async ({ course: c, hw }) => {
+    await mapWithConcurrency(jobs, 1, async ({ course: c, hw }) => {
       if (stopFlag.has(a.local_id)) return
+      let pendingForHomework = 0
       hw.extractStats = emptyExtractStats()
       hw.status = 'extracting'
       refreshProgress()
-      syncHomeworkView(v, c.name, hw)
+      syncHomeworkView(v, c.key, hw)
       setState(v, 'extracting', '提取题库 · ' + c.name + ' · ' + hw.name)
       let graded: Awaited<ReturnType<typeof readHistory>>
       let skippedHistory = 0
@@ -884,14 +935,14 @@ async function runOne(a: LocalAccount) {
         skippedHistory = historyRows.length - graded.length
         v.extractHistoryTotal += graded.length
         refreshProgress()
-        syncHomeworkView(v, c.name, hw)
+        syncHomeworkView(v, c.key, hw)
       } catch {
         if (stopFlag.has(a.local_id)) return
         hw.extractStats.failed++
         refreshTotals()
         hw.status = 'extracting_done'
         refreshProgress()
-        syncHomeworkView(v, c.name, hw)
+        syncHomeworkView(v, c.key, hw)
         return
       }
       const historyStats = graded.map(() => emptyExtractStats())
@@ -899,14 +950,50 @@ async function runOne(a: LocalAccount) {
         hw.extractStats = { ...emptyExtractStats(), skipped: skippedHistory }
         for (const stats of historyStats) addExtractStats(hw.extractStats, stats)
         refreshTotals()
-        syncHomeworkView(v, c.name, hw)
+        syncHomeworkView(v, c.key, hw)
       }
-      await mapWithConcurrency(graded, parallel, async (historyRow, historyIndex) => {
+      const historyQuestions: (ReviewedQuestion[] | null)[] = graded.map(() => null)
+      await mapWithConcurrency(graded, 1, async (historyRow, historyIndex) => {
+        if (stopFlag.has(a.local_id)) return
+        try {
+          historyQuestions[historyIndex] = await stopAware(a.local_id, withFreshHistoryPage(ctx, historyRow.historyHref!, readReviewedQuestions, () => stopFlag.has(a.local_id)))
+       } catch {
+          if (stopFlag.has(a.local_id)) return
+       }
+     })
+      if (stopFlag.has(a.local_id)) return
+      const unreadableHistories = historyQuestions.filter((questions) => !questions).length
+      if (unreadableHistories) {
+        for (const [historyIndex, questions] of historyQuestions.entries()) {
+          if (!questions) historyStats[historyIndex].failed++
+        }
+        syncHistoryStats()
+        setState(v, 'extracting', '历史读取失败 ' + unreadableHistories + ' 条，继续其它历史 · ' + c.name + ' · ' + hw.name)
+      }
+      const blockedHashes = contradictoryReferenceHashes(historyQuestions.flatMap((questions) => questions || []))
+      await mapWithConcurrency(graded, 1, async (historyRow, historyIndex) => {
         if (stopFlag.has(a.local_id)) return
         v.extractHistoryPages++
         const historyLabel = (historyIndex + 1) + '/' + graded.length + ' · ' + (historyRow.submittedAt || '时间未知')
         v.extractCurrentHistory = historyLabel
         setState(v, 'extracting', '读取历史记录 · ' + c.name + ' · ' + hw.name + ' · 历史 ' + historyLabel)
+        const questions = historyQuestions[historyIndex]
+        if (!questions) {
+          v.extractHistoryPages = Math.max(0, v.extractHistoryPages - 1)
+          v.extractHistoryCompleted++
+          syncHistoryStats()
+          return
+        }
+       if (questions.some((q) => q.referenceState === 'valid')) {
+          emitProgress({ local_id: a.local_id, slot: v.slot, account: v.account,
+            action: '切换到有参考答案分支，根据参考答案进行题库提取', courseName: c.name, courseKey: c.key,
+            homeworkName: hw.name, bankCount: v.bankCount, aiCount: v.aiCount })
+        }
+        if (questions.some((q) => q.referenceState === 'absent')) {
+          emitProgress({ local_id: a.local_id, slot: v.slot, account: v.account,
+            action: '按照原模式继续提取题库', courseName: c.name, courseKey: c.key,
+            homeworkName: hw.name, bankCount: v.bankCount, aiCount: v.aiCount })
+        }
         try {
           const result = await stopAware(a.local_id, withFreshHistoryPage(ctx, historyRow.historyHref!, (history) =>
             extractReviewedQuestions(history, c.name, (stats, current, total) => {
@@ -915,7 +1002,7 @@ async function runOne(a: LocalAccount) {
               syncHistoryStats()
               v.extractCurrentHistory = historyLabel
               setState(v, 'extracting', '提取正确题 · ' + c.name + ' · ' + hw.name + ' · 历史 ' + historyLabel + ' · 第 ' + current + '/' + total + ' 题')
-            }, () => stopFlag.has(a.local_id)), () => stopFlag.has(a.local_id)))
+            }, () => stopFlag.has(a.local_id), { questions: historyQuestions[historyIndex]!, blockedHashes }), () => stopFlag.has(a.local_id)))
           if (stopFlag.has(a.local_id)) return
           historyStats[historyIndex] = {
             added: result.added,
@@ -924,8 +1011,10 @@ async function runOne(a: LocalAccount) {
             conflict: result.conflict,
             failed: result.failed,
           }
-          if (result.failedCandidates.length) {
-            appendExtractWriteback({
+          for (const key of Object.keys(referenceTotals) as (keyof ReferenceStats)[]) referenceTotals[key] += result.referenceStats[key]
+         if (result.failedCandidates.length) {
+            pendingForHomework++
+           appendExtractWriteback({
               local_id: a.local_id,
               course_name: c.name,
               homework_id: hw.name,
@@ -938,7 +1027,7 @@ async function runOne(a: LocalAccount) {
           if (stopFlag.has(a.local_id)) return
           if (error instanceof ExtractWritebackSaveError) throw error
           historyStats[historyIndex].failed++
-          setState(v, 'extracting', '提取题库 · ' + c.name + ' · ' + hw.name + ' · 历史读取失败')
+         setState(v, 'extracting', '提取题库 · ' + c.name + ' · ' + hw.name + ' · 历史读取失败')
         } finally {
           v.extractHistoryPages = Math.max(0, v.extractHistoryPages - 1)
         }
@@ -946,18 +1035,24 @@ async function runOne(a: LocalAccount) {
         syncHistoryStats()
       })
       if (stopFlag.has(a.local_id)) return
-      hw.status = 'extracting_done'
+      hw.status = pendingForHomework ? 'pending_writeback' : 'extracting_done'
       refreshTotals()
       refreshProgress()
-      syncHomeworkView(v, c.name, hw)
+      syncHomeworkView(v, c.key, hw)
     })
-    if (stopFlag.has(a.local_id)) return
-    refreshProgress()
-    v.extractCurrentHistory = ''
-    const failedCourses = runCourses.filter((course) => course.status === '检测失败').length
-    const pendingItems = getExtractWriteback(a.local_id).length
+   if (stopFlag.has(a.local_id)) return
+    await flushExtractWriteback(a, v)
+    for (const course of runCourses) for (const hw of course.homeworks) {
+      if (hw.status !== 'pending_writeback') continue
+      const retained = getExtractWriteback(a.local_id).some((item) => item.course_name === course.name && item.homework_id === hw.name)
+      if (!retained) { hw.status = 'extracting_done'; syncHomeworkView(v, course.key, hw) }
+    }
+   refreshProgress()
+   v.extractCurrentHistory = ''
+   const failedCourses = runCourses.filter((course) => course.status === '检测失败').length
+    const pendingItems = getExtractWriteback(a.local_id).length + referenceTotals.retry
     const completion = extractCompletionLabel(v.extractTotals, failedCourses, pendingItems)
-    setState(v, 'round_ended', completion + ' · 新增 ' + v.extractTotals.added + ' · 去重 ' + v.extractTotals.merged + ' · 跳过 ' + v.extractTotals.skipped + ' · 冲突 ' + v.extractTotals.conflict + ' · 写入失败 ' + v.extractTotals.failed, 'released')
+    setState(v, 'round_ended', completion + ' · 原模式新增 ' + v.extractTotals.added + ' · 去重 ' + v.extractTotals.merged + ' · 跳过 ' + v.extractTotals.skipped + ' · 冲突 ' + v.extractTotals.conflict + ' · 写入失败 ' + v.extractTotals.failed + ' · 参考答案新增 ' + referenceTotals.added + ' · 更新 ' + referenceTotals.updated + ' · 去重 ' + referenceTotals.merged + ' · 待重试 ' + referenceTotals.retry + ' · 矛盾跳过 ' + referenceTotals.contradictions, 'released')
     await release(a.local_id)
     return
   }
@@ -971,7 +1066,7 @@ async function runOne(a: LocalAccount) {
       if (stopFlag.has(a.local_id)) return
       if (!hw.needDo) continue
       try {
-        await doHomeworkLoop(a, v, hw, c.name, () => verified, (x) => { verified = x })
+        await doHomeworkLoop(a, v, hw, c, () => verified, (x) => { verified = x })
         if (hw.status === 'submit_failed') {
           setState(v, 'round_ended', '作答或提交未确认，停止该学生后续作业；请查看日志', 'released')
           await release(a.local_id)
@@ -980,20 +1075,20 @@ async function runOne(a: LocalAccount) {
       } catch (error) {
         if (stopFlag.has(a.local_id)) return
         hw.status = 'submit_failed'
-        syncHomeworkView(v, c.name, hw)
+        syncHomeworkView(v, c.key, hw)
         const reason = error instanceof Error ? error.message : '未知错误'
         setState(v, 'round_ended', '本份异常，停止该学生后续作业 · ' + hw.name + ' · ' + reason, 'released')
         await release(a.local_id)
         return
       }
     }
-    const course = v.courses.find((row) => row.name === c.name)
+    const course = v.courses.find((row) => row.key === c.key)
     if (course) course.status = courseOutcome(c.homeworks.map((hw) => hw.status))
     setState(v, 'auto_answering', '课程处理结果 · ' + c.name + ' · ' + (course?.status || ''))
   }
   if (stopFlag.has(a.local_id)) return
-  const runCourseNames = new Set(runCourses.map((course) => course.name))
-  const unfinished = v.courses.filter((c) => runCourseNames.has(c.name) && !['无作业', '本轮可做作业已完成'].includes(c.status)).length
+  const runCourseKeys = new Set(runCourses.map((course) => course.key || course.name))
+  const unfinished = v.courses.filter((c) => runCourseKeys.has(c.key || c.name) && !['无作业', '本轮可做作业已完成'].includes(c.status)).length
   const pending = getWriteback().filter((item) => item.local_id === a.local_id).length
   setState(v, 'round_ended', unfinished || pending
     ? `已遍历本轮 ${runCourses.length} 门课程；仍有 ${unfinished} 门未完成、${pending} 份待回写`
@@ -1040,10 +1135,12 @@ async function doHomeworkLoop(
   a: LocalAccount,
   v: StudentView,
   hw: DetectedHomework,
-  courseName: string,
+  course: DetectedCourse,
   getVerified: () => boolean,
   setVerified: (x: boolean) => void,
 ) {
+  const courseName = course.name
+  const courseKey = course.key || course.name
   if (!hw.page) return
   const max = hw.remainingCap
   let lastScore = -1
@@ -1053,24 +1150,24 @@ async function doHomeworkLoop(
     hw.attempt = n + 1
     hw.score = null
     hw.status = 'clicking_do_homework'
-    syncHomeworkView(v, courseName, hw)
+    syncHomeworkView(v, courseKey, hw)
     setState(v, 'auto_answering', '作答 ' + hw.name)
     const before = (await readHistory(hw.page)).map((r) => r.submittedAt)
     const answer = await openDoHomework(a, v, hw.page, courseName, hw.name, setVerified, false)
     if (!answer) {
       hw.status = 'submit_failed'
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
       setState(v, 'auto_answering', '未进入作答页 ' + hw.name)
       return
     }
     let ans
     const bankBase = v.bankCount
     const aiBase = v.aiCount
-    const liveCourse = v.courses.find((item) => item.name === courseName)
+    const liveCourse = v.courses.find((item) => item.key === courseKey)
     const courseBankBase = liveCourse?.bankCount || 0
     const courseAiBase = liveCourse?.aiCount || 0
     hw.status = 'answering'
-    syncHomeworkView(v, courseName, hw, [])
+    syncHomeworkView(v, courseKey, hw, [])
     try {
       ans = await answerPage({
       page: answer,
@@ -1092,21 +1189,28 @@ async function doHomeworkLoop(
       },
     })
     } catch (error) {
+      if (error instanceof ListeningBankMissError) {
+        hw.status = 'skip_bank_miss'
+        hw.attempt = 0
+        syncHomeworkView(v, courseKey, hw, [])
+        setState(v, 'auto_answering', hw.name + ' · ' + error.message)
+        return
+      }
       hw.status = 'submit_failed'
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
       const reason = error instanceof Error ? error.message : '未知错误'
       setState(v, 'auto_answering', '作答失败 · ' + hw.name + ' · ' + reason)
       return
     }
     v.bankCount = bankBase + ans.bankCount
     v.aiCount = aiBase + ans.aiCount
-    const course = v.courses.find((item) => item.name === courseName)
+    const course = v.courses.find((item) => item.key === courseKey)
     if (course) {
       course.bankCount = courseBankBase + ans.bankCount
       course.aiCount = courseAiBase + ans.aiCount
     }
     hw.status = 'answering'
-    syncHomeworkView(v, courseName, hw, ans.results.map((result) => ({
+    syncHomeworkView(v, courseKey, hw, ans.results.map((result) => ({
       no: Number(result.no) || 0,
       stem: result.stem,
       source: result.source === '题库答题' ? '题库' : result.source === 'AI 答题' ? 'AI' : '空过',
@@ -1124,11 +1228,11 @@ async function doHomeworkLoop(
       aiCount: v.aiCount,
     })
     hw.status = 'submitting'
-    syncHomeworkView(v, courseName, hw)
-    const sub = await submitHomework({ page: answer, local_id: a.local_id, slot: v.slot, account: 'auto_answering', homeworkName: hw.name })
+    syncHomeworkView(v, courseKey, hw)
+    const sub = await submitHomework({ page: answer, local_id: a.local_id, slot: v.slot, account: 'auto_answering', homeworkName: hw.name, verifiedComposite: ans.compositeVerified })
     if (!sub.ok) {
       hw.status = 'submit_failed'
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
       if (sub.incomplete) setState(v, 'auto_answering', '仍有未作答题，已取消提交 · ' + hw.name)
       return
     }
@@ -1149,11 +1253,11 @@ async function doHomeworkLoop(
     }
     if (!okHist) {
       hw.status = 'submit_failed'
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
       return
     }
     hw.status = 'waiting_grade'
-    syncHomeworkView(v, courseName, hw)
+    syncHomeworkView(v, courseKey, hw)
     setState(v, 'auto_answering', '等待批阅 · ' + hw.name)
     emitProgress({
       local_id: a.local_id, slot: v.slot, account: v.account,
@@ -1187,9 +1291,9 @@ async function doHomeworkLoop(
       hw.lastAttempt = hw.attempt
       hw.lastScore = hw.score
     }
-    syncHomeworkView(v, courseName, hw)
+    syncHomeworkView(v, courseKey, hw)
     hw.status = 'reviewing'
-    syncHomeworkView(v, courseName, hw)
+    syncHomeworkView(v, courseKey, hw)
     setState(v, 'auto_answering', '校对中 · ' + hw.name)
     emitProgress({
       local_id: a.local_id, slot: v.slot, account: v.account,
@@ -1207,11 +1311,17 @@ async function doHomeworkLoop(
     let totalInserted = review.inserted
     let totalDeleted = review.deleted
     let totalConflicts = review.conflicts
+    const referenceTotals = { ...review.referenceStats }
+    let protectedDeletes = review.protectedDeletes || 0
+    for (const [count, action] of [[review.oldModeQuestions, '继续校对回写（原模式）'], [review.referenceQuestions, '切换到有参考答案分支，根据参考答案进行题库回写']] as const) {
+      if (count) emitProgress({ local_id: a.local_id, slot: v.slot, account: v.account, action,
+        courseName, courseKey, homeworkName: hw.name, bankCount: v.bankCount, aiCount: v.aiCount })
+    }
     if (hw.score == null && review.score != null) {
       hw.score = review.score
       hw.lastAttempt = hw.attempt
       hw.lastScore = review.score
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
     }
     emitProgress({
       local_id: a.local_id, slot: v.slot, account: v.account,
@@ -1221,7 +1331,7 @@ async function doHomeworkLoop(
     })
     while (review.pendingCandidates.length && !stopFlag.has(a.local_id)) {
       hw.status = 'pending_writeback'
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
       appendWriteback({
         local_id: a.local_id,
         course_name: courseName,
@@ -1239,21 +1349,27 @@ async function doHomeworkLoop(
       totalInserted += retry.inserted
       totalDeleted += retry.deleted
       totalConflicts += retry.conflicts
-      review = { ...retry, inserted: totalInserted, deleted: totalDeleted, conflicts: totalConflicts }
+      referenceTotals.added += retry.referenceStats.added
+      referenceTotals.updated += retry.referenceStats.updated
+      referenceTotals.merged += retry.referenceStats.merged
+      referenceTotals.retry = retry.referenceStats.retry
+      referenceTotals.contradictions += retry.referenceStats.contradictions
+      protectedDeletes += retry.protectedDeletes || 0
+      review = { ...retry, inserted: totalInserted, deleted: totalDeleted, conflicts: totalConflicts, referenceStats: { ...referenceTotals }, protectedDeletes }
       hw.status = 'reviewing'
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
     }
     if (stopFlag.has(a.local_id)) return
     saveWriteback(getWriteback().filter((item) => !(item.local_id === a.local_id && item.course_name === courseName && item.homework_id === hw.name)))
     emitProgress({
       local_id: a.local_id, slot: v.slot, account: v.account,
-      action: '校对完成 · AI正确入库 ' + review.inserted + ' · 冲突标记 ' + review.conflicts + ' · 题库错删 ' + review.deleted,
+      action: '校对完成 · 原模式 AI正确入库 ' + review.inserted + ' · 冲突标记 ' + review.conflicts + ' · 题库错删 ' + review.deleted + ' · 保护跳过 ' + protectedDeletes + ' · 参考答案新增 ' + referenceTotals.added + ' · 更新 ' + referenceTotals.updated + ' · 去重 ' + referenceTotals.merged + ' · 待重试 ' + referenceTotals.retry + ' · 矛盾跳过 ' + referenceTotals.contradictions,
       homeworkName: hw.name, homework: 'reviewing',
       courseName, bankCount: v.bankCount, aiCount: v.aiCount,
     })
     if (hw.score === 100) {
       hw.status = 'done_100'
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
       return
     }
     if (hw.score === lastScore && review.inserted === 0 && review.deleted === 0 &&
@@ -1263,11 +1379,11 @@ async function doHomeworkLoop(
     lastScore = hw.score || 0
     if (emptySpin >= 1) {
       hw.status = 'spin_stopped'
-      syncHomeworkView(v, courseName, hw)
+      syncHomeworkView(v, courseKey, hw)
       return
     }
     hw.status = 'not_full_next_time'
-    syncHomeworkView(v, courseName, hw)
+    syncHomeworkView(v, courseKey, hw)
   }
 }
 
@@ -1332,6 +1448,9 @@ function pendingReview(results: QResult[]): ReviewOutcome {
     pendingInsertHashes: results.filter((r) => r.source === 'AI 答题').map((r) => r.hash),
     pendingDeleteHashes: results.filter((r) => r.source === '题库答题').map((r) => r.hash),
     score: null,
+    referenceStats: { added: 0, updated: 0, merged: 0, retry: 0, contradictions: 0 },
+    oldModeQuestions: 0,
+    referenceQuestions: 0,
   }
 }
 
@@ -1449,28 +1568,28 @@ async function openDoHomework(
     if (retried) return undefined
     return openDoHomework(a, v, preview, courseName, homeworkName, setVerified, true)
   }
-  setVerified(true)
-  markHomeworkVerified(a.local_id)
   const popup = await popupP
+  let answerPage: Page | undefined
   if (popup) {
     await popup.waitForLoadState('domcontentloaded').catch(() => {})
     try {
-      if (isAnswerPath(new URL(popup.url()).pathname)) return popup
+      if (isAnswerPath(new URL(popup.url()).pathname)) answerPage = popup
     } catch {
       /* 新页 URL 未就绪 */
     }
   }
-  try {
-    if (isAnswerPath(new URL(preview.url()).pathname)) return preview
-  } catch {
-    /* 当前页 URL 未就绪 */
-  }
-  for (let i = 0; i < 20; i++) {
-    const hit = othersPage(preview, PATH.assignmentAnswer)
-    if (hit) return hit
+  if (!answerPage) try {
+    if (isAnswerPath(new URL(preview.url()).pathname)) answerPage = preview
+  } catch { /* 当前页 URL 未就绪 */ }
+  for (let i = 0; i < 20 && !answerPage; i++) {
+    answerPage = othersPage(preview, PATH.assignmentAnswer)
+    if (answerPage) break
     await preview.waitForTimeout(400)
   }
-  return undefined
+  if (!answerPage) return undefined
+  setVerified(true)
+  markHomeworkVerified(a.local_id)
+  return answerPage
 }
 
 async function maybeReview(preview: Page, results: QResult[], courseName: string, historyHref: string): Promise<ReviewOutcome> {

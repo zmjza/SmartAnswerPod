@@ -44,7 +44,7 @@ declare global {
       setDisplay: (id: string, mode: string) => Promise<{ ok: boolean; visible: boolean | null; error?: string }>
       setWorkMode: (id: string, mode: string) => Promise<{ ok: boolean; error?: string }>
       setCourseScope: (id: string, scope: string) => Promise<{ ok: boolean; error?: string }>
-      setSelectedCourses: (id: string, names: string[]) => Promise<{ ok: boolean; error?: string; selected?: number; selectedNames?: string[] }>
+      setSelectedCourses: (id: string, keys: string[]) => Promise<{ ok: boolean; error?: string; selected?: number; selectedNames?: string[]; selectedKeys?: string[] }>
       startSelectedCourses: () => Promise<{ ok: boolean; error?: string }>
       getHomeworkHistory: (id: string, courseName: string, homeworkName: string) => Promise<{ ok: boolean; error?: string; items: { attempt: number; submittedAt: string; status: string; score: number | null; completed: boolean; viewable: boolean; displayState: 'viewable' | 'ungraded' | 'unfinished' | 'continue_only' | 'no_view' }[] }>
       getHistoryPaperImage: (id: string, courseName: string, homeworkName: string, submittedAt: string) => Promise<{ ok: boolean; error?: string; image?: string }>

@@ -281,6 +281,7 @@ function courseProgress(localId: string) {
 <div class="flex flex-col min-w-0">
 <div class="flex items-center gap-2 min-w-0">
 <span class="text-sm font-bold text-slate-900 truncate">{{ account.name }}</span>
+<span v-if="liveById.get(account.local_id)?.verified" class="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700" aria-label="已授权">已授权</span>
 <span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 font-mono text-[10px] tracking-wide truncate">{{ liveLabel(account.local_id) }}</span>
 </div>
 <span class="font-mono text-xs text-slate-400 tracking-wider">{{ account.account }}</span>

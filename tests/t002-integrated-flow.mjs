@@ -10,7 +10,7 @@ const answerHtml = `<div class='e-selects-g'>${question(1, 1, '第一题单选',
 document.querySelectorAll('li.e-a').forEach(li => li.addEventListener('click', async () => { const b = li.closest('.e-q-body'); if (b.dataset.questiontype === '2') li.classList.toggle('checked'); else { b.querySelectorAll('li.e-a').forEach(x => x.classList.remove('checked')); li.classList.add('checked') } const value = [...b.querySelectorAll('li.checked')].map(x => x.dataset.index).join(','); b.querySelector('[name=answer]').value = value; const res = await fetch('/study/ajax-assignment-online_homework_answer', {method:'POST', body:new URLSearchParams({answer:value})}); if (res.ok) document.querySelector('.e-item[data-num="' + b.dataset.num + '"]').classList.add('active') }));
 const dialog = document.querySelector('.xcConfirm'); document.querySelector('#submitHomeWork').onclick = () => { document.querySelector('#message').textContent = '作业提交后将不可修改，您确定要提交作业吗？'; dialog.style.display = 'block' }; document.querySelector('.sgBtn.ok').onclick = () => { dialog.style.display = 'none'; location.href = '/study/assignment-preview.aspx' }; document.querySelector('.sgBtn.cancel').onclick = () => { dialog.style.display = 'none' };
 </script>`
-const reviewed = (type, stem, a, b, answer, score) => `<div class='e-q-body' data-questiontype='${type}'><div class='e-q'><div class='e-q-q'>${stem}</div><div class='e-q-l'><span class='e-q-right'></span></div><input name='GiveScore' value='${score}'><div class='e-a-g e-choice-a'><ul><li class='e-a checked'>A) ${a}</li><li class='e-a ${type === 2 ? 'checked' : ''}'>B) ${b}</li></ul></div><div class='e-a-ans'><div class='e-ans-ref'><div class='e-a-g'><p class='checked'>${answer}</p>${type === 2 ? `<p class='checked'>${b}</p>` : ''}</div></div></div></div></div>`
+const reviewed = (type, stem, a, b, _answer, score) => `<div class='e-q-body' data-questiontype='${type}'><div class='e-q'><div class='e-q-q'>${stem}</div><div class='e-q-l'><span class='e-q-right'></span></div><input name='GiveScore' value='${score}'><div class='e-a-g e-choice-a'><ul><li class='e-a checked'>A) ${a}</li><li class='e-a ${type === 2 ? 'checked' : ''}'>B) ${b}</li></ul></div></div></div>`
 const historyHtml = reviewed(1, '第一题单选', '甲', '乙', '甲', 33.33) + reviewed(3, '第二题判断', '正确', '错误', '正确', 33.33) + reviewed(2, '第三题多选', '丙', '丁', '丙', 33.34)
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1')
@@ -64,6 +64,7 @@ const modules = {
     'export const listAccounts = () => s().accounts; export const getSettings = () => ({ account_parallel: 1, course_parallel: 1, siliconflow_key: "fake", supabase_url: s().origin, supabase_anon: "fake" })',
     'export const patchAccount = (id, patch) => Object.assign(s().accounts.find(a => a.local_id === id), patch)',
     'export const getWriteback = () => s().writeback; export const saveWriteback = rows => { s().writeback = rows }',
+    'export const isReferenceHashProtected = () => false; export const protectReferenceHash = () => true',
     'export const getExtractWriteback = () => []; export const saveExtractWriteback = () => {}; export class ExtractWritebackSaveError extends Error {}',
   ),
   './pool': mock(

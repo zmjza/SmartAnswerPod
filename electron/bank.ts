@@ -1,6 +1,6 @@
 import { contentHash, mergeCourseNames, sameAnswerTexts, sameCourseNames, hasReadableQuestionText, type QType } from './core/hash'
 import { removeRejectedAnswer } from './core/bank-delete'
-import { getSettings, getWriteback } from './store'
+import { getSettings, getWriteback, isReferenceHashProtected, protectReferenceHash } from './store'
 import { withTimeout } from './core/timeout'
 import { buildBankQuery, type BankQuery } from './core/bank-query'
 
@@ -77,19 +77,33 @@ export async function upsertQuestion(item: {
   course_name?: string
   source: 'import' | 'extract' | 'ai_verified'
   verified?: boolean
-}, retried = false): Promise<'added' | 'merged' | 'conflict' | 'failed'> {
+  referenceAnswer?: boolean
+}, retried = false): Promise<'added' | 'updated' | 'merged' | 'conflict' | 'failed'> {
   if (!hasReadableQuestionText(item.stem, item.options) ||
       !hasReadableQuestionText(item.stem, item.answer_texts)) return 'failed'
   const { supabase_url, supabase_anon } = getSettings()
   if (!supabase_url || !supabase_anon) return 'failed'
   const hash = contentHash(item.qtype, item.stem, item.options)
+  try { if (item.referenceAnswer && !protectReferenceHash(hash)) return 'failed' } catch { return 'failed' }
   let old: QuestionRow | null
   try { old = await readQuestion(hash) } catch { return 'failed' }
   const course_names = mergeCourseNames(old?.course_names, item.course_name)
   if (old) {
     const same = sameAnswerTexts(old.answer_texts, item.answer_texts, item.qtype)
-    if (same && sameCourseNames(old.course_names, course_names) && old.verified === (item.verified ?? item.source !== 'import')) {
+    if (same && sameCourseNames(old.course_names, course_names) && !old.conflict && old.verified === (item.verified ?? item.source !== 'import')) {
       return 'merged'
+    }
+    if (item.referenceAnswer) {
+      const ok = await patch(hash, {
+        answer_texts: item.answer_texts, source: item.source, verified: true, conflict: false, course_names,
+      })
+      if (!ok) return 'failed'
+      try {
+        const confirmed = await readQuestion(hash)
+        return confirmed && !confirmed.conflict && confirmed.verified &&
+          sameAnswerTexts(confirmed.answer_texts, item.answer_texts, item.qtype) &&
+          sameCourseNames(confirmed.course_names, course_names) ? (same ? 'merged' : 'updated') : 'failed'
+      } catch { return 'failed' }
     }
     if (!same && old.verified) {
       return (await patch(hash, { course_names, conflict: true })) ? 'conflict' : 'failed'
@@ -159,10 +173,11 @@ async function patch(hash: string, body: Record<string, unknown>): Promise<boole
   }
 }
 
-export async function deleteByHash(hash: string, rejectedAnswers: string[]): Promise<boolean> {
+export async function deleteByHash(hash: string, rejectedAnswers: string[]): Promise<'deleted' | 'protected' | 'failed'> {
+  try { if (isReferenceHashProtected(hash)) return 'protected' } catch { return 'failed' }
   rejectedHashes.add(hash)
   const { supabase_url, supabase_anon } = getSettings()
-  if (!supabase_url || !supabase_anon) return false
+  if (!supabase_url || !supabase_anon) return 'failed'
   const removed = await removeRejectedAnswer(rejectedAnswers, () => readQuestion(hash), async (observed) => {
   const filter = '&answer_texts=eq.' + encodeURIComponent(JSON.stringify(observed))
   const res = await fetch(rest(supabase_url, '/questions?content_hash=eq.' + encodeURIComponent(hash) + filter), {
@@ -173,7 +188,7 @@ export async function deleteByHash(hash: string, rejectedAnswers: string[]): Pro
   return res.ok
   })
   if (removed) rejectedHashes.delete(hash)
-  return removed
+  return removed ? 'deleted' : 'failed'
 }
 
 export async function testConn(): Promise<{ ok: boolean; error?: string }> {
@@ -215,7 +230,7 @@ export async function listQuestionCourses() {
   try {
     for (let from = 0; ; from += 1000) {
       const res = await fetch(rest(supabase_url, '/questions?select=course_names&order=updated_at.desc'), {
-        signal: AbortSignal.timeout(12_000),
+        signal: AbortSignal.timeout(10_000),
         headers: { ...headers(supabase_anon), Range: `${from}-${from + 999}` },
       })
       if (!res.ok) throw new Error(`课程分类读取失败（HTTP ${res.status}）`)

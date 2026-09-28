@@ -45,7 +45,7 @@ export type LiveHomework = {
 }
 
 export function homeworkScoreLabel(row: Pick<LiveHomework, 'attempt' | 'score' | 'lastAttempt' | 'lastScore' | 'status'>): string {
-  if (!row.attempt) return '本次得分：尚未作答'
+  if (!row.attempt || row.status === 'skip_bank_miss') return '本次得分：尚未作答'
   const prefix = '第 ' + row.attempt + ' 次 · 本次得分：'
   if (row.score != null && Number.isFinite(row.score)) return prefix + row.score + ' 分'
   const current = ['waiting_grade', 'pending_writeback', 'reviewing'].includes(row.status) ? '等待批阅' : '尚未出分'
@@ -61,6 +61,7 @@ export type LiveHomeworkGroup = {
 }
 
 export type LiveCourse = {
+  key?: string
   name: string
   status: string
   bankCount?: number
@@ -70,7 +71,7 @@ export type LiveCourse = {
 export function courseOutcome(statuses: string[]): string {
   if (!statuses.length) return '无作业'
   if (statuses.includes('pending_writeback')) return '待回写'
-  if (statuses.includes('submit_failed')) return '有失败待处理'
+  if (statuses.includes('submit_failed') || statuses.includes('skip_bank_miss')) return '有失败待处理'
   if (statuses.some((s) => s === 'skip_attempts_exhausted' || s === 'skip_out_of_window')) return '暂不可完成'
   if (statuses.some((s) => !s.startsWith('skip_') && s !== 'done_100')) return '尚未完成'
   return '本轮可做作业已完成'
