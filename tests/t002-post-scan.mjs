@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 
 const fixture = {
-  events: [], portalWaiting: false, qrWaiting: false, qrOpen: true,
+  events: [], actions: [], portalWaiting: false, qrWaiting: false, qrOpen: true,
   homeworkClicks: 0, submitted: false, released: false, held: false, noAnswerPage: false,
   accounts: [{ local_id: 'student-1', name: '测试学生', username: 'student-1', password: 'fake', display_mode: 'headless', work_mode: 'answer', course_scope: 'all', answer_round_limit: 1 }],
 }
@@ -76,19 +76,20 @@ const modules = {
   ),
   "./detect": mock(
     "export const listCourses = async () => [{ name: '测试课程', href: '/course' }]",
-    "export const detectCourse = async () => ({ name: '测试课程', status: '已检测', homeworks: [{ section: 'onlineHomework', name: '测试作业', workType: '网上记分作业', weightPercent: 100, previewHref: '/study/assignment-preview.aspx', status: 'todo', needDo: true, remainingCap: 1, page: globalThis.__t002Context.preview }] })",
+    "export const detectCourse = async () => { const hw = name => ({ section: 'onlineHomework', name, workType: '网上记分作业', weightPercent: 100, previewHref: '/study/assignment-preview.aspx', status: 'todo', needDo: true, remainingCap: 1, page: globalThis.__t002Context.preview }); return { name: '测试课程', status: '已检测', homeworks: globalThis.__t002.failureCase ? [hw('失败作业'), hw('后续作业')] : [hw('测试作业')] } }",
      "export const readHistory = async () => globalThis.__t002.submitted ? [{ submittedAt: '2026-09-24T00:00:00.000Z', status: '已批阅', score: 100, historyHref: '/study/assignment/history.aspx?id=1' }] : []",
   ),
   "./answer": mock(
-    "export const answerPage = async () => { globalThis.__t002.events.push('answering'); return { results: [{ no: '1', hash: 'hash-1', source: 'AI 答题', qtype: 'single', stem: '题目', options: ['甲', '乙'], selected: ['甲'] }], bankCount: 0, aiCount: 1 } }",
+    "export class ListeningBankMissError extends Error {}",
+    "export const answerPage = async ({ homeworkName }) => { globalThis.__t002.events.push('answering'); if (globalThis.__t002.stopDuringAnswer) await new Promise((_, reject) => { globalThis.__t002.answerReject = reject }); if (globalThis.__t002.failureCase && !globalThis.__t002.submitFailure && homeworkName === '失败作业') throw new Error('题目保存失败'); return { results: [{ no: '1', hash: 'hash-1', source: 'AI 答题', qtype: 'single', stem: '题目', options: ['甲', '乙'], selected: ['甲'] }], bankCount: 0, aiCount: 1 } }",
   ),
   "./submit": mock(
-    "export const submitHomework = async () => { globalThis.__t002.submitted = true; globalThis.__t002.events.push('submitting'); return { ok: true } }",
+    "export const submitHomework = async ({ homeworkName }) => { globalThis.__t002.events.push('submitting'); if (homeworkName === '失败作业' && globalThis.__t002.submitFailure === 'throw') throw new Error('提交控件失效'); if (homeworkName === '失败作业' && globalThis.__t002.submitFailure === 'result') return { ok: false }; globalThis.__t002.submitted = true; return { ok: true } }",
     "export const historyHasNew = () => globalThis.__t002.submitted",
   ),
   "./progress": mock(
     "export const onProgress = () => () => {}",
-    "export const emitProgress = (event) => { globalThis.__t002.events.push(event.account || event.homework || event.action) }",
+    "export const emitProgress = (event) => { globalThis.__t002.events.push(event.account || event.homework || event.action); globalThis.__t002.actions.push(event.action) }",
   ),
   "./page-tools": mock(
     "export const hasQr = async (page) => page?.kind === 'preview' && globalThis.__t002.qrOpen",
@@ -178,4 +179,53 @@ await new Promise(resolve => setTimeout(resolve, 20))
 assert.equal(runner.snapshot().students[0].verified, false, '无二维码且未进入作答页不得授权')
 await withoutRoute
 assert.equal(runner.snapshot().students[0].account, 'round_ended')
+fixture.noAnswerPage = false
+fixture.failureCase = true
+fixture.submitted = false
+fixture.homeworkClicks = 1
+fixture.portalWaiting = false
+context.preview.path = '/study/assignment/preview.aspx'
+const continued = runner.loginAndRefresh(['student-1'])
+await waitFor(() => fixture.portalWaiting, '失败后继续场景门户验证等待')
+assert.equal((await runner.signalVerified('student-1')).ok, true)
+await continued
+const rows = runner.snapshot().students[0].courses[0].groups[0].rows
+assert.equal(rows.find(row => row.name === '失败作业')?.status, 'submit_failed')
+assert.equal(rows.find(row => row.name === '后续作业')?.status, 'done_100', '前一份失败不能阻止后一份交卷回写')
+assert.equal(runner.snapshot().students[0].account, 'round_ended')
+for (const failure of ['result', 'throw']) {
+  fixture.submitFailure = failure
+  fixture.submitted = false
+  fixture.homeworkClicks = 1
+  fixture.portalWaiting = false
+  context.preview.path = '/study/assignment/preview.aspx'
+  const runAfterSubmitFailure = runner.loginAndRefresh(['student-1'])
+  await waitFor(() => fixture.portalWaiting, '提交失败隔离场景门户验证等待')
+  assert.equal((await runner.signalVerified('student-1')).ok, true)
+  assert.deepEqual(await runAfterSubmitFailure, { ok: true })
+  const homeworkRows = runner.snapshot().students[0].courses[0].groups[0].rows
+  assert.equal(homeworkRows.find(row => row.name === '失败作业')?.status, 'submit_failed')
+  assert.equal(homeworkRows.find(row => row.name === '后续作业')?.status, 'done_100', '提交失败不能阻止后续作业')
+  assert.ok(fixture.actions.some(line => line.includes(failure === 'result' ? '提交确认弹窗未完成' : '提交控件失效')), '应留下可读的中文失败原因')
+  assert.equal(runner.snapshot().students[0].slot, 'released', '提交失败后必须释放名额')
+  assert.equal(runner.isRunning(), false, '提交失败后调度状态必须收口')
+}
+fixture.submitFailure = null
+fixture.failureCase = false
+fixture.stopDuringAnswer = true
+fixture.answerReject = null
+fixture.submitted = false
+fixture.homeworkClicks = 1
+fixture.portalWaiting = false
+context.preview.path = '/study/assignment/preview.aspx'
+const interruptedAnswer = runner.loginAndRefresh(['student-1'])
+await waitFor(() => fixture.portalWaiting, '作答期间停止场景门户验证等待')
+assert.equal((await runner.signalVerified('student-1')).ok, true)
+await waitFor(() => fixture.answerReject, '等待作答开始')
+const stopAnswer = runner.stopStudent('student-1')
+fixture.answerReject(new Error('page.waitForTimeout: Target page, context or browser has been closed'))
+await Promise.all([stopAnswer, interruptedAnswer])
+const stopped = runner.snapshot().students[0]
+assert.equal(stopped.account, 'stopped')
+assert.notEqual(stopped.courses[0].groups[0].rows[0].status, 'submit_failed', '主动停止不能误记为提交失败')
 console.log('T002 扫码后完整内部模拟链路通过')

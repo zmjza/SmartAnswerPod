@@ -1,4 +1,4 @@
-import { normalizeOption, type QType } from './hash.ts'
+import { matchOptionText, type QType } from './hash.ts'
 
 export const AI_MODELS = [
   'deepseek-ai/DeepSeek-V4-Flash',
@@ -63,9 +63,9 @@ export type AiAnswerValidation =
 export function validateAiAnswer(raw: string, options: string[], qtype: QType): AiAnswerValidation {
   const parsed = parseOptionTexts(raw)
   if (!parsed) return { texts: null, reason: 'invalid_json' }
-  const allowed = new Set(options.map((text) => normalizeOption(text, qtype)))
-  const texts = [...new Set(parsed.map((text) => normalizeOption(text, qtype)))]
-  if (!texts.every((text) => allowed.has(text))) return { texts: null, reason: 'option_mismatch' }
+  const matched = parsed.map((text) => matchOptionText(text, options, qtype))
+  if (!matched.every((text): text is string => text !== null)) return { texts: null, reason: 'option_mismatch' }
+  const texts = [...new Set(matched)]
   if (qtype !== 'multiple' && texts.length !== 1) return { texts: null, reason: 'invalid_count' }
   return { texts, reason: null }
 }

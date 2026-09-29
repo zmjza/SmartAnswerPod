@@ -49,7 +49,7 @@ export async function askAiGroup(opts: {
   const stem = `${opts.shared}\n每个编号恰选一个答案，完整返回所有编号。\n` +
     opts.slots.map((slot) => `${slot.id}. ${slot.stem}`).join('\n')
   const response = await askAi({
-    hash: opts.hash, qtype: 'multiple', stem, options, onAttempt: opts.onAttempt,
+    hash: opts.hash, qtype: 'multiple', stem, options, preLabeledOptions: true, onAttempt: opts.onAttempt,
   })
   return { selected: response.texts ? validateGroupSelection(response.texts, opts.slots) : null,
     model: response.model, attempts: response.attempts }
@@ -60,6 +60,7 @@ export async function askAi(opts: {
   qtype: string
   stem: string
   options: string[]
+  preLabeledOptions?: boolean
   onAttempt?: (attempt: AiAttempt) => void
 }): Promise<{ texts: string[] | null; model?: string; failed: boolean; attempts: AiAttempt[] }> {
   if (asked.has(opts.hash)) return { texts: null, failed: true, attempts: [] }
@@ -76,7 +77,7 @@ export async function askAi(opts: {
     '\n题干:' +
     opts.stem +
     '\n选项:\n' +
-    opts.options.map((t, i) => i + '. ' + t).join('\n') +
+    opts.options.map((t, i) => opts.preLabeledOptions ? t : i + '. ' + t).join('\n') +
     '\n只输出 JSON {\"option_texts\":[\"正确选项正文\"]}'
   const models = rotatedAiModels(nextModelIndex.get(opts.hash) || 0)
   for (let index = 0; index < models.length; index++) {
@@ -85,7 +86,7 @@ export async function askAi(opts: {
     opts.onAttempt?.({ model, index: index + 1, total: AI_MODELS.length, status: 'requesting' })
     const ctrl = new AbortController()
     try {
-      const res = await withTimeout(fetch('https://api.siliconflow.cn/v1/chat/completions', {
+      const response = fetch('https://api.siliconflow.cn/v1/chat/completions', {
         method: 'POST',
         headers: {
           Authorization: 'Bearer ' + siliconflow_key,
@@ -95,12 +96,14 @@ export async function askAi(opts: {
         body: JSON.stringify({
           model,
           temperature: 0,
+          enable_thinking: false,
           messages: [
             { role: 'system', content: AI_SYSTEM_PROMPT },
             { role: 'user', content: prompt },
           ],
         }),
-      }), 12000, () => ctrl.abort())
+      }).then(async (res) => ({ res, data: res.ok ? await res.json() as { choices?: { message?: { content?: string } }[] } : null }))
+      const { res, data } = await withTimeout(response, 60_000, () => ctrl.abort())
       if (!res.ok) {
         if (res.status === 429) {
           deferAiRequests(Math.max(retryAfterMs(res.headers.get('retry-after')), AI_RATE_LIMIT_COOLDOWN_MS))
@@ -110,9 +113,8 @@ export async function askAi(opts: {
         opts.onAttempt?.(attempt)
         continue
       }
-      const data = (await res.json()) as { choices?: { message?: { content?: string } }[] }
       const qtype = opts.qtype as QType
-      const validated = validateAiAnswer(data.choices?.[0]?.message?.content || '', opts.options, qtype)
+      const validated = validateAiAnswer(data?.choices?.[0]?.message?.content || '', opts.options, qtype)
       if (!validated.texts) {
         const attempt: AiAttempt = { model, index: index + 1, total: AI_MODELS.length, status: 'failed', reason: validated.reason }
         attempts.push(attempt)
@@ -127,7 +129,7 @@ export async function askAi(opts: {
       attempts.push(attempt)
       opts.onAttempt?.(attempt)
       continue
-    } finally { /* 每个模型均由 withTimeout 清理计时器 */ }
+    }
   }
   asked.add(opts.hash)
   return { texts: null, failed: true, attempts }

@@ -1,4 +1,4 @@
-import { contentHash, hasReadableQuestionText, mergeCourseNames, normalizeOption, type QType } from './hash.ts'
+import { contentHash, hasReadableQuestionText, matchOptionText, mergeCourseNames, normalizeOption, type QType } from './hash.ts'
 
 export type BankItem = {
   qtype: QType
@@ -28,8 +28,9 @@ export function parseBankJson(raw: string): { items: BankItem[]; skipped: number
     const validType = qtype === 'single' || qtype === 'multiple' || qtype === 'judge'
     const validText = validType && typeof o.stem === 'string' && Array.isArray(o.options) && Array.isArray(o.answer_texts) &&
       hasReadableQuestionText(o.stem, o.options) && hasReadableQuestionText(o.stem, o.answer_texts)
+    const available = validText ? o.options!.map((option) => normalizeOption(option, qtype)) : []
     const answersMatch = validText && o.answer_texts!.every((answer) =>
-      o.options!.some((option) => normalizeOption(option, qtype) === normalizeOption(answer, qtype)))
+      matchOptionText(answer, available, qtype) !== null)
     const validCount = validText && (qtype === 'multiple' ? o.answer_texts!.length > 0 : o.answer_texts!.length === 1)
     if (!validText || !answersMatch || !validCount) {
       skipped++

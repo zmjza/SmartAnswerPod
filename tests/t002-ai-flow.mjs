@@ -11,10 +11,19 @@ const ai = await import('data:text/javascript;base64,' + Buffer.from(built.outpu
 const originalFetch = globalThis.fetch
 const times = []
 const models = []
+const requestBodies = []
+const timeoutDelays = []
 let replies = []
+const originalSetTimeout = globalThis.setTimeout
+globalThis.setTimeout = (callback, delay, ...args) => {
+  if (delay >= 12_000) timeoutDelays.push(delay)
+  return originalSetTimeout(callback, delay, ...args)
+}
 globalThis.fetch = async (_url, opts) => {
   times.push(Date.now())
-  models.push(JSON.parse(opts.body).model)
+  const body = JSON.parse(opts.body)
+  models.push(body.model)
+  requestBodies.push(body)
   return replies.shift() || new Response('down', { status: 503 })
 }
 try {
@@ -29,6 +38,9 @@ try {
   assert.equal(ok.attempts.length, 2)
   assert.deepEqual(ok.attempts.map(item => [item.reason, item.httpStatus]), [['http', 429], ['invalid_json', undefined]])
   assert.equal(new Set(models).size, 3, '模型降级应按不同模型顺序执行')
+  assert.ok(requestBodies.every(body => body.enable_thinking === false), '答题模型应默认关闭思考模式')
+  assert.ok(timeoutDelays.length > 0, '答题请求应设置超时')
+  assert.ok(timeoutDelays.every(delay => delay === 60_000), '每次模型答题请求应等待一分钟')
   assert.equal(times.length, 3)
   assert.ok(times[1] - times[0] >= 4500, '429 冷却至少 5 秒')
   assert.ok(times[2] - times[1] >= 900, '普通请求全局节流至少接近 1000 毫秒')
@@ -46,4 +58,5 @@ try {
   console.log('T002 真实 AI 降级、全失败、全局节流和 429 冷却路径通过')
 } finally {
   globalThis.fetch = originalFetch
+  globalThis.setTimeout = originalSetTimeout
 }

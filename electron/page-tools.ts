@@ -2,7 +2,7 @@ import type { Page } from 'patchright'
 import { SEL } from './core/selectors.ts'
 import { qrDialogLooksOpen } from './core/qr.ts'
 import { answerMatches, questionCompletionConfirmed } from './core/homework.ts'
-import { normalizeOption, type QType } from './core/hash.ts'
+import { matchOptionText, normalizeOption, type QType } from './core/hash.ts'
 import { withTimeout } from './core/timeout.ts'
 
 export { qrDialogLooksOpen } from './core/qr.ts'
@@ -104,13 +104,14 @@ export async function buildAnswerPlan(
   for (const result of results) {
     const pageNo = result.pageNo || result.no
     const qtype = result.qtype === 'unknown' ? undefined : result.qtype
-    const selected = new Set(result.selected.map((text) => normalizeOption(text, qtype)))
     const options = await page.locator('.e-q-body[data-num="' + pageNo + '"] li.e-a').evaluateAll((items) =>
       items.map((li) => ({ index: li.getAttribute('data-index') || '', text: (li as HTMLElement).innerText })))
+    const available = options.map((option) => normalizeOption(option.text, qtype))
+    const selected = new Set(result.selected.map((text) => matchOptionText(text, available, qtype)))
     const expected = options
-      .filter((option) => selected.has(normalizeOption(option.text, qtype)))
+      .filter((_, index) => selected.has(available[index]))
       .map((option) => option.index)
-    if (result.source !== '空过' && (!expected.length || expected.length !== selected.size || expected.some((index) => !index))) {
+    if (result.source !== '空过' && (selected.has(null) || !expected.length || expected.length !== selected.size || expected.some((index) => !index))) {
       throw new Error('整卷复核失败：第 ' + result.no + ' 题答案无法定位')
     }
     plan.push({ no: pageNo, expected })

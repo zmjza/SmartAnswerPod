@@ -54,6 +54,15 @@ export function normalizeOption(raw: string, qtype?: QType): string {
   return t
 }
 
+// Options are normalized once when read from the page. Prefer that exact
+// text so a second prefix inside the answer ("C) C.as ...") remains intact.
+export function matchOptionText(raw: string, options: string[], qtype?: QType): string | null {
+  const exact = collapseSpace(toHalfWidth(raw))
+  if (options.includes(exact)) return exact
+  const withoutOuterLabel = normalizeOption(raw, qtype)
+  return options.includes(withoutOuterLabel) ? withoutOuterLabel : null
+}
+
 export function contentHash(qtype: QType, stem: string, options: string[]): string {
   const stemN = normalizeStem(stem)
   const opts = options.map((o) => normalizeOption(o, qtype)).filter(Boolean).sort()
@@ -76,7 +85,10 @@ export function sameCourseNames(a: string[] | null | undefined, b: string[]): bo
 }
 
 export function sameAnswerTexts(a: string[], b: string[], qtype?: QType): boolean {
-  const normalize = (values: string[]) => [...new Set(values.map((s) => normalizeOption(s, qtype)))].sort()
+  const normalize = (values: string[]) => [...new Set(values.map((s) => {
+    const text = collapseSpace(toHalfWidth(s))
+    return qtype === 'judge' ? normalizeOption(text, qtype) : text
+  }))].sort()
   const left = normalize(a)
   const right = normalize(b)
   return left.length > 0 && left.length === right.length && left.every((text, i) => text === right[i])

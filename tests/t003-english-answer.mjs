@@ -11,7 +11,7 @@ const built = await build({ entryPoints: ['electron/answer.ts'], bundle: true, p
     plugin.onLoad({ filter: /.*/, namespace: 'external-boundary' }, args => ({
       contents: args.path === './bank'
         ? 'export const lookupByHash=async hash=>globalThis.__englishBank?.get(hash)||null'
-        : 'export const askAi=async()=>({texts:null,attempts:[]});export const askAiGroup=async ({slots})=>{globalThis.__englishAiCalls=(globalThis.__englishAiCalls||0)+1;return {selected:Object.fromEntries(slots.map((slot,i)=>[slot.id,slot.options[i%slot.options.length]])),attempts:[]}};export const retryAsked=()=>{}',
+        : 'export const askAi=async()=>({texts:null,attempts:[]});export const askAiGroup=async ({slots})=>{globalThis.__englishAiCalls=(globalThis.__englishAiCalls||0)+1;globalThis.__englishAiSlots=slots;return {selected:Object.fromEntries(slots.map((slot,i)=>[slot.id,slot.options[i%slot.options.length]])),attempts:[]}};export const retryAsked=()=>{}',
       loader: 'js',
     }))
   },
@@ -51,6 +51,7 @@ try {
       { id: '2', stem: 'Second question', options: ['yes', 'no'] }] })
   assert.deepEqual(solved.selected, { '1': 'beta', '2': 'yes' })
   assert.ok(aiPrompt.includes('Shared passage') && aiPrompt.includes('First question') && aiPrompt.includes('Second question'))
+  assert.ok(!aiPrompt.includes('0. 1 ::'), '整组选项不应叠加外层列表序号')
 } finally {
   globalThis.fetch = originalFetch
 }
@@ -81,13 +82,15 @@ try {
   const saved = new Map()
   const posts = []
   let persist = true
+  let stalePrefill = false
+  let failSave = false
   const liveHtml = (kind = '8') => `<div class="e-selects-g"><a class="e-item" data-num="1"></a></div>
     <div class="e-q-body" data-num="1" data-questiontype="${kind}"><div class="e-q-r"><div class="e-q-quest">
       <div class="e-q-q">A short passage about two people.</div>
       ${kind === '11' ? '<p class="transcript">Person one is here. Person two is away.</p>' : ''}
       ${[1, 2].map(n => `<form data-slot="${n}" action="/study/ajax-assignment-online_homework_subanswer">
         <div class="e-q-quest"><div class="e-q-q">${kind === '9' ? '' : `Person ${n} is here?`}</div></div>
-        <input name="answer" value="${saved.get(n) || ''}">
+        <input name="answer" value="${saved.get(n) ?? (stalePrefill && n === 1 ? '0' : '')}">
         <ul><li class="e-a" data-index="1" data-subquestiontype="3">正确</li>
         <li class="e-a" data-index="0" data-subquestiontype="3">错误</li></ul></form>`).join('')}
     </div></div></div><script>
@@ -105,8 +108,8 @@ try {
       for await (const part of req) raw += part
       const form = new URLSearchParams(raw)
       posts.push([form.get('slot'), form.get('answer')])
-      if (persist) saved.set(Number(form.get('slot')), form.get('answer'))
-      res.writeHead(200); res.end('ok')
+      if (persist && !failSave) saved.set(Number(form.get('slot')), form.get('answer'))
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ code: failSave ? 0 : 1 }))
       return
     }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
@@ -128,12 +131,24 @@ try {
     await live.reload()
     assert.deepEqual(await live.locator('form [name=answer]').evaluateAll(items => items.map(item => item.value)), ['1', '0'])
     console.log('T003 英语子题逐项保存并重载读回通过')
+    saved.clear(); posts.length = 0; stalePrefill = true
+    await live.reload()
+    globalThis.__englishBank = new Map(group.slots.map((slot, i) => [slot.hash, { answer_texts: [slot.options[i === 0 ? 1 : 0]] }]))
+    await answer.answerPage({ page: live, local_id: 'student-test', slot: 'occupied',
+      account: 'auto_answering', courseName: 'English', homeworkName: 'Prefilled but unsaved' })
+    assert.deepEqual(posts, [['1', '0'], ['2', '1']], '页面预填答案也必须发保存请求')
+    stalePrefill = false
     saved.clear(); persist = false
     await live.reload()
-    await assert.rejects(answer.answerPage({ page: live, local_id: 'student-test', slot: 'occupied',
-      account: 'auto_answering', courseName: 'English', homeworkName: 'Unsaved' }), /读回不一致/)
-    console.log('T003 保存未持久化时阻止完成通过')
+    const noHydration = await answer.answerPage({ page: live, local_id: 'student-test', slot: 'occupied',
+      account: 'auto_answering', courseName: 'English', homeworkName: 'No GET hydration' })
+    assert.equal(noHydration.compositeVerified, true, '保存成功且页面答案完整时可继续提交')
+    console.log('T003 站点 GET 不回显时保留当前作答页通过')
     persist = true
+    failSave = true; await live.reload()
+    await assert.rejects(answer.answerPage({ page: live, local_id: 'student-test', slot: 'occupied',
+      account: 'auto_answering', courseName: 'English', homeworkName: 'Rejected save' }), /英语子项保存失败/)
+    failSave = false
     for (const [path, type] of [['cloze', '9']]) {
       saved.clear(); posts.length = 0
       await live.goto('http://127.0.0.1:' + server.address().port + '/?' + path)
@@ -142,6 +157,7 @@ try {
         account: 'auto_answering', courseName: 'English', homeworkName: path })
       assert.equal(variant.results.length, 2)
       assert.equal(variant.results.every(row => row.parentNo === '1' && row.source === 'AI 答题'), true)
+      assert.ok(globalThis.__englishAiSlots.every(slot => !slot.stem.includes('A short passage about two people.')), '整组提示词的共享材料不应在每个子题中重复')
       assert.deepEqual(posts, [['1', '1'], ['2', '0']], type)
       assert.equal(variant.compositeVerified, true)
     }

@@ -157,9 +157,12 @@ export async function readReviewedQuestions(page: Page): Promise<ReviewedQuestio
         referenceState = 'valid'
       }
     }
-    if (q.englishType === '11' && qtype === 'single' && hasRight) {
+    if (['8', '9', '11'].includes(q.englishType || '') && qtype !== 'unknown' &&
+        hasRight && q.answerTexts.length === 0 && referenceState !== 'valid') {
       const selected = q.selected.map((text) => normalizeOption(text, qtype))
-      if (selected.length === 1 && normalizedOptions.filter((option) => option === selected[0]).length === 1) {
+      const expected = qtype === 'multiple' ? selected.length > 0 : selected.length === 1
+      if (expected && new Set(selected).size === selected.length &&
+          selected.every((text) => normalizedOptions.filter((option) => option === text).length === 1)) {
         answerTexts = selected
         referenceState = 'valid'
       }
@@ -228,11 +231,6 @@ export async function reviewResults(
    if (q?.correct !== null && q?.correct !== undefined) outcome.graded++
     if (blockedHashes.has(result.hash) || (q?.hash && blockedHashes.has(q.hash))) {
       outcome.referenceStats.contradictions++
-      continue
-    }
-    if (q?.referenceState === 'invalid') {
-      outcome.referenceStats.retry++
-      outcome.pendingCandidates.push(result)
       continue
     }
     if (q?.referenceState === 'valid') {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { contentHash, mergeCourseNames, sameCourseNames, hasReadableQuestionText } from '../electron/core/hash.ts'
+import { contentHash, mergeCourseNames, sameAnswerTexts, sameCourseNames, hasReadableQuestionText } from '../electron/core/hash.ts'
 import { SlotPool } from '../electron/core/slot-pool.ts'
 import { maxAttemptsThisRun } from '../electron/core/attempts.ts'
 import { BANK_ANSWER_DELAY_MAX_MS, BANK_ANSWER_DELAY_MIN_MS, SUBMIT, MAX_ANSWER_REPAIR_ATTEMPTS, answerRepairExhaustedAction, bankAnswerDelayMs, historyDisplayState, isDoneByAnswer, judgeListRow, newestHistory, answerMatches, newSubmission, isUnansweredConfirm, questionCompletionConfirmed } from '../electron/core/homework.ts'
@@ -85,6 +85,12 @@ test('外部请求忽略取消时硬超时仍会返回，避免单题永久卡�
   let timedOut = false
   await assert.rejects(withTimeout(new Promise<never>(() => {}), 10, () => { timedOut = true }), /操作超时/)
   assert.equal(timedOut, true)
+})
+
+test('运行日志解释站点和浏览器底层错误并隐藏地址', () => {
+  assert.equal(sanitizeRuntimeLogText('page.goto: net::ERR_CONNECTION_CLOSED at https://example.com/secret Call log:'), '打开页面失败：站点连接被关闭（ERR_CONNECTION_CLOSED）')
+  assert.equal(sanitizeRuntimeLogText('page.waitForTimeout: Target page, context or browser has been closed'), '浏览器页面已关闭')
+  assert.equal(sanitizeRuntimeLogText('locator.click: Timeout 8000ms exceeded'), '点击页面控件等待超时')
 })
 
 test('题目只有答案完整写入且右侧已做提亮才允许继续', () => {
@@ -504,8 +510,11 @@ test('已验证旧答案与未验证 JSON 导入答案不同时保留旧答案�
 
 test('题库 JSON 导入逐项跳过缺字段、空值、未知题型和损坏文本', () => {
   const valid = { qtype: 'single', stem: '有效题', options: ['甲', '乙'], answer_texts: ['甲'] }
+  const nestedLabel = { ...valid, options: ['A) A.less', 'B) B.most', 'C) C.as intelligent as'],
+    answer_texts: ['C.as intelligent as'] }
   const parsed = parseBankJson(JSON.stringify([
     valid,
+    nestedLabel,
     { ...valid, stem: '' },
     { ...valid, qtype: 'essay' },
     { ...valid, options: [] },
@@ -514,7 +523,7 @@ test('题库 JSON 导入逐项跳过缺字段、空值、未知题型和损坏�
     { ...valid, answer_texts: ['不存在的选项'] },
     { ...valid, answer_texts: ['甲', '乙'] },
   ]))
-  assert.deepEqual(parsed.items, [valid])
+  assert.deepEqual(parsed.items, [valid, nestedLabel])
   assert.equal(parsed.skipped, 7)
   assert.throws(() => parseBankJson('{'), /JSON/)
   assert.throws(() => parseBankJson('{}'), /JSON 需为题目数组/)
@@ -634,6 +643,12 @@ test('T-J1 只认 option_texts', () => {
 test('AI 正文校验按规范化选项匹配，失败原因可区分', () => {
   assert.deepEqual(validateAiAnswer('{"option_texts":["A. 甲"]}', ['甲', '乙'], 'single'), { texts: ['甲'], reason: null })
   assert.deepEqual(validateAiAnswer('{"option_texts":["A. 甲","甲"]}', ['甲', '乙'], 'single'), { texts: ['甲'], reason: null })
+  assert.deepEqual(validateAiAnswer('{"option_texts":["C.as intelligent as"]}', ['less intelligent', 'the most intelligent', 'C.as intelligent as'], 'single'),
+    { texts: ['C.as intelligent as'], reason: null }, '正文内的 C. 必须保留')
+  assert.deepEqual(validateAiAnswer('{"option_texts":["C) C.as intelligent as"]}', ['less intelligent', 'the most intelligent', 'C.as intelligent as'], 'single'),
+    { texts: ['C.as intelligent as'], reason: null }, '只剥离页面外层选项序号')
+  assert.equal(sameAnswerTexts(['C.as intelligent as'], ['as intelligent as'], 'single'), false,
+    '题库回写不能把正文内的 C. 当作可忽略前缀')
   assert.deepEqual(validateAiAnswer('A', ['甲', '乙'], 'single'), { texts: null, reason: 'invalid_json' })
   assert.deepEqual(validateAiAnswer('{"option_texts":["丙"]}', ['甲', '乙'], 'single'), { texts: null, reason: 'option_mismatch' })
   assert.deepEqual(validateAiAnswer('{"option_texts":["甲","乙"]}', ['甲', '乙'], 'single'), { texts: null, reason: 'invalid_count' })

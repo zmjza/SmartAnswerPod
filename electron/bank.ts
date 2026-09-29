@@ -35,10 +35,10 @@ function rest(url: string, path: string) {
 
 export async function lookupByHash(hash: string): Promise<QuestionRow | null> {
   const blocked = () => rejectedHashes.has(hash) || getWriteback().some((item) => item.need_delete_hashes.includes(hash))
-  if (blocked()) return null
   try {
+    if (blocked() && !isReferenceHashProtected(hash)) return null
     const row = await readQuestion(hash)
-    return blocked() || row?.conflict ? null : row
+    return (blocked() && !isReferenceHashProtected(hash)) || row?.conflict ? null : row
   } catch { return null }
 }
 

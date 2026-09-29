@@ -1,9 +1,9 @@
 import type { Page } from 'patchright'
 import { SEL } from './core/selectors'
-import { contentHash, englishMatchStem, englishSlotStem, normalizeOption, normalizeStem, qtypeFromPage, hasReadableQuestionText, type QType } from './core/hash'
+import { contentHash, englishMatchStem, englishSlotStem, matchOptionText, normalizeOption, normalizeStem, qtypeFromPage, hasReadableQuestionText, type QType } from './core/hash'
 import { lookupByHash } from './bank'
 import { askAi, askAiGroup, retryAsked, type AiAttempt } from './ai'
-import { aiAllFailedAction } from './core/ai-parse'
+import { aiAllFailedAction, aiFailureReason } from './core/ai-parse'
 import { answerMatches, answerRepairExhaustedAction, bankAnswerDelayMs, MAX_ANSWER_REPAIR_ATTEMPTS } from './core/homework'
 import { buildAnswerPlan, incompleteQuestionNos, readAnswer, waitAnswer, waitQuestionComplete, verifyAnswerSheet } from './page-tools'
 import { emitProgress } from './progress'
@@ -112,7 +112,6 @@ async function saveEnglishSlot(page: Page, group: EnglishGroup, slot: EnglishSlo
   const current = matching
     ? await form.locator('select[name="answer"]').nth(slot.ordinal - 1).inputValue()
     : await form.locator('input[name="answer"]').inputValue()
-  if (!matching && current === index) return { parentNo: group.no, slot: slot.ordinal, index, matching }
   const route = matching ? '/study/ajax-assignment-online_homework_match' : '/study/ajax-assignment-online_homework_subanswer'
   const saved = page.waitForResponse((response) =>
     response.url().includes(route) && response.request().method() === 'POST', { timeout: 8000 })
@@ -127,6 +126,10 @@ async function saveEnglishSlot(page: Page, group: EnglishGroup, slot: EnglishSlo
   const response = await saved
   await response.finished()
   if (!response.ok()) throw new Error('英语子项保存失败，禁止提交')
+  if (!matching) {
+    const result = await response.json().catch(() => null)
+    if (Number(result?.code) !== 1) throw new Error('英语子项保存失败，禁止提交')
+  }
   const input = matching ? form.locator('select[name="answer"]').nth(slot.ordinal - 1) : form.locator('input[name="answer"]')
   await input.evaluate((element, expected) => {
     if ((element as HTMLInputElement).value !== expected) throw new Error('保存后页面答案不一致')
@@ -140,22 +143,27 @@ async function verifyEnglishSaves(page: Page, saved: EnglishSave[]): Promise<voi
     const form = body.locator('form').nth(item.matching ? 0 : item.slot - 1)
     const input = item.matching ? form.locator('select[name="answer"]').nth(item.slot - 1) : form.locator('input[name="answer"]')
     const start = Date.now()
-    while (await input.inputValue().catch(() => '') !== item.index) {
-      if (Date.now() - start >= 8000) throw new Error('英语子项刷新后读回不一致，禁止提交')
+    let actual = await input.inputValue().catch(() => '')
+    while (actual !== item.index) {
+      if (Date.now() - start >= 8000) throw new Error(`父题 ${item.parentNo} 子题 ${item.slot} 保存后答案不一致（预期 index ${item.index}，实际 ${actual || '空'}），禁止提交`)
       await page.waitForTimeout(200)
+      actual = await input.inputValue().catch(() => '')
     }
   }
 }
 
-async function answerEnglishGroup(page: Page, group: EnglishGroup, firstNo: number): Promise<{
+async function answerEnglishGroup(page: Page, group: EnglishGroup, firstNo: number,
+  onAttempt?: (attempt: AiAttempt) => void): Promise<{
   results: QResult[]; saves: EnglishSave[]; bankCount: number; aiCount: number
 }> {
   const chosen = new Map<number, { text: string; source: QResult['source'] }>()
   for (const slot of group.slots) {
     const hit = await lookupByHash(slot.hash)
     const text = hit?.answer_texts?.length === 1
-      ? slot.options.find((option) => normalizeOption(hit.answer_texts[0], slot.qtype) === option)
-      : undefined
+      ? matchOptionText(hit.answer_texts[0], slot.options, slot.qtype)
+      : null
+    if (hit?.answer_texts?.length && !text)
+      throw new Error(`英语第 ${group.no} 题子题 ${slot.ordinal} 题库答案无法匹配当前页面选项，停止本份作业`)
     if (text) chosen.set(slot.ordinal, { text, source: '题库答题' })
   }
   const missing = group.slots.filter((slot) => !chosen.has(slot.ordinal))
@@ -165,9 +173,14 @@ async function answerEnglishGroup(page: Page, group: EnglishGroup, firstNo: numb
     const ai = await askAiGroup({
       hash: contentHash('multiple', group.shared, group.slots.map((slot) => slot.hash)),
       shared: group.transcript ? `${group.shared}\n听力转写：${group.transcript}` : group.shared,
-      slots: missing.map((slot) => ({ id: String(slot.ordinal), stem: slot.stem, options: slot.options })),
+      slots: missing.map((slot) => ({ id: String(slot.ordinal),
+        stem: slot.stem.startsWith(group.shared + '\n') ? slot.stem.slice(group.shared.length + 1) : slot.stem,
+        options: slot.options })),
+      onAttempt,
     })
-    if (!ai.selected) throw new Error('英语整组答案缺项或不匹配，禁止提交')
+    if (!ai.selected) throw new Error(ai.model
+      ? '英语整组答案编号或选项不匹配，禁止提交'
+      : '英语整组 AI 答题失败 · ' + aiFailureReason(ai.attempts.at(-1)))
     for (const slot of missing) {
       const text = ai.selected[String(slot.ordinal)]
       if (!text || !slot.options.includes(text)) throw new Error('英语整组答案缺项，禁止提交')
@@ -205,14 +218,15 @@ export async function clickByTexts(page: Page, dataNum: string, qtype: QType, te
   const body = page.locator('.e-q-body[data-num="' + dataNum + '"]')
   const lis = body.locator('li.e-a')
   const n = await lis.count()
-  const want = new Set(texts.map((t) => normalizeOption(t, qtype)))
   const entries: { index: string; text: string }[] = []
   for (let i = 0; i < n; i++) {
     const li = lis.nth(i)
     entries.push({ index: (await li.getAttribute('data-index')) || '', text: normalizeOption(await li.innerText(), qtype) })
   }
+  const available = entries.map((entry) => entry.text)
+  const want = new Set(texts.map((text) => matchOptionText(text, available, qtype)))
   const targets = entries.filter((entry) => want.has(entry.text))
-  if (!want.size || targets.length !== want.size || targets.some((entry) => !entry.index) ||
+  if (want.has(null) || !want.size || want.size !== texts.length || targets.length !== want.size || targets.some((entry) => !entry.index) ||
       (qtype !== 'multiple' && targets.length !== 1)) return false
   if (qtype === 'multiple') {
     const expected = targets.map((entry) => entry.index)
@@ -340,7 +354,11 @@ export async function answerPage(opts: {
     const typeRaw = (await body.getAttribute('data-questiontype')) || ''
     if (typeRaw === '7' || typeRaw === '8' || typeRaw === '9' || typeRaw === '11') {
       const group = await readEnglishGroup(page, dataNum, typeRaw)
-      const english = await answerEnglishGroup(page, group, results.length + 1)
+      const english = await answerEnglishGroup(page, group, results.length + 1, (attempt) => {
+        emitProgress({ local_id, slot, account,
+          action: aiAttemptAction('英语整组 · ', results.length + 1, answerSlotTotal, attempt),
+          courseName, homeworkName, homework: 'answering', bankCount, aiCount })
+      })
       let groupBank = 0
       let groupAi = 0
       for (const result of english.results) {
@@ -401,6 +419,7 @@ export async function answerPage(opts: {
         await page.waitForTimeout(bankAnswerDelayMs())
         continue
       }
+      throw new Error(`第 ${i + 1} 题题库答案无法匹配当前页面选项，停止本份作业`)
     }
     const ai = await askAi({
       hash, qtype, stem, options: options.map((o) => o.text),
@@ -434,7 +453,6 @@ export async function answerPage(opts: {
         questionNo: i + 1, questionTotal: total, source: '空过', bankCount, aiCount,
       })
   }
-  if (englishSaves.length) await page.reload({ waitUntil: 'domcontentloaded' })
   await verifyEnglishSaves(page, englishSaves)
   let plan = await buildAnswerPlan(page, results.filter((result) => !result.parentNo))
   const repairFailures = new Map<string, string>()
@@ -452,7 +470,9 @@ export async function answerPage(opts: {
       let source = result.source
       if (!texts.length) {
         const hit = await lookupByHash(result.hash)
-        if (hit?.answer_texts?.length && await clickByTexts(page, result.pageNo!, qtype, hit.answer_texts)) {
+        if (hit?.answer_texts?.length) {
+          if (!await clickByTexts(page, result.pageNo!, qtype, hit.answer_texts))
+            throw new Error(`第 ${result.no} 题题库答案无法匹配当前页面选项，停止本份作业`)
           texts = hit.answer_texts
           source = '题库答题'
           bankCount++

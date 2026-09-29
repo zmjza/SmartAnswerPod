@@ -7,6 +7,7 @@ let patchIgnored = false
 let deleteCalls = 0
 globalThis.__protectedHashes = new Set()
 globalThis.__protectFail = false
+globalThis.__pendingDeletes = []
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1')
   if (!url.pathname.endsWith('/questions')) { res.writeHead(404); res.end(); return }
@@ -31,7 +32,7 @@ const built = await build({
   plugins: [{ name: 'local-settings', setup(plugin) {
     plugin.onResolve({ filter: /store$/ }, args => ({ path: args.path, namespace: 'local-store' }))
     plugin.onLoad({ filter: /.*/, namespace: 'local-store' }, () => ({
-      contents: "export const getSettings = () => ({ supabase_url: globalThis.__bankUrl, supabase_anon: 'fake' }); export const getWriteback = () => []; export const protectReferenceHash = hash => { if (globalThis.__protectFail) return false; globalThis.__protectedHashes.add(hash); return true }; export const isReferenceHashProtected = hash => globalThis.__protectedHashes.has(hash)", loader: 'js',
+      contents: "export const getSettings = () => ({ supabase_url: globalThis.__bankUrl, supabase_anon: 'fake' }); export const getWriteback = () => globalThis.__pendingDeletes; export const protectReferenceHash = hash => { if (globalThis.__protectFail) return false; globalThis.__protectedHashes.add(hash); return true }; export const isReferenceHashProtected = hash => globalThis.__protectedHashes.has(hash)", loader: 'js',
     }))
   } }],
 })
@@ -41,6 +42,9 @@ try {
   assert.equal(await bank.upsertQuestion(item), 'added')
   assert.equal(globalThis.__protectedHashes.has(row.content_hash), true, '参考答案写库前应持久保护 hash')
   assert.deepEqual((await bank.lookupByHash(row.content_hash)).answer_texts, ['乙'])
+  globalThis.__pendingDeletes = [{ need_delete_hashes: [row.content_hash] }]
+  assert.deepEqual((await bank.lookupByHash(row.content_hash))?.answer_texts, ['乙'], '旧待删除记录不得挡住已确认参考答案')
+  globalThis.__pendingDeletes = []
  assert.equal(await bank.deleteByHash(row.content_hash, ['乙']), 'protected')
   const restarted = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64') + '#restart')
   assert.equal(await restarted.deleteByHash(row.content_hash, ['乙']), 'protected', '重启后旧待删任务仍受保护')

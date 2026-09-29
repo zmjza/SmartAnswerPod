@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { build } from "esbuild"
 
 const account = (id) => ({ local_id: id, name: id, username: id, password: "fake", display_mode: "headless", work_mode: "answer", course_scope: "all", answer_round_limit: 10 })
-const fixture = { accounts: [account("a"), account("b"), account("c")], occupied: new Set(), starts: [], pending: new Map(), limit: 2 }
+const fixture = { accounts: [account("a"), account("b"), account("c")], occupied: new Set(), starts: [], pending: new Map(), acquireGates: new Map(), acquiring: new Set(), limit: 2 }
 globalThis.__t002 = fixture
 const modules = {
   electron: "export const app = {}; export class Notification { static isSupported() { return false } }",
@@ -11,7 +11,7 @@ const modules = {
     "const f = () => globalThis.__t002;",
     "export const slots = { setLimit(n) { f().limit = n } };",
     "export const isHeld = id => f().occupied.has(id);",
-    "export const acquire = async id => { if (f().occupied.size >= f().limit) return { ok: false, queued: true }; f().occupied.add(id); return { ok: true, context: { pages: () => [{}] } } };",
+    "export const acquire = async id => { if (f().occupied.size >= f().limit) return { ok: false, queued: true }; const gate=f().acquireGates.get(id); if (gate) { f().acquiring.add(id); await gate; f().acquireGates.delete(id); f().acquiring.delete(id) } f().occupied.add(id); return { ok: true, context: { pages: () => [{}] } } };",
     "export const release = async id => { f().occupied.delete(id) };",
     "export const averageBrowserMemoryBytes = () => 0; export const browserMemoryStatus = () => 'idle';",
     "export const browserWindowVisible = () => false; export const getContext = () => null;",
@@ -20,12 +20,12 @@ const modules = {
   ].join(""),
   "./login": "export const loginIam = ({ local_id }) => new Promise(resolve => { globalThis.__t002.starts.push(local_id); globalThis.__t002.pending.set(local_id, resolve) })",
   "./detect": "export const detectCourse = async () => null; export const listCourses = async () => []; export const readHistory = async () => []",
-  "./answer": "export const answerPage = async () => []",
+  "./answer": "export class ListeningBankMissError extends Error {} export const answerPage = async () => []",
   "./submit": "export const historyHasNew = () => false; export const submitHomework = async () => null",
   "./progress": "export const onProgress = () => {}; export const emitProgress = () => {}",
   "./page-tools": "export const hasQr = async () => false",
   "./ai": "export const resetAsked = () => {}",
-  "./review.ts": "export const extractReviewedQuestions = async () => []; export const reviewResults = async () => null",
+  "./review.ts": "export const contradictoryReferenceHashes = () => []; export const readReviewedQuestions = async () => []; export const extractReviewedQuestions = async () => []; export const reviewResults = async () => null",
   "./bank.ts": "export const upsertQuestion = async () => null",
 }
 const built = await build({ entryPoints: ["electron/runner.ts"], bundle: true, platform: "node", format: "esm", write: false, plugins: [{
@@ -83,6 +83,32 @@ await waitFor(() => fixture.starts.filter(id => id === "a").length === 3)
 finish("a")
 await rerun
 assert.equal(runner.snapshot().running, false, "自然结束后主按钮必须解锁")
+let openA, openB
+fixture.acquireGates.set('a', new Promise(resolve => { openA = resolve }))
+fixture.acquireGates.set('b', new Promise(resolve => { openB = resolve }))
+const interrupted = runner.loginAndRefresh(['a', 'b'])
+await waitFor(() => fixture.acquiring.has('a') && fixture.acquiring.has('b'))
+const stopLaunchingA = runner.stopStudent('a')
+const stopLaunchingB = runner.stopStudent('b')
+openA()
+openB()
+await Promise.all([stopLaunchingA, stopLaunchingB, interrupted])
+assert.equal(fixture.occupied.size, 0, '启动浏览器期间停止后不得残留两个占用名额')
+fixture.acquireGates.set('a', new Promise(resolve => { openA = resolve }))
+fixture.acquireGates.set('b', new Promise(resolve => { openB = resolve }))
+const interruptedAll = runner.loginAndRefresh(['a', 'b'])
+await waitFor(() => fixture.acquiring.has('a') && fixture.acquiring.has('b'))
+const stopBoth = runner.stopAllStudents()
+openA()
+openB()
+await Promise.all([stopBoth, interruptedAll])
+assert.equal(fixture.occupied.size, 0, '全部停止后不得残留占用名额')
+const restartBoth = runner.loginAndRefresh(['a', 'b'])
+await waitFor(() => fixture.starts.filter(id => id === 'a').length === 4 && fixture.starts.filter(id => id === 'b').length === 2)
+finish('a')
+finish('b')
+await restartBoth
+assert.equal(fixture.occupied.size, 0, '重新开始的两个账号结束后应释放名额')
 runner.views.get("a").selectedCourseNames = ["课程甲"]
 runner.views.get("b").selectedCourseNames = ["课程乙"]
 fixture.accounts[0].course_scope = "selected"

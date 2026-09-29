@@ -16,7 +16,7 @@ import { pressureOf, formatMb, recommendConcurrency } from './core/machine'
 import { canClickDoHomework } from '../src/verify-gate'
 import { contradictoryReferenceHashes, extractReviewedQuestions, readReviewedQuestions, reviewResults, type ReviewedQuestion, type ReviewOutcome, type ReferenceStats } from './review.ts'
 import { historyDisplayState, newestHistory, newSubmission } from './core/homework.ts'
-import { mergeAccountWriteback, writebackDisposition } from './core/writeback.ts'
+import { mergeAccountWriteback } from './core/writeback.ts'
 import { upsertHomework, courseOutcome, recordQuestion, emptyExtractStats, addExtractStats, extractCompletionLabel, type ExtractStats, type LiveCourse, type LiveHomeworkGroup, type LiveQuestion } from './core/live-view.ts'
 import { mapWithConcurrency } from './core/concurrency.ts'
 import { concurrencySnapshot } from './core/concurrency.ts'
@@ -752,15 +752,10 @@ async function runOne(a: LocalAccount) {
     return
   }
   setState(v, 'logged_in', '已登录', 'occupied')
+  let blockedWriteback = new Set<string>()
   if (a.work_mode === 'answer') {
-    while (!stopFlag.has(a.local_id)) {
-      const blockedWriteback = await flushWriteback(a, v, ctx)
-      const disposition = writebackDisposition(blockedWriteback.size, stopFlag.has(a.local_id))
-      if (disposition === 'done') break
-      if (disposition === 'stopped') return
-      setState(v, 'flushing_writeback', '历史回写尚未完成，保持浏览器占位并原地重试', 'occupied')
-      await waitMs(WRITEBACK_RETRY_MS)
-    }
+    blockedWriteback = await flushWriteback(a, v, ctx)
+    if (stopFlag.has(a.local_id)) return
   }
   await flushExtractWriteback(a, v)
   const courses = await listCourses(page, a.local_id, v.slot)
@@ -1065,24 +1060,27 @@ async function runOne(a: LocalAccount) {
     for (const hw of c.homeworks) {
       if (stopFlag.has(a.local_id)) return
       if (!hw.needDo) continue
+      if (blockedWriteback.has(c.name + '\0' + hw.name)) {
+        hw.status = 'pending_writeback'
+        syncHomeworkView(v, c.key || c.name, hw)
+        setState(v, 'auto_answering', '本份仍待回写，跳过作答 · ' + c.name + ' · ' + hw.name)
+        continue
+      }
       try {
         await doHomeworkLoop(a, v, hw, c, () => verified, (x) => { verified = x })
+        if (stopFlag.has(a.local_id)) return
         if (hw.status === 'submit_failed') {
-          setState(v, 'round_ended', '作答或提交未确认，停止该学生后续作业；请查看日志', 'released')
-          await release(a.local_id)
-          return
+          setState(v, 'auto_answering', '本份失败，继续下一份 · ' + c.name + ' · ' + hw.name)
         }
       } catch (error) {
         if (stopFlag.has(a.local_id)) return
         hw.status = 'submit_failed'
-        syncHomeworkView(v, c.key, hw)
+        syncHomeworkView(v, c.key || c.name, hw)
         const reason = error instanceof Error ? error.message : '未知错误'
-        setState(v, 'round_ended', '本份异常，停止该学生后续作业 · ' + hw.name + ' · ' + reason, 'released')
-        await release(a.local_id)
-        return
+        setState(v, 'auto_answering', '本份异常，继续下一份 · ' + c.name + ' · ' + hw.name + ' · ' + reason)
       }
     }
-    const course = v.courses.find((row) => row.key === c.key)
+    const course = v.courses.find((row) => row.key === (c.key || c.name))
     if (course) course.status = courseOutcome(c.homeworks.map((hw) => hw.status))
     setState(v, 'auto_answering', '课程处理结果 · ' + c.name + ' · ' + (course?.status || ''))
   }
@@ -1154,10 +1152,11 @@ async function doHomeworkLoop(
     setState(v, 'auto_answering', '作答 ' + hw.name)
     const before = (await readHistory(hw.page)).map((r) => r.submittedAt)
     const answer = await openDoHomework(a, v, hw.page, courseName, hw.name, setVerified, false)
+    if (stopFlag.has(a.local_id)) return
     if (!answer) {
       hw.status = 'submit_failed'
       syncHomeworkView(v, courseKey, hw)
-      setState(v, 'auto_answering', '未进入作答页 ' + hw.name)
+      setState(v, 'auto_answering', '点做作业后未进入作答页，本站页面或验证未放行 · ' + hw.name)
       return
     }
     let ans
@@ -1189,6 +1188,7 @@ async function doHomeworkLoop(
       },
     })
     } catch (error) {
+      if (stopFlag.has(a.local_id)) return
       if (error instanceof ListeningBankMissError) {
         hw.status = 'skip_bank_miss'
         hw.attempt = 0
@@ -1202,6 +1202,7 @@ async function doHomeworkLoop(
       setState(v, 'auto_answering', '作答失败 · ' + hw.name + ' · ' + reason)
       return
     }
+    if (stopFlag.has(a.local_id)) return
     v.bankCount = bankBase + ans.bankCount
     v.aiCount = aiBase + ans.aiCount
     const course = v.courses.find((item) => item.key === courseKey)
@@ -1230,10 +1231,11 @@ async function doHomeworkLoop(
     hw.status = 'submitting'
     syncHomeworkView(v, courseKey, hw)
     const sub = await submitHomework({ page: answer, local_id: a.local_id, slot: v.slot, account: 'auto_answering', homeworkName: hw.name, verifiedComposite: ans.compositeVerified })
+    if (stopFlag.has(a.local_id)) return
     if (!sub.ok) {
       hw.status = 'submit_failed'
       syncHomeworkView(v, courseKey, hw)
-      if (sub.incomplete) setState(v, 'auto_answering', '仍有未作答题，已取消提交 · ' + hw.name)
+      setState(v, 'auto_answering', (sub.incomplete ? '仍有未作答题，已取消提交' : '提交确认弹窗未完成，未确认交卷') + ' · ' + hw.name)
       return
     }
     await hw.page.bringToFront().catch(() => {})
@@ -1254,6 +1256,7 @@ async function doHomeworkLoop(
     if (!okHist) {
       hw.status = 'submit_failed'
       syncHomeworkView(v, courseKey, hw)
+      setState(v, 'auto_answering', '提交后历史未出现本次交卷记录，结果未确认，跳过本份 · ' + hw.name)
       return
     }
     hw.status = 'waiting_grade'
@@ -1274,7 +1277,8 @@ async function doHomeworkLoop(
       created_at: new Date().toISOString(),
     })
     let graded: Awaited<ReturnType<typeof readHistory>>[number] | null = null
-    while (!stopFlag.has(a.local_id) && !graded) {
+    const gradeDeadline = Date.now() + 120_000
+    while (!stopFlag.has(a.local_id) && !graded && Date.now() < gradeDeadline) {
       const hist = await readHistory(historyPage)
       const latest = newSubmission(hist, before)
       graded = latest?.status.includes('已批阅') && latest.historyHref ? latest : null
@@ -1284,7 +1288,13 @@ async function doHomeworkLoop(
       await historyPage.reload().catch(() => {})
       await historyPage.locator(SEL.historyTable).waitFor({ timeout: 15000 }).catch(() => {})
     }
-    if (!graded) return
+    if (!graded) {
+      if (stopFlag.has(a.local_id)) return
+      hw.status = 'pending_writeback'
+      syncHomeworkView(v, courseKey, hw)
+      setState(v, 'auto_answering', '本次已提交，批阅超过两分钟未出；保留待回写并继续下一份 · ' + hw.name)
+      return
+    }
     const historyHref = graded.historyHref!
     hw.score = graded?.score ?? null
     if (hw.score != null) {
@@ -1329,7 +1339,7 @@ async function doHomeworkLoop(
       courseName, homeworkName: hw.name, homework: 'reviewing',
       bankCount: v.bankCount, aiCount: v.aiCount,
     })
-    while (review.pendingCandidates.length && !stopFlag.has(a.local_id)) {
+    if (review.pendingCandidates.length && !stopFlag.has(a.local_id)) {
       hw.status = 'pending_writeback'
       syncHomeworkView(v, courseKey, hw)
       appendWriteback({
@@ -1343,7 +1353,7 @@ async function doHomeworkLoop(
         candidates: review.pendingCandidates,
         created_at: new Date().toISOString(),
       })
-      setState(v, 'flushing_writeback', '本轮回写未完成，保持浏览器占位并原地重试 · ' + hw.name, 'occupied')
+      setState(v, 'flushing_writeback', `回写待处理 ${review.pendingCandidates.length} 项（参考待重试 ${review.referenceStats.retry}、写入失败 ${review.pendingInsertHashes.length}、删除失败 ${review.pendingDeleteHashes.length}）· ${hw.name}`, 'occupied')
       await waitMs(WRITEBACK_RETRY_MS)
       const retry = await maybeReview(hw.page, review.pendingCandidates, courseName, historyHref)
       totalInserted += retry.inserted
@@ -1356,6 +1366,16 @@ async function doHomeworkLoop(
       referenceTotals.contradictions += retry.referenceStats.contradictions
       protectedDeletes += retry.protectedDeletes || 0
       review = { ...retry, inserted: totalInserted, deleted: totalDeleted, conflicts: totalConflicts, referenceStats: { ...referenceTotals }, protectedDeletes }
+      if (review.pendingCandidates.length) {
+        appendWriteback({
+          local_id: a.local_id, course_name: courseName, homework_id: hw.name,
+          preview_href: hw.page.url(), history_href: historyHref,
+          need_insert_hashes: review.pendingInsertHashes, need_delete_hashes: review.pendingDeleteHashes,
+          candidates: review.pendingCandidates, created_at: new Date().toISOString(),
+        })
+        setState(v, 'auto_answering', '本份回写仍待处理，继续下一份 · ' + hw.name)
+        return
+      }
       hw.status = 'reviewing'
       syncHomeworkView(v, courseKey, hw)
     }
@@ -1489,6 +1509,12 @@ async function flushWriteback(a: LocalAccount, v: StudentView, ctx: BrowserConte
         reviewResults(history, item.candidates!, item.course_name || ''))
       setState(v, 'flushing_writeback', `补偿读取 ${outcome.reviewed} 题，匹配 ${outcome.matched} 题，对错可判定 ${outcome.graded} 题`, 'occupied')
       if (outcome.pendingCandidates.length) {
+        emitProgress({
+          local_id: a.local_id, slot: v.slot, account: v.account,
+          action: `回写仍待处理 ${outcome.pendingCandidates.length} 项（参考待重试 ${outcome.referenceStats.retry}、写入失败 ${outcome.pendingInsertHashes.length}、删除失败 ${outcome.pendingDeleteHashes.length}）`,
+          homeworkName: item.homework_id, homework: 'pending_writeback',
+          courseName: item.course_name, bankCount: v.bankCount, aiCount: v.aiCount,
+        })
         retained.push({
           ...item,
           history_href: historyHref,
@@ -1505,7 +1531,14 @@ async function flushWriteback(a: LocalAccount, v: StudentView, ctx: BrowserConte
           courseName: item.course_name, bankCount: v.bankCount, aiCount: v.aiCount,
         })
       }
-    } catch {
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      emitProgress({
+        local_id: a.local_id, slot: v.slot, account: v.account,
+        action: '待回写补抽失败 · ' + reason, homeworkName: item.homework_id,
+        homework: 'pending_writeback', courseName: item.course_name,
+        bankCount: v.bankCount, aiCount: v.aiCount,
+      })
       retained.push(item)
     }
   }
@@ -1612,8 +1645,8 @@ function scheduleStudent(a: LocalAccount) {
     const v = viewOf(a)
     const reason = e instanceof Error ? e.message : '未知运行异常'
     setState(v, 'stopped', '本学生已停止 · ' + reason, 'released')
+  }).finally(async () => {
     await release(a.local_id)
-  }).finally(() => {
     activeRuns.delete(a.local_id)
     runAccountIds.delete(a.local_id)
     stopControllers.delete(a.local_id)

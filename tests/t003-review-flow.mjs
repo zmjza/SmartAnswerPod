@@ -49,9 +49,23 @@ try {
   assert.equal(outcome.referenceQuestions, 2, '损坏参考答案仍属于参考分支待重试')
   assert.equal(outcome.referenceStats.added, 1)
   assert.equal(outcome.inserted, 1, '无参考答案旧分支保持 AI 答对入库')
-  assert.equal(outcome.referenceStats.retry, 1)
+  assert.equal(outcome.referenceStats.retry, 0, '可独立判错的子题不应因参考占位无限重试')
+  assert.equal(outcome.aiWrong, 1)
   assert.deepEqual(rows.get(parsed[0].hash).answer_texts, ['乙'])
-  assert.deepEqual(outcome.pendingCandidates.map(q => q.hash), [parsed[2].hash])
+  assert.deepEqual(outcome.pendingCandidates, [])
+  await page.setContent(`<div class="e-q-body" data-questiontype="1"><div class="e-q">
+    <div class="e-q-q">双层前缀单选</div><div class="e-q-l"><span class="e-q-wrong"></span></div>
+    <div class="e-a-g e-choice-a"><ul><li class="e-a">A) A.less</li>
+    <li class="e-a checked">B) B.most</li><li class="e-a">C) C.as intelligent as</li></ul></div>
+    <div class="e-a-ans"><div class="e-ans-ref"><span class="e-ans-r">C</span></div></div>
+    </div></div>`)
+  const nested = (await review.readReviewedQuestions(page))[0]
+  assert.deepEqual(nested.answerTexts, ['C.as intelligent as'])
+  const nestedReview = await review.reviewResults(page, [{ no: '1', hash: nested.hash, qtype: 'single',
+    stem: nested.stem, options: nested.options, selected: ['B.most'], source: 'AI 答题' }], '测试课程')
+  assert.equal(nestedReview.referenceStats.added, 1)
+  assert.deepEqual(rows.get(nested.hash).answer_texts, ['C.as intelligent as'])
+  await page.setContent(question('可靠参考', false, 'B') + question('旧分支', true, null) + question('损坏参考', false, 'Z'))
  const blocked = await review.reviewResults(page, [results[0]], '测试课程', { blockedHashes: new Set([parsed[0].hash]) })
   assert.equal(blocked.oldModeQuestions, 0)
   assert.equal(blocked.referenceQuestions, 1)
@@ -109,7 +123,7 @@ try {
   const english = await review.readReviewedQuestions(page)
   assert.equal(english.length, 8)
   assert.deepEqual(english.map(q => q.correct), [true, false, true, false, true, true, null, true])
-  assert.deepEqual(english.map(q => q.referenceState), ['absent', 'valid', 'absent', 'absent', 'valid', 'valid', 'invalid', 'absent'])
+  assert.deepEqual(english.map(q => q.referenceState), ['valid', 'valid', 'valid', 'absent', 'valid', 'valid', 'invalid', 'absent'])
   assert.ok(english.slice(0, 6).every(q => q.hash))
   assert.equal(english[4].hash, contentHash('single', englishSlotStem('听力材料一', 11, 1, '听力一'), ['甲', '乙']),
     '听力题库身份只取固定题干、子题与选项，不依赖转写')
@@ -119,11 +133,19 @@ try {
   assert.notEqual(english[2].hash, english[3].hash)
   assert.deepEqual(english[1].answerTexts, ['错误'])
   const englishExtract = await review.extractReviewedQuestions(page, '测试课程', undefined, undefined, { questions: english })
-  assert.equal(englishExtract.added, 3, '无转写听力也只提取明确判对的子题')
+  assert.equal(englishExtract.added, 1, '无独立判对且无参考答案的子题仍按原模式提取')
   assert.equal(englishExtract.skipped, 1, '错误且无参考答案的子题不得入库')
- assert.equal(englishExtract.referenceStats.added, 3, '错误子题与听力明确判对题均应入库')
+  assert.equal(englishExtract.referenceStats.added, 5, '判对复合子题与明确参考答案均应入库')
   assert.equal(englishExtract.referenceStats.retry, 1, '无逐槽配对证据仍保留待证')
   assert.deepEqual(rows.get(english[1].hash).answer_texts, ['错误'])
+  await page.setContent(composite(8, '阅读语篇占位参考', [
+    child('判对的子题', true, 'judge', '<div class="e-ans-ref">参考答案</div>'),
+    child('判错的子题', false, 'judge', '<div class="e-ans-ref">参考答案</div>'),
+  ]))
+  const placeholderReference = await review.readReviewedQuestions(page)
+  assert.deepEqual(placeholderReference.map(row => row.referenceState), ['valid', 'invalid'],
+    '独立判对且已选项唯一时可使用该答案，判错仍待证')
+  assert.deepEqual(placeholderReference[0].answerTexts, ['正确'])
   await page.setContent(`<div class="e-q-body" data-questiontype="7"><div class="e-q"><form>
     <div class="e-q-r"><div class="e-q-quest"><div class="e-q-q">配对材料</div>
     <div class="e-short-a">

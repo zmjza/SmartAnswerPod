@@ -430,7 +430,7 @@ function statusLabel(status: string) {
     previewing: '预览中', clicking_do_homework: '点做作业', answering: '作答中', submitting: '提交中',
     waiting_grade: '等待批阅', reviewing: '校对中', extracting: '提取中', extracting_done: '提取完成', pending_writeback: '待回写', done_100: '已满分',
     skip_weight0: '权重 0% 跳过', skip_non_objective: '非客观题跳过', skip_out_of_window: '不在时间窗',
-    skip_attempts_exhausted: '次数用尽', skip_full_score: '已满分跳过', skip_no_history: '无历史链接跳过', submit_failed: '提交失败',
+    skip_attempts_exhausted: '次数用尽', skip_full_score: '已满分跳过', skip_no_history: '无历史链接跳过', submit_failed: '作业失败',
     skip_bank_miss: '听力题库缺项',
     not_full_next_time: '下次继续', spin_stopped: '已停止空转', todo: '待作答', '检测中': '检测中',
   }
@@ -514,7 +514,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <article v-for="(entry, index) in currentCourseLogs" :key="`${entry.time}-${index}`" class="grid grid-cols-[76px_82px_minmax(0,1fr)] gap-3 rounded-2xl border px-4 py-3 text-xs" :class="logLevelClass(entry.level)">
 <time class="font-mono opacity-70">{{ formatLogTime(entry.time) }}</time>
 <span class="font-semibold">{{ entry.result }}</span>
-<div class="min-w-0"><p class="font-semibold">{{ entry.action }}</p><p v-if="entry.homeworkName || entry.reason" class="mt-1 truncate opacity-70">{{ entry.homeworkName }}<span v-if="entry.homeworkName && entry.reason"> · </span>{{ entry.reason }}</p></div>
+<div class="min-w-0"><p class="font-semibold">{{ entry.action }}</p><p v-if="entry.homeworkName || entry.reason" class="mt-1 truncate opacity-70">{{ entry.homeworkName }}<span v-if="entry.homeworkName && entry.reason"> · </span>{{ statusLabel(entry.reason) }}</p></div>
 </article>
 </div>
 </div>
