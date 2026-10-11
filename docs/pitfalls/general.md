@@ -1381,3 +1381,25 @@
 - 相关文件或命令：tests/helpers/t004-qr-preflight.mjs、tests/t004-qr-preflight.mjs、tests/t004-real-preqr.mjs；T004目标2验收执行记录与T004-R01／R02矩阵。
 - 适用范围：真实学校作业的扫码前只读安全核对与授权范围内二维码等待验收。
 - 来源：2026-10-12 T004真实行业分支调查、静态审查独立质量检查与两启动模式正式二维码等待停止结果。
+
+## 本地安装包构建不能复用已损坏的工具入口或删除项目外临时目录
+
+- 现象：2.4本地打包前发现原node_modules/.bin/electron-builder为0字节，electron-builder/cli.js为90个空字节；package-local和prepare-browsers还会在os.tmpdir创建目录并在finally删除。
+- 根因：本地依赖字节损坏已实证，损坏来源未知；现有打包脚本的临时目录清理策略与当前禁止删除项目外文件的约定冲突。
+- 正确做法：在项目内忽略的.playwright目录创建独立构建副本，用同一锁文件npm ci --ignore-scripts恢复干净依赖。TMPDIR、npm缓存、Electron缓存及builder缓存均指向项目内；本次副本中的两个显式rm仅改为保留生成目录，源码构建加--no-emptyOutDir --configLoader runner，仓库脚本和原依赖不改。使用npm run package，builder必须--publish never。
+- 验证方式：70份产品／图标文件和锁文件与已交付源码逐字一致；实际双类型、32／46／1模块构建及mac-arm64／win-x64打包exit0。codesign严格深度检查、DMG校验、ZIP完整性、Mac成品与包内Chromium启动、两平台asar代码和清单大小／SHA-512均通过，8份分发文件复制后SHA-256一致。
+- 禁止事项：不得把空CLI退出0当打包成功；不得直接执行项目外临时目录删除；不得提交副本、依赖、缓存、安装包或日志；不得以交叉构建冒充Windows真机安装。
+- 相关文件或命令：scripts/package-local.mjs、scripts/prepare-browsers.mjs、npm run package、release/2.4/、liran_docs/targets/T004-目标2-开发验收-执行记录.md。
+- 适用范围：当前本机2.4双平台本地分发构建；后续仍须先核对工具完整性及删除边界。
+- 来源：2026-10-12用户续指令、本轮依赖字节检查、独立构建和成品验证。
+
+## 两段式分发版本的UI展示与安装器元数据应分别核对
+
+- 现象：2.4成品首次冒烟脚本错误等待“当前版本2.4.0”，导致定位超时；页面实际显示v2.4，应用运行正常。
+- 根因：前端在package-local规范化之前构建，App.vue从package.json静态读取2.4；builder临时使用合规的2.4.0，故成品app.getVersion为2.4.0，产物名称恢复为2.4。
+- 正确做法：按实际层次验证：源码package／lock与UI为2.4，成品app.getVersion及asar元数据为2.4.0，分发文件名为2.4。测试应读取真实展示，不能先假定两层字符串完全相同。
+- 验证方式：修正测试期望后Mac成品启动exit0，isPackaged=true、app.getVersion=2.4.0、界面v2.4、preload桥接成立；两平台asar版本与已构建代码一致。
+- 禁止事项：不得把测试期望错误当产品白屏或修改成品源码；不得将本地清单检查称为OTA验收；不因打包成功宣称Developer ID签名／公证或Windows真机验证。
+- 相关文件或命令：scripts/package-local.mjs、src/App.vue、electron-builder.yml。
+- 适用范围：两段式版本号的本地安装包验证。
+- 来源：2026-10-12成品冒烟的初次失败、页面查证与修正后复测。
