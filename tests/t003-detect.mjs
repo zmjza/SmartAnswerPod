@@ -29,8 +29,10 @@ function portal(pinned = [], tabCourses = [], messages = [], collections = []) {
   const list = (values) => ({ count: async () => values.length, nth: (i) => item(values[i]), first: () => ({ waitFor: async () => {} }) })
   return {
     messages, collections,
+    url: () => 'https://learning.shou.org.cn/scenter',
     locator(selector) {
       if (selector === '#tab-courseList') return { getAttribute: async () => 'is-active', click: async () => {} }
+      if (selector === '#pane-courseList') return { waitFor: async () => {}, innerText: async () => '', locator: () => ({ count: async () => 0 }) }
       if (selector === '#pane-courseList .course-item') return list(tabCourses)
       if (selector === '.box-card .el-card__body .el-tabs__content > .course-item') return list(pinned)
       throw Error(`Unexpected selector ${selector}`)
@@ -85,6 +87,7 @@ function homeworkPage(online, phased) {
   })
   const page = {
     closed: false,
+    url: () => 'https://l.shou.org.cn/study/HomeWorkNew.aspx?courseopenid=top&minorcourseopenid=m',
     goto: async () => {}, waitForURL: async () => {}, content: async () => '',
     close: async () => { page.closed = true },
     locator(selector) {

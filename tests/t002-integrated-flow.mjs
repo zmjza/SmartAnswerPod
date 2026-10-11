@@ -76,6 +76,7 @@ const modules = {
   ),
   './login': 'export const loginIam = async ({onNeedVerify}) => { globalThis.__t002Integrated.portalWaiting = true; await onNeedVerify(); return {ok:true} }',
   './detect': mock(
+    "export const UNSUPPORTED_COURSE_REASON = '新答题界面暂时不支持，等后续开发'",
     'export const listCourses = async () => [{name:"测试课程", href:"/course"}]',
     'export const detectCourse = async () => ({name:"测试课程", status:"已检测", homeworks:[{section:"onlineHomework",name:"测试作业",workType:"网上记分作业",weightPercent:100,previewHref:"/study/assignment-preview.aspx",status:"todo",needDo:true,remainingCap:1,page:globalThis.__t002Integrated.preview}]})',
     'export const readHistory = async () => globalThis.__t002Integrated.submitted ? [{submittedAt:"2026-09-25T00:00:00.000Z",status:"已批阅",score:100,historyHref:globalThis.__t002Integrated.origin + "/study/assignment/history.aspx?id=1"}] : []',

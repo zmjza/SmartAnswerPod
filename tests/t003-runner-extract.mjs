@@ -25,6 +25,7 @@ const modules = {
   ),
   './login': 'export const loginIam = async () => ({ ok: true })',
   './detect': mock(
+    "export const UNSUPPORTED_COURSE_REASON = '新答题界面暂时不支持，等后续开发'",
     "export const listCourses = async () => [{ key: 'course-1', name: '同名课', href: '/course' }]",
     "export const detectCourse = async () => ({ key: 'course-1', name: '同名课', status: '已检测', homeworks: [{ section: 'onlineHomework', name: '作业', status: 'todo', needDo: false, previewHref: '/preview', page: globalThis.__runnerPreview }] })",
     "export const readHistory = async () => [{ status: '已批阅', historyHref: '/history?id=1', submittedAt: 'one' }, { status: '已批阅', historyHref: '/history?id=2', submittedAt: 'two' }]",

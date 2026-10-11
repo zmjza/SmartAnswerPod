@@ -19,7 +19,7 @@ const modules = {
     "export const toolbarBrowserCount = () => f().occupied.size",
   ].join(""),
   "./login": "export const loginIam = ({ local_id }) => new Promise(resolve => { globalThis.__t002.starts.push(local_id); globalThis.__t002.pending.set(local_id, resolve) })",
-  "./detect": "export const detectCourse = async () => null; export const listCourses = async () => []; export const readHistory = async () => []",
+  "./detect": "export const UNSUPPORTED_COURSE_REASON = '新答题界面暂时不支持，等后续开发'; export const detectCourse = async () => null; export const listCourses = async () => []; export const readHistory = async () => []",
   "./answer": "export class ListeningBankMissError extends Error {} export const answerPage = async () => []",
   "./submit": "export const historyHasNew = () => false; export const submitHomework = async () => null",
   "./progress": "export const onProgress = () => {}; export const emitProgress = () => {}",

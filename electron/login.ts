@@ -1,6 +1,6 @@
 import type { BrowserContext, Page, Route } from 'patchright'
 import { request as pwRequest } from 'patchright'
-import { PATH, SEL } from './core/selectors.ts'
+import { PATH, SEL, learningCenterVersion, prepareNewLearningCenter, checkOldLearningCenter } from './core/selectors.ts'
 import { emitProgress } from './progress.ts'
 import type { AccountState, SlotState } from './core/states.ts'
 import { hasQr } from './page-tools.ts'
@@ -315,26 +315,39 @@ async function exchangeCode(page: Page, code: string): Promise<OauthHit> {
 }
 
 async function finishPortal(page: Page, g: PortalGate, xh: string): Promise<boolean> {
-  if ((await page.locator(SEL.tabCourseList).count()) > 0) return true
-  await page.locator(SEL.tabCourseList).waitFor({ timeout: 25000 }).catch(() => {})
-  return (await page.locator(SEL.tabCourseList).count()) > 0
+  const deadline = Date.now() + 25000
+  while (Date.now() < deadline) {
+    if (await hasPortal(page)) return true
+    await page.waitForTimeout(200)
+  }
+  return hasPortal(page)
 }
 
 async function loadCourses(page: Page, g: PortalGate) {
-  await waitHooked(page, 8000)
+  if (learningCenterVersion(page) === 'new') return prepareNewLearningCenter(page)
+  await checkOldLearningCenter(page)
   if ((await page.locator(SEL.courseItem).count()) > 0) return
+  await waitHooked(page, 8000)
   if (g.code) {
     const ex = await exchangeCode(page, g.code).catch(() => ({ status: 0, len: 0, json: false, ok: false }))
     if (ex.ok) {
       await page.goto(STUDY_HOME, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
       await page.waitForTimeout(1500)
-      if ((await page.locator(SEL.tabCourseList).count()) === 0) {
+      if (!(await hasPortal(page))) {
         await page.goto(SCENTER, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
       }
+      if (learningCenterVersion(page) === 'new') return prepareNewLearningCenter(page)
       await waitHooked(page, 8000)
     }
   }
   await page.locator(SEL.courseItem).first().waitFor({ timeout: 12000 }).catch(() => {})
+  await checkOldLearningCenter(page)
+}
+
+async function hasPortal(page: Page): Promise<boolean> {
+  const version = learningCenterVersion(page)
+  if (version === 'new') return (await page.locator(SEL.learningNav).count()) > 0 || (await page.locator(SEL.learningCourses).count()) > 0
+  return version === 'old' && (await page.locator(SEL.tabCourseList).count()) > 0
 }
 
 export async function loginIam(opts: {
@@ -350,6 +363,11 @@ export async function loginIam(opts: {
   gate.xh = username
   emitProgress({ local_id, slot, account: 'logging_in', action: '打开学习中心', bankCount: 0, aiCount: 0, click: 'goto scenter' })
   await page.goto(SCENTER, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  if (await hasPortal(page)) {
+    await loadCourses(page, gate)
+    emitProgress({ local_id, slot, account: 'logged_in', action: '进入学习中心', bankCount: 0, aiCount: 0 })
+    return { ok: true, account: 'logged_in' }
+  }
   await waitEnable(page.context(), 8000)
   await armPortalIntercept(page)
   for (let i = 0; i < 25 && !gate.html; i++) await page.waitForTimeout(100)
@@ -364,10 +382,12 @@ export async function loginIam(opts: {
   await waitHooked(page, 8000)
   await Promise.race([
     page.locator(SEL.tabCourseList).waitFor({ timeout: 20000 }),
+    page.locator(SEL.learningNav).waitFor({ timeout: 20000 }),
+    page.locator(SEL.learningCourses).waitFor({ timeout: 20000 }),
     page.locator('.content_submit').waitFor({ timeout: 20000 }),
   ]).catch(() => {})
 
-  if ((await page.locator(SEL.tabCourseList).count()) > 0) {
+  if (await hasPortal(page)) {
     await loadCourses(page, gate)
     emitProgress({ local_id, slot, account: 'logged_in', action: '进入学习中心', bankCount: 0, aiCount: 0 })
     return { ok: true, account: 'logged_in' }
@@ -376,7 +396,7 @@ export async function loginIam(opts: {
   try {
     await page.locator('.content_submit').waitFor({ state: 'visible', timeout: 15000 })
   } catch {
-    if ((await page.locator(SEL.tabCourseList).count()) > 0) {
+    if (await hasPortal(page)) {
       await loadCourses(page, gate)
       return { ok: true, account: 'logged_in' }
     }
@@ -402,11 +422,11 @@ export async function loginIam(opts: {
     }
     const deadline = Date.now() + 12000
     while (Date.now() < deadline) {
-      if ((await page.locator(SEL.tabCourseList).count()) > 0) break
+      if (await hasPortal(page)) break
       if (gate.code) break
       await page.waitForTimeout(200)
     }
-    if ((await page.locator(SEL.tabCourseList).count()) > 0 || gate.code) break
+    if (await hasPortal(page) || gate.code) break
     if (page.url().includes(PATH.iamHost) && (await page.locator('.content_submit').count())) {
       if (attempt === 2) break
       continue
@@ -414,11 +434,11 @@ export async function loginIam(opts: {
     break
   }
 
-  if ((await page.locator(SEL.tabCourseList).count()) === 0) {
+  if (!(await hasPortal(page))) {
     const ok = await finishPortal(page, gate, username)
     if (!ok) return { ok: false, reason: 'timeout', account: 'login_failed' }
   }
-  if ((await page.locator(SEL.tabCourseList).count()) === 0) {
+  if (!(await hasPortal(page))) {
     return { ok: false, reason: 'timeout', account: 'login_failed' }
   }
   await loadCourses(page, gate)

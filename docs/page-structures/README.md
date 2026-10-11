@@ -11,6 +11,7 @@
 | 文件 | 页面 | 路径 | 状态 |
 | --- | --- | --- | --- |
 | [学习平台-我的课程.md](学习平台-我的课程.md) | 统一学习门户 / 我的课程 | `learning.shou.org.cn/scenter` | 已根据用户 HTML 整理，Chrome 只读核对过骨架 |
+| [新版学习中心.md](新版学习中心.md) | 未来学习空间 / 学习 / 课程形考任务 | `aiedu.shou.org.cn/learning` | 2026-10-12两版源码和freshprofile完整IAM通过；新版两组QR、旧四组扫描选课停止、混合两组正式8/8通过；其它账号分页／虚拟列表待证 |
 | [课程学习-形考作业入口.md](课程学习-形考作业入口.md) | 课程壳左侧「形考作业」 | `#courseHomeWorkNew` | 用户只给了入口节点；侧栏完整项来自 HomeWorkNew 现场 |
 | [形考作业列表.md](形考作业列表.md) | 网上记分作业 + 阶段性测验 | `/study/HomeWorkNew.aspx` | 两种样本都已落盘 |
 | [作业预览-作答历史.md](作业预览-作答历史.md) | 作业详情 / 历史 / 做作业 / 扫码 | `/study/assignment-preview.aspx` | 用户 HTML + 现场 doHomework |

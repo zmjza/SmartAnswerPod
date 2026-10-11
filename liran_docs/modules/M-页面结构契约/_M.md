@@ -26,3 +26,11 @@ REQ-020；AC-020
 见 `liran_docs/04-开发追踪.md` TASK-M01。
 
 T003 增量：REQ-004/005/006，普通历史参考答案和置顶课已有页面依据；四条大学英语已批阅历史已只读取证，五类题型结构可核对，但听力转写与词汇逐槽标准配对均无现场依据。微观任务 T003-00，见 `liran_docs/T003-任务拆分与微观任务.md`。状态：页面结构已记录，缺证项待证。
+
+## T004 两版页面契约
+
+新旧中心文档并存，T004 REQ-001～005/AC-001～005 的两版识别、就绪与入口采集已接入E/F。选择器集中在 `electron/core/selectors.ts`，动态ref／任务ID不得固化。新版课程列表读取完整已挂载DOM，按ref逐课串行切换，已active课不重复触发切课；普通任务核对active和课程外层任务容器；三个筛选及精确形考popup最终身份核对依据既有页面契约。
+
+真实学校8张ARTICLE中的切课辅助空按钮无可视面积，物理click超时；当前实现限定唯一按钮、完整aria-label并拒绝disabled，仅非active课程触发DOM click，不改学校DOM／CSS。现场页面事实与内部模块分别记录，三账号freshprofile完整IAM及八组真机已取得真实证据；T004真实验收已完成：freshprofile三账号完整IAM→新旧学习中心通过；新版两组各8课19预览／unsupported1指定提示与真实二维码未扫码停止，旧版四组完整4／3课扫描预览／产品选课等待／停止，混合双模式两组课程／selection隔离均通过；学校history不变，学校作答保存提交批阅／AI／face上传同意／题库写计数全0。源码版本2.4／build／Electron实际展示一致，推送origin/main与Goal回收待root结果。未见其它账号分页／虚拟列表、completed／overdue非空任务或真实无课／错误形态不声称额外现场证据；Windows与扫码后业务不在本次确认范围。 见T004任务表与09真机矩阵。
+
+PRD 1.3／CHG-001以当前ref、无task region、唯一课程学习空间iframe及同URL唯一新窗口外链确认第三方嵌入，确认属于本课后即使加载／错误也跳过。切课前记录iframe节点／src／active ref，旧iframe残留且加载／错误时继续等待；同节点／同src复用在加载／错误消失后可接受。普通任务缺入口、错课与错误壳仍失败。具体事实和边界见 `docs/page-structures/新版学习中心.md`。

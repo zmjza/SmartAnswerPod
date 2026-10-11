@@ -75,6 +75,7 @@ const modules = {
     "export const loginIam = async ({ onNeedVerify }) => { globalThis.__t002.events.push('portal_waiting'); globalThis.__t002.portalWaiting = true; await onNeedVerify(); globalThis.__t002.events.push('portal_verified'); return { ok: true } }",
   ),
   "./detect": mock(
+    "export const UNSUPPORTED_COURSE_REASON = '新答题界面暂时不支持，等后续开发'",
     "export const listCourses = async () => [{ name: '测试课程', href: '/course' }]",
     "export const detectCourse = async () => { const hw = name => ({ section: 'onlineHomework', name, workType: '网上记分作业', weightPercent: 100, previewHref: '/study/assignment-preview.aspx', status: 'todo', needDo: true, remainingCap: 1, page: globalThis.__t002Context.preview }); return { name: '测试课程', status: '已检测', homeworks: globalThis.__t002.failureCase ? [hw('失败作业'), hw('后续作业')] : [hw('测试作业')] } }",
      "export const readHistory = async () => globalThis.__t002.submitted ? [{ submittedAt: '2026-09-24T00:00:00.000Z', status: '已批阅', score: 100, historyHref: '/study/assignment/history.aspx?id=1' }] : []",

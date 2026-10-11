@@ -131,7 +131,7 @@ export async function acquire(local_id: string, visual: boolean): Promise<{ ok: 
   context.setDefaultNavigationTimeout(30000)
   const schoolOrigin = process.env.KAIDA_E2E_USERDATA && process.env.KAIDA_E2E_SCHOOL_ORIGIN
   if (schoolOrigin && new URL(schoolOrigin).hostname === '127.0.0.1') {
-    await context.route((url) => ['learning.shou.org.cn', 'l.shou.org.cn', 'iam.shou.org.cn'].includes(url.hostname), async (route) => {
+    await context.route((url) => ['learning.shou.org.cn', 'aiedu.shou.org.cn', 'l.shou.org.cn', 'iam.shou.org.cn'].includes(url.hostname), async (route) => {
       const request = route.request()
       const url = new URL(request.url())
       try {

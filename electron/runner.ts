@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from 'patchright'
 import { app, Notification } from 'electron'
 import { loginIam } from './login'
-import { detectCourse, listCourses, readHistory, type DetectedCourse, type DetectedHomework } from './detect'
+import { detectCourse, listCourses, readHistory, UNSUPPORTED_COURSE_REASON, type DetectedCourse, type DetectedHomework } from './detect'
 import { answerPage, ListeningBankMissError, type QResult } from './answer'
 import { historyHasNew, submitHomework } from './submit'
 import { acquire, averageBrowserMemoryBytes, browserMemoryStatus, browserWindowVisible, getContext, isHeld, markOccupied, markVerify, release, slots, toolbarBrowserCount } from './pool'
@@ -341,6 +341,7 @@ function nextQrVersion(local_id: string) {
 async function captureQrSnapshot(local_id: string, session: VerificationSession, version: number) {
   if (session.kind !== 'homework' || !session.page || !(await hasQr(session.page))) return undefined
   const png = await session.page.locator(SEL.qrDialog).screenshot({ type: 'png' })
+  if (stopFlag.has(local_id) || verificationSessions.get(local_id) !== session || qrVersions.get(local_id) !== version) return undefined
   const snapshot: QrSnapshot = {
     localId: local_id,
     courseName: session.courseName,
@@ -392,8 +393,10 @@ export async function waitForVerify(
   if (session.kind === 'homework' && page) {
     try {
       await captureQrSnapshot(local_id, session, nextQrVersion(local_id))
+      if (stopFlag.has(local_id) || verificationSessions.get(local_id) !== session) return promise
       if (v) setState(v, 'needs_verify', '等你扫码或验证', 'occupying_verify')
     } catch {
+      if (stopFlag.has(local_id) || verificationSessions.get(local_id) !== session) return promise
       if (v) setState(v, 'needs_verify', '二维码截图失败，请刷新程序内二维码', 'occupying_verify')
     }
   } else if (v) {
@@ -530,6 +533,7 @@ export function setSelectedCourses(local_id: string, keys: string[]) {
   v.selectedCourseKeys = v.courses.filter((course) => selected.has(course.key || course.name) || (selected.has(course.name) && v.courses.filter((item) => item.name === course.name).length === 1)).map((course) => course.key || course.name)
   v.selectedCourseNames = v.courses.filter((course) => v.selectedCourseKeys.includes(course.key || course.name)).map((course) => course.name)
   for (const course of v.courses) {
+    if (course.status === UNSUPPORTED_COURSE_REASON) continue
     if (v.selectedCourseKeys.includes(course.key || course.name)) {
       if (course.status === '本轮未选择') course.status = '已检测'
     } else {
@@ -758,8 +762,10 @@ async function runOne(a: LocalAccount) {
     if (stopFlag.has(a.local_id)) return
   }
   await flushExtractWriteback(a, v)
-  const courses = await listCourses(page, a.local_id, v.slot)
-  v.courses = courses.map((c) => ({ key: c.key || c.name, name: c.name, status: '待检测', groups: [] }))
+  const signal = stopControllers.get(a.local_id)?.signal
+  const courses = await listCourses(page, a.local_id, v.slot, signal)
+  if (stopFlag.has(a.local_id)) return
+  v.courses = courses.map((c) => ({ key: c.key || c.name, name: c.name, status: c.unsupportedReason || '待检测', groups: [] }))
   v.groups = []
   v.activeCourseName = ''
   v.activeCourseKey = ''
@@ -779,12 +785,14 @@ async function runOne(a: LocalAccount) {
     const chunk = courses.slice(i, i + parallel)
     for (const c of chunk) {
       const row = v.courses.find((item) => item.key === (c.key || c.name))
-      if (row) row.status = '检测中'
+      if (row && !c.unsupportedReason) row.status = '检测中'
     }
    const parts = await Promise.all(
      chunk.map(async (c, j) => {
+       if (c.unsupportedReason) return { key: c.key, name: c.name, status: c.unsupportedReason, homeworks: [] } as DetectedCourse
         let lastError: unknown
        for (let attempt = 0; attempt < 2; attempt++) {
+         if (stopFlag.has(a.local_id)) throw new Error('任务已停止')
          try {
            return await detectCourse({
              portal: page,
@@ -797,8 +805,10 @@ async function runOne(a: LocalAccount) {
              total: courses.length,
              mode: a.work_mode,
              answerRoundLimit: a.answer_round_limit,
+             signal,
            })
          } catch (error) {
+           if (stopFlag.has(a.local_id)) throw error
            lastError = error
            if (attempt === 0) await waitMs(300)
          }
@@ -815,6 +825,7 @@ async function runOne(a: LocalAccount) {
        return { key: c.key || c.name, name: c.name, status: '检测失败', homeworks: [] } as DetectedCourse
      }),
     )
+    if (stopFlag.has(a.local_id)) return
     for (const p of parts) {
       detected.push(p)
       const idx = v.courses.findIndex((x) => x.key === (p.key || p.name))
@@ -867,7 +878,7 @@ async function runOne(a: LocalAccount) {
     runCourses = selectCoursesForRun(detected, 'selected', v.selectedCourseKeys)
     const selected = new Set(runCourses.map((course) => course.key || course.name))
     for (const course of v.courses) {
-      if (!selected.has(course.key || course.name)) course.status = '本轮未选择'
+      if (!selected.has(course.key || course.name) && course.status !== UNSUPPORTED_COURSE_REASON) course.status = '本轮未选择'
     }
     if (!runCourses.length) {
       setState(v, 'round_ended', '本轮未选择课程', 'released')
@@ -875,6 +886,7 @@ async function runOne(a: LocalAccount) {
       return
     }
   }
+  runCourses = runCourses.filter((course) => course.status !== UNSUPPORTED_COURSE_REASON)
   if (a.work_mode === 'extract') {
     setState(v, 'extracting', '提取题库（全部分数）')
     v.extractTotals = emptyExtractStats()
@@ -1564,6 +1576,7 @@ async function openDoHomework(
       }
       setState(v, 'needs_verify', '等待当前扫码完成', 'occupying_verify')
       await waitForVerification(a.local_id)
+      if (stopFlag.has(a.local_id)) return undefined
       setVerified(true)
     }
     unverifiedClicks.set(a.local_id, clicks + 1)
@@ -1589,6 +1602,7 @@ async function openDoHomework(
   }
   if (qr) {
     await waitForVerify(a.local_id, preview, 'qr-gone', { courseName, homeworkName })
+    if (stopFlag.has(a.local_id)) return undefined
     setVerified(true)
     for (const p of preview.context().pages()) {
       try {
