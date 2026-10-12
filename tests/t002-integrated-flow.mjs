@@ -2,13 +2,18 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { build } from 'esbuild'
 import { chromium } from 'patchright'
+import { resolve } from 'node:path'
+
+const submitScenario = process.env.KAIDA_SUBMIT_SCENARIO || 'single'
+assert.ok(['single', 'qr-resume', 'qr-auto'].includes(submitScenario))
+const visual = process.env.KAIDA_DISPLAY_MODE === 'visual'
 
 const state = { accounts: [{ local_id: 'student-1', name: '模拟学生', username: 'student-1', password: 'fake', display_mode: 'headless', work_mode: 'answer', course_scope: 'all', answer_round_limit: 1 }], qr: false, clicks: 0, submitted: false, held: false, released: false, portalWaiting: false, saves: [], ai: 0, writeback: [], rows: new Map() }
 globalThis.__t002Integrated = state
 const question = (no, type, stem, a, b) => `<div class='e-q-body' data-num='${no}' data-questiontype='${type}'><div class='e-q-q'>${stem}</div><form><input name='answer'></form><ul><li class='e-a' data-index='${type === 3 ? 1 : 0}'>A) ${a}</li><li class='e-a' data-index='${type === 3 ? 0 : 1}'>B) ${b}</li></ul></div><a class='e-item' data-num='${no}'></a>`
-const answerHtml = `<div class='e-selects-g'>${question(1, 1, '第一题单选', '甲', '乙')}${question(2, 3, '第二题判断', '正确', '错误')}${question(3, 2, '第三题多选', '丙', '丁')}</div><button id='submitHomeWork'>提交作业</button><div class='xcConfirm' style='display:none'><span id='message'></span><a class='sgBtn ok'>确定</a><a class='sgBtn cancel'>取消</a></div><script>
+const answerHtml = `<div id='dl_qrCodeCheck' style='display:none;width:240px;height:240px'>微信扫码验证 未扫码<div id='qrCode' style='width:180px;height:180px'></div></div><div class='e-selects-g'>${question(1, 1, '第一题单选', '甲', '乙')}${question(2, 3, '第二题判断', '正确', '错误')}${question(3, 2, '第三题多选', '丙', '丁')}</div><button id='submitHomeWork'>提交作业</button><div class='xcConfirm' style='display:none'><span id='message'></span><a class='sgBtn ok'>确定</a><a class='sgBtn cancel'>取消</a></div><script>
 document.querySelectorAll('li.e-a').forEach(li => li.addEventListener('click', async () => { const b = li.closest('.e-q-body'); if (b.dataset.questiontype === '2') li.classList.toggle('checked'); else { b.querySelectorAll('li.e-a').forEach(x => x.classList.remove('checked')); li.classList.add('checked') } const value = [...b.querySelectorAll('li.checked')].map(x => x.dataset.index).join(','); b.querySelector('[name=answer]').value = value; const res = await fetch('/study/ajax-assignment-online_homework_answer', {method:'POST', body:new URLSearchParams({answer:value})}); if (res.ok) document.querySelector('.e-item[data-num="' + b.dataset.num + '"]').classList.add('active') }));
-const dialog = document.querySelector('.xcConfirm'); document.querySelector('#submitHomeWork').onclick = () => { document.querySelector('#message').textContent = '作业提交后将不可修改，您确定要提交作业吗？'; dialog.style.display = 'block' }; document.querySelector('.sgBtn.ok').onclick = () => { dialog.style.display = 'none'; location.href = '/study/assignment-preview.aspx' }; document.querySelector('.sgBtn.cancel').onclick = () => { dialog.style.display = 'none' };
+const dialog = document.querySelector('.xcConfirm'); document.querySelector('#submitHomeWork').onclick = () => { document.body.dataset.submits = String(Number(document.body.dataset.submits || 0) + 1); document.querySelector('#message').textContent = '作业提交后将不可修改，您确定要提交作业吗？'; dialog.style.display = 'block' }; document.querySelector('.sgBtn.ok').onclick = () => { dialog.style.display = 'none'; if ('${submitScenario}' !== 'single' && document.body.dataset.submitVerified !== 'yes') { document.querySelector('#dl_qrCodeCheck').style.display = 'block'; return } location.href = '/study/assignment-preview.aspx' }; document.querySelector('.sgBtn.cancel').onclick = () => { dialog.style.display = 'none' };
 </script>`
 const reviewed = (type, stem, a, b, _answer, score) => `<div class='e-q-body' data-questiontype='${type}'><div class='e-q'><div class='e-q-q'>${stem}</div><div class='e-q-l'><span class='e-q-right'></span></div><input name='GiveScore' value='${score}'><div class='e-a-g e-choice-a'><ul><li class='e-a checked'>A) ${a}</li><li class='e-a ${type === 2 ? 'checked' : ''}'>B) ${b}</li></ul></div></div></div>`
 const historyHtml = reviewed(1, '第一题单选', '甲', '乙', '甲', 33.33) + reviewed(3, '第二题判断', '正确', '错误', '正确', 33.33) + reviewed(2, '第三题多选', '丙', '丁', '丙', 33.34)
@@ -30,7 +35,7 @@ const server = createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
 const origin = 'http://127.0.0.1:' + server.address().port
 state.origin = origin
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({ headless: !visual, channel: process.env.KAIDA_TEST_BROWSER ? 'chromium' : 'chrome', executablePath: process.env.KAIDA_TEST_BROWSER })
 const realContext = await browser.newContext()
 const answer = await realContext.newPage()
 await answer.goto(origin + '/study/assignment/preview.aspx')
@@ -50,6 +55,7 @@ class FakePage {
   async reload() {}
   async bringToFront() {}
   async waitForTimeout() {}
+  async waitForEvent() { return context.waitForEvent() }
 }
 const portal = new FakePage('portal')
 const preview = new FakePage('preview')
@@ -81,13 +87,13 @@ const modules = {
     'export const detectCourse = async () => ({name:"测试课程", status:"已检测", homeworks:[{section:"onlineHomework",name:"测试作业",workType:"网上记分作业",weightPercent:100,previewHref:"/study/assignment-preview.aspx",status:"todo",needDo:true,remainingCap:1,page:globalThis.__t002Integrated.preview}]})',
     'export const readHistory = async () => globalThis.__t002Integrated.submitted ? [{submittedAt:"2026-09-25T00:00:00.000Z",status:"已批阅",score:100,historyHref:globalThis.__t002Integrated.origin + "/study/assignment/history.aspx?id=1"}] : []',
   ),
-  'runner-page-tools': 'export const hasQr = async page => page.kind === "preview" && globalThis.__t002Integrated.qr',
+  'runner-page-tools': `import {hasQr as realHasQr} from ${JSON.stringify(resolve('electron/page-tools.ts'))}; export const hasQr = async page => page.kind ? page.kind === "preview" && globalThis.__t002Integrated.qr : realHasQr(page)`,
 }
 const built = await build({ entryPoints: ['electron/runner.ts'], bundle: true, platform: 'node', format: 'esm', write: false, plugins: [{
   name: 'integrated-boundaries', setup(plugin) {
     plugin.onResolve({ filter: new RegExp('^(electron|[.]/(store|pool|login|detect))$') }, args => ({ path: args.path, namespace: 'boundary' }))
     plugin.onResolve({ filter: new RegExp('^[.]/page-tools$') }, args => args.importer.endsWith('/runner.ts') ? { path: 'runner-page-tools', namespace: 'boundary' } : undefined)
-    plugin.onLoad({ filter: /.*/, namespace: 'boundary' }, args => ({ contents: modules[args.path], loader: 'js' }))
+    plugin.onLoad({ filter: /.*/, namespace: 'boundary' }, args => ({ contents: modules[args.path], loader: 'js', resolveDir: process.cwd() }))
   }
 }] })
 const runner = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
@@ -112,6 +118,37 @@ try {
   assert.equal(state.saves.length, 0)
   state.qr = false
   assert.equal((await runner.signalVerified('student-1')).ok, true)
+  let resumedClicks = 0
+  if (submitScenario !== 'single') {
+    await waitFor(() => runner.snapshot().students[0].needsVerify && state.saves.length === 4, '提交扫码等待')
+    assert.equal((await runner.signalVerified('student-1')).ok, false, '提交未扫不能放行')
+    assert.equal(state.submitted, false)
+    assert.equal(state.rows.size, 0, '提交扫码等待时不得回写题库')
+    assert.deepEqual(await answer.locator('[name=answer]').evaluateAll(nodes => nodes.map(n => n.value)), ['0', '1', '0,1'])
+    assert.equal(await answer.locator('body').getAttribute('data-submits'), '1')
+    assert.equal(runner.getQrSnapshot('student-1').ok, true)
+    await answer.waitForTimeout(300)
+    assert.equal(state.saves.length, 4, '扫码等待不能重复作答')
+    await answer.evaluate(auto => {
+      document.body.dataset.submitVerified = 'yes'
+      document.querySelector('#dl_qrCodeCheck').style.display = 'none'
+      if (auto) location.href = '/study/assignment-preview.aspx'
+    }, submitScenario === 'qr-auto')
+    if (submitScenario === 'qr-auto') await answer.waitForURL('**/study/assignment-preview.aspx')
+    const locator = answer.locator.bind(answer)
+    answer.locator = (selector, ...args) => {
+      const result = locator(selector, ...args)
+      if (selector === '#submitHomeWork') {
+        const click = result.click.bind(result)
+        result.click = async (...params) => { resumedClicks++; return click(...params) }
+      }
+      return result
+    }
+    assert.equal((await runner.signalVerified('student-1')).ok, true)
+    await Promise.race([run, new Promise((_, reject) => setTimeout(() => reject(Error("提交扫码恢复超时")), 30000))])
+    answer.locator = locator
+    assert.equal(resumedClicks, submitScenario === 'qr-resume' ? 1 : 0, '原生自动交卷不能再次点击提交；仅关码需要恢复一次')
+  }
   await Promise.race([run, new Promise((_, reject) => setTimeout(() => reject(new Error(JSON.stringify(runner.snapshot().students[0]))), 20000))])
   const student = runner.snapshot().students[0]
   assert.equal(student.account, 'round_ended')
@@ -124,7 +161,7 @@ try {
   assert.equal(state.ai, 3)
   assert.equal(state.rows.size, 3, '批阅后全部 AI 正确答案应经真实题库模块入库')
   assert.deepEqual(state.writeback, [], '本轮成功后不应留待回写记录')
-  console.log('T002 真实 runner/作答/AI/提交/批阅/题库受控端到端通过')
+  console.log('T002 真实 runner/作答/AI/提交/批阅/题库受控端到端通过', { submitScenario, mode: visual ? 'visual' : 'headless' })
 } finally {
   globalThis.fetch = originalFetch
   await browser.close()

@@ -13,7 +13,6 @@ import { ACCOUNT_ZH, type AccountState, type SlotState } from './core/states'
 import { resetAsked } from './ai'
 import os from 'node:os'
 import { pressureOf, formatMb, recommendConcurrency } from './core/machine'
-import { canClickDoHomework } from '../src/verify-gate'
 import { contradictoryReferenceHashes, extractReviewedQuestions, readReviewedQuestions, reviewResults, type ReviewedQuestion, type ReviewOutcome, type ReferenceStats } from './review.ts'
 import { historyDisplayState, newestHistory, newSubmission } from './core/homework.ts'
 import { mergeAccountWriteback } from './core/writeback.ts'
@@ -83,16 +82,15 @@ type VerificationSession = {
   courseName: string
   homeworkName: string
   version: number
+  stage?: 'submit'
   finish: () => void
   promise: Promise<void>
 }
 const verificationSessions = new Map<string, VerificationSession>()
 const qrSnapshots = new Map<string, QrSnapshot>()
 const qrVersions = new Map<string, number>()
-const verificationWaiters = new Map<string, Set<() => void>>()
+const homeworkEntries = new Map<string, Promise<void>>()
 const courseSelectionWaiters = new Map<string, () => void>()
-const unverifiedClicks = new Map<string, number>()
-const verifiedAccounts = new Set<string>()
 const stopFlag = new Set<string>()
 const stopControllers = new Map<string, AbortController>()
 let runConcurrency: ReturnType<typeof concurrencySnapshot> | null = null
@@ -370,8 +368,9 @@ export async function waitForVerify(
   local_id: string,
   page?: Page,
   until: 'qr-gone' | 'portal' = 'qr-gone',
-  meta: { courseName?: string; homeworkName?: string } = {},
+  meta: { courseName?: string; homeworkName?: string; stage?: 'submit' } = {},
 ) {
+  if (stopFlag.has(local_id)) return
   const existing = verificationSessions.get(local_id)
   if (existing) return existing.promise
   const v = views.get(local_id)
@@ -385,6 +384,7 @@ export async function waitForVerify(
     kind: until === 'portal' ? 'portal' : 'homework',
     courseName: meta.courseName || '',
     homeworkName: meta.homeworkName || '',
+    stage: meta.stage,
     version: 0,
     finish,
     promise,
@@ -406,29 +406,13 @@ export async function waitForVerify(
 }
 
 function resetVerificationGate(local_id: string) {
-  unverifiedClicks.set(local_id, 0)
-  verifiedAccounts.delete(local_id)
   const v = views.get(local_id)
   if (v) v.verified = false
 }
 
 function markHomeworkVerified(local_id: string) {
-  verifiedAccounts.add(local_id)
   const v = views.get(local_id)
   if (v) v.verified = true
-  unverifiedClicks.delete(local_id)
-  const waiters = verificationWaiters.get(local_id)
-  verificationWaiters.delete(local_id)
-  for (const resolve of waiters || []) resolve()
-}
-
-function waitForVerification(local_id: string) {
-  if (verifiedAccounts.has(local_id)) return Promise.resolve()
-  return new Promise<void>((resolve) => {
-    const waiters = verificationWaiters.get(local_id) || new Set<() => void>()
-    waiters.add(resolve)
-    verificationWaiters.set(local_id, waiters)
-  })
 }
 
 export function getQrSnapshot(local_id: string) {
@@ -444,11 +428,13 @@ export function getQrSnapshot(local_id: string) {
 export async function refreshQrSnapshot(local_id: string) {
   const session = verificationSessions.get(local_id)
   if (!session?.page || session.kind !== 'homework') return { ok: false, error: '当前没有可刷新的作业二维码' }
-  const version = nextQrVersion(local_id)
-  session.version = version
   try {
     const refresh = session.page.locator(`${SEL.qrDialog} a, ${SEL.qrDialog} button, ${SEL.qrDialog} input[type=button]`).filter({ hasText: /刷新/ }).first()
-    if (await refresh.count()) await refresh.click({ timeout: 5000 })
+    const canRefresh = await refresh.count() > 0
+    if (!canRefresh && session.stage === 'submit') return { ok: false, error: '提交验证页没有刷新按钮，请在学校页面完成扫码；保留已作答内容' }
+    const version = nextQrVersion(local_id)
+    session.version = version
+    if (canRefresh) await refresh.click({ timeout: 5000 })
     else {
       await session.page.reload({ waitUntil: 'domcontentloaded' })
       await session.page.locator(SEL.doHomework).first().click({ timeout: 8000 })
@@ -1242,7 +1228,9 @@ async function doHomeworkLoop(
     })
     hw.status = 'submitting'
     syncHomeworkView(v, courseKey, hw)
-    const sub = await submitHomework({ page: answer, local_id: a.local_id, slot: v.slot, account: 'auto_answering', homeworkName: hw.name, verifiedComposite: ans.compositeVerified })
+    const sub = await submitHomework({ page: answer, local_id: a.local_id, slot: v.slot, account: 'auto_answering', homeworkName: hw.name,
+      verifiedComposite: ans.compositeVerified, signal: stopControllers.get(a.local_id)?.signal,
+      onNeedVerify: () => waitForVerify(a.local_id, answer, 'qr-gone', { courseName, homeworkName: hw.name, stage: 'submit' }) })
     if (stopFlag.has(a.local_id)) return
     if (!sub.ok) {
       hw.status = 'submit_failed'
@@ -1419,12 +1407,12 @@ async function doHomeworkLoop(
   }
 }
 
-function othersPage(page: Page, pathPart: string): Page | undefined {
+function othersPage(page: Page, pathPart: string, excluded: Set<Page>): Page | undefined {
   const homeworkId = new URL(page.url()).searchParams.get('homeWorkId')
   return page.context().pages().find((p) => {
     try {
       const url = new URL(p.url())
-      return Boolean(homeworkId) && url.pathname.includes(pathPart) && url.searchParams.get('homeWorkId') === homeworkId
+      return !excluded.has(p) && Boolean(homeworkId) && url.pathname.includes(pathPart) && url.searchParams.get('homeWorkId') === homeworkId
     } catch { return false }
   })
 }
@@ -1567,73 +1555,62 @@ async function openDoHomework(
   setVerified: (x: boolean) => void,
   retried: boolean,
 ): Promise<Page | undefined> {
-  if (!verifiedAccounts.has(a.local_id)) {
-    const clicks = unverifiedClicks.get(a.local_id) || 0
-    if (!canClickDoHomework(false, clicks)) {
-      if (!verificationSessions.has(a.local_id)) {
-        setState(v, 'needs_verify', '等待当前扫码验证', 'occupying_verify')
-        return undefined
-      }
-      setState(v, 'needs_verify', '等待当前扫码完成', 'occupying_verify')
-      await waitForVerification(a.local_id)
-      if (stopFlag.has(a.local_id)) return undefined
-      setVerified(true)
-    }
-    unverifiedClicks.set(a.local_id, clicks + 1)
+  const previous = homeworkEntries.get(a.local_id)
+  let finish!: () => void
+  const entry = new Promise<void>(resolve => { finish = resolve })
+  homeworkEntries.set(a.local_id, entry)
+  try {
+    if (previous) await stopAware(a.local_id, previous)
+    if (stopFlag.has(a.local_id)) return undefined
+    return await clickDoHomework(a, v, preview, courseName, homeworkName, setVerified, retried)
+  } finally {
+    finish()
+    if (homeworkEntries.get(a.local_id) === entry) homeworkEntries.delete(a.local_id)
   }
+}
+
+async function clickDoHomework(
+  a: LocalAccount, v: StudentView, preview: Page, courseName: string, homeworkName: string,
+  setVerified: (x: boolean) => void, retried: boolean,
+): Promise<Page | undefined> {
   emitProgress({
     local_id: a.local_id, slot: v.slot, account: v.account, action: '点做作业',
     homeworkName, homework: 'clicking_do_homework', courseName, bankCount: v.bankCount, aiCount: v.aiCount, click: '做作业',
   })
-  const popupP = preview.context().waitForEvent('page', { timeout: 8000 }).catch(() => null)
+  let popup: Page | null = null
+  const pagesBefore = new Set(preview.context().pages())
+  void preview.waitForEvent('popup', { timeout: 20000 }).then(page => { popup = page }).catch(() => {})
   try {
     await preview.locator(SEL.doHomework).first().click({ timeout: 8000 })
   } catch {
     return undefined
   }
-  let qr = false
-  for (let i = 0; i < 8; i++) {
-    await preview.waitForTimeout(400)
-    if (await hasQr(preview)) { qr = true; break }
-    try {
-      if (isAnswerPath(new URL(preview.url()).pathname)) break
-    } catch { /* URL 未就绪 */ }
-    if (othersPage(preview, PATH.assignmentAnswer)) break
-  }
-  if (qr) {
-    await waitForVerify(a.local_id, preview, 'qr-gone', { courseName, homeworkName })
-    if (stopFlag.has(a.local_id)) return undefined
-    setVerified(true)
-    for (const p of preview.context().pages()) {
-      try {
-        const path = new URL(p.url()).pathname
-        if (path.includes('assignment-preview.aspx') && !isAnswerPath(path)) await p.reload().catch(() => {})
-      } catch {
-        /* 忽略坏 URL */
-      }
-    }
-    if (retried) return undefined
-    return openDoHomework(a, v, preview, courseName, homeworkName, setVerified, true)
-  }
-  const popup = await popupP
   let answerPage: Page | undefined
-  if (popup) {
-    await popup.waitForLoadState('domcontentloaded').catch(() => {})
-    try {
-      if (isAnswerPath(new URL(popup.url()).pathname)) answerPage = popup
-    } catch {
-      /* 新页 URL 未就绪 */
+  for (let i = 0; i < 50; i++) {
+    if (stopFlag.has(a.local_id)) return undefined
+    if (await hasQr(preview)) {
+      await waitForVerify(a.local_id, preview, 'qr-gone', { courseName, homeworkName })
+      if (stopFlag.has(a.local_id)) return undefined
+      setVerified(true)
+      for (const p of preview.context().pages()) {
+        try {
+          const path = new URL(p.url()).pathname
+          if (path.includes('assignment-preview.aspx') && !isAnswerPath(path)) await p.reload().catch(() => {})
+        } catch { /* 忽略坏 URL */ }
+      }
+      if (retried) return undefined
+      return clickDoHomework(a, v, preview, courseName, homeworkName, setVerified, true)
     }
-  }
-  if (!answerPage) try {
-    if (isAnswerPath(new URL(preview.url()).pathname)) answerPage = preview
-  } catch { /* 当前页 URL 未就绪 */ }
-  for (let i = 0; i < 20 && !answerPage; i++) {
-    answerPage = othersPage(preview, PATH.assignmentAnswer)
+    try {
+      if (isAnswerPath(new URL(preview.url()).pathname)) answerPage = preview
+      else if (popup && isAnswerPath(new URL((popup as Page).url()).pathname)) answerPage = popup
+      else answerPage = othersPage(preview, PATH.assignmentAnswer, pagesBefore)
+    } catch { /* 当前页或新窗口 URL 未就绪 */ }
     if (answerPage) break
     await preview.waitForTimeout(400)
   }
   if (!answerPage) return undefined
+  await answerPage.waitForLoadState('domcontentloaded').catch(() => {})
   setVerified(true)
   markHomeworkVerified(a.local_id)
   return answerPage

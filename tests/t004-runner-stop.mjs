@@ -96,6 +96,30 @@ try {
     await waiting
   }
   console.log('T004 晚到的旧二维码截图不覆盖刷新版本检查通过')
+  state.accountId='submit-qr'
+  runner.snapshot()
+  await portal.setContent('<input name="answer" value="已保存答案"><div id="dl_qrCodeCheck" style="width:200px;height:200px">微信扫码验证 未扫码</div>')
+  const submitWaiting=runner.waitForVerify('submit-qr',portal,'qr-gone',{courseName:'脱敏课程',homeworkName:'脱敏作业',stage:'submit'})
+  for(let i=0;i<100&&!runner.getQrSnapshot('submit-qr').ok;i++) await portal.waitForTimeout(10)
+  const beforeRefresh=runner.getQrSnapshot('submit-qr')
+  assert.equal(beforeRefresh.ok,true)
+  assert.equal((await runner.refreshQrSnapshot('submit-qr')).ok,false,'提交二维码没有原生刷新时不能重载答案页')
+  assert.deepEqual(runner.getQrSnapshot('submit-qr'),beforeRefresh,'刷新拒绝不能销毁仍有效的二维码')
+  assert.equal(await portal.locator('[name=answer]').inputValue(),'已保存答案')
+  assert.equal((await runner.signalVerified('submit-qr')).ok,false,'提交二维码未扫不能放行')
+  await runner.stopStudent('submit-qr')
+  await submitWaiting
+  assert.equal(runner.snapshot().students[0].account,'stopped')
+  console.log('T004 提交扫码保留答案、拒绝未扫码与停止检查通过')
+  let stoppedWaitTimer
+  try {
+    await Promise.race([
+      runner.waitForVerify('submit-qr',portal,'qr-gone',{stage:'submit'}),
+      new Promise((_,reject)=>{stoppedWaitTimer=setTimeout(()=>reject(Error('已停止的账号重新创建了扫码等待器')),500)}),
+    ])
+    assert.equal(runner.getQrSnapshot('submit-qr').ok,false)
+    assert.equal(runner.snapshot().students[0].account,'stopped')
+  } finally { clearTimeout(stoppedWaitTimer) }
   state.accountId=undefined
   console.log('T004 二维码截图成功和失败期间停止检查通过')
   const run=runner.loginAndRefresh(['one'])

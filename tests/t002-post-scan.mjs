@@ -15,6 +15,7 @@ class FakeLocator {
   async click() {
     if (this.selector.includes('assignment/preview.aspx')) {
       fixture.homeworkClicks++
+      if (fixture.failFirstClick && fixture.homeworkClicks === 1) throw new Error('入口点击失败')
       if (fixture.homeworkClicks > 1 && !fixture.noAnswerPage) this.page.path = '/study/assignment/preview.aspx'
     }
   }
@@ -33,6 +34,7 @@ class FakePage {
   async bringToFront() {}
   async waitForTimeout() {}
   async waitForLoadState() {}
+  async waitForEvent() { return this.ctx.waitForEvent() }
   async goto(url) { this.path = new URL(url).pathname; return { ok: () => true, status: () => 200 } }
   async close() {}
 }
@@ -93,7 +95,7 @@ const modules = {
     "export const emitProgress = (event) => { globalThis.__t002.events.push(event.account || event.homework || event.action); globalThis.__t002.actions.push(event.action) }",
   ),
   "./page-tools": mock(
-    "export const hasQr = async (page) => page?.kind === 'preview' && globalThis.__t002.qrOpen",
+    "export const hasQr = async (page) => { const s=globalThis.__t002; if (s.delayedQr && ++s.qrPolls >= 12) s.qrOpen=true; return page?.kind === 'preview' && s.qrOpen }",
   ),
   "./ai": "export const resetAsked = () => {}",
   "./review.ts": mock(
@@ -229,4 +231,42 @@ await Promise.all([stopAnswer, interruptedAnswer])
 const stopped = runner.snapshot().students[0]
 assert.equal(stopped.account, 'stopped')
 assert.notEqual(stopped.courses[0].groups[0].rows[0].status, 'submit_failed', '主动停止不能误记为提交失败')
+fixture.stopDuringAnswer = false
+fixture.failureCase = true
+fixture.failFirstClick = true
+fixture.qrOpen = true
+fixture.submitted = false
+fixture.homeworkClicks = 0
+fixture.portalWaiting = false
+context.preview.path = '/study/assignment-preview.aspx'
+context.answer.path = '/study/assignment-preview.aspx'
+const recoveredEntry = runner.loginAndRefresh(['student-1'])
+await waitFor(() => fixture.portalWaiting, '入口失败恢复门户等待')
+await runner.signalVerified('student-1')
+await waitFor(() => fixture.homeworkClicks === 2 && runner.getQrSnapshot('student-1').ok, '首份入口失败不能拦住后续扫码')
+assert.equal(runner.isRunning(), true, '扫码等待不能结束本轮')
+assert.equal((await runner.signalVerified('student-1')).ok, false)
+fixture.qrOpen = false
+await runner.signalVerified('student-1')
+await recoveredEntry
+assert.equal(runner.snapshot().students[0].courses[0].groups[0].rows.find(row => row.name === '后续作业').status, 'done_100')
+fixture.failureCase = false
+fixture.failFirstClick = false
+fixture.noAnswerPage = true
+fixture.delayedQr = true
+fixture.qrPolls = 0
+fixture.qrOpen = false
+fixture.homeworkClicks = 0
+fixture.submitted = false
+fixture.portalWaiting = false
+context.preview.path = '/study/assignment-preview.aspx'
+context.answer.path = '/study/assignment-preview.aspx'
+const delayedEntry = runner.loginAndRefresh(['student-1'])
+await waitFor(() => fixture.portalWaiting, '延迟二维码门户等待')
+await runner.signalVerified('student-1')
+await waitFor(() => runner.getQrSnapshot('student-1').ok, '晚于3秒生成的二维码仍应进入等待')
+assert.equal(fixture.homeworkClicks, 1, '等待取码期间不得续点其它作业')
+await runner.stopStudent('student-1')
+await delayedEntry
+assert.equal(runner.snapshot().students[0].account, 'stopped')
 console.log('T002 扫码后完整内部模拟链路通过')

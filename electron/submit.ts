@@ -1,5 +1,6 @@
 import type { Page } from 'patchright'
-import { SEL } from './core/selectors'
+import { PATH, SEL } from './core/selectors'
+import { hasQr } from './page-tools'
 import { SUBMIT, isUnansweredConfirm, newSubmission } from './core/homework'
 import { emitProgress } from './progress'
 import { readHistory } from './detect'
@@ -15,6 +16,8 @@ function dumpSubmit(ev: string, extra?: Record<string, unknown>) {
 export async function submitHomework(opts: {
   page: Page
   verifiedComposite?: boolean
+  onNeedVerify?: () => Promise<void>
+  signal?: AbortSignal
   local_id: string
   slot: SlotState
   account: AccountState
@@ -22,6 +25,7 @@ export async function submitHomework(opts: {
 }): Promise<{ ok: boolean; incomplete?: boolean }> {
   const { page, local_id, slot, account, homeworkName } = opts
   const hasComposite = await page.locator('.e-q-body[data-questiontype="7"], .e-q-body[data-questiontype="8"], .e-q-body[data-questiontype="9"], .e-q-body[data-questiontype="11"]').count() > 0
+  if (opts.signal?.aborted) return { ok: false }
   if (hasComposite && !opts.verifiedComposite) {
     emitProgress({ local_id, slot, account, action: '英语复合题未逐项复核，禁止提交', homeworkName, homework: 'submit_failed', bankCount: 0, aiCount: 0 })
     return { ok: false, incomplete: true }
@@ -30,64 +34,51 @@ export async function submitHomework(opts: {
     local_id, slot, account, action: '点击提交作业', homeworkName, homework: 'submitting',
     bankCount: 0, aiCount: 0, click: '#submitHomeWork',
   })
-  const clickOk = async (timeout: number, which: string): Promise<'clicked' | 'incomplete' | 'missing'> => {
-    const ok = page.locator(SUBMIT.ok).first()
-    try {
-      await ok.waitFor({ state: 'visible', timeout })
-      const dialogText = ((await page.locator('.xcConfirm').first().innerText()) || '').trim()
-      if (isUnansweredConfirm(dialogText)) {
-        await page.locator(SUBMIT.cancel).first().click()
-        emitProgress({
-          local_id, slot, account, action: '发现未作答警告，已取消提交', homeworkName, homework: 'submit_failed',
-          bankCount: 0, aiCount: 0, click: 'a.sgBtn.cancel',
-        })
-        dumpSubmit('unanswered-cancelled', { which, homeworkName })
-        return 'incomplete'
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (opts.signal?.aborted) return { ok: false }
+    await page.locator(SEL.submit).click()
+    let deadline = Date.now() + 20000
+    let resumeAfterQr = false
+    while (Date.now() < deadline) {
+      if (opts.signal?.aborted) return { ok: false }
+      if (new URL(page.url()).pathname.toLowerCase() === PATH.assignmentPreview.toLowerCase()) {
+        dumpSubmit('navigated-preview', { homeworkName })
+        return { ok: true }
       }
-      const label = ((await ok.innerText()) || '').trim()
-      dumpSubmit('ok-visible', { which, label, homeworkName })
-      await ok.click()
-      emitProgress({
-        local_id, slot, account, action: '确认提交', homeworkName, homework: 'submitting',
-        bankCount: 0, aiCount: 0, click: 'a.sgBtn.ok',
-      })
-      dumpSubmit('ok-clicked', { which, label, homeworkName })
-      await page.waitForTimeout(400)
-      return 'clicked'
-    } catch {
-      dumpSubmit('ok-missing', { which, homeworkName })
-      return 'missing'
+      const qrOpen = await hasQr(page)
+      if (opts.signal?.aborted) return { ok: false }
+      if (qrOpen) {
+        if (!opts.onNeedVerify) return { ok: false }
+        await opts.onNeedVerify()
+        if (opts.signal?.aborted || await hasQr(page)) return { ok: false }
+        resumeAfterQr = true
+        deadline = Date.now() + 20000
+        continue
+      }
+      const ok = page.locator(SUBMIT.ok).filter({ visible: true }).first()
+      const hasConfirm = await ok.count() > 0
+      if (opts.signal?.aborted) return { ok: false }
+      if (hasConfirm) {
+        const dialogText = ((await ok.locator('xpath=ancestor::*[contains(@class,"xcConfirm")]').innerText()) || '').trim()
+        if (opts.signal?.aborted) return { ok: false }
+        if (isUnansweredConfirm(dialogText)) {
+          await page.locator(SUBMIT.cancel).filter({ visible: true }).first().click()
+          emitProgress({ local_id, slot, account, action: '发现未作答警告，已取消提交', homeworkName,
+            homework: 'submit_failed', bankCount: 0, aiCount: 0, click: 'a.sgBtn.cancel' })
+          return { ok: false, incomplete: true }
+        }
+        await ok.click()
+        emitProgress({ local_id, slot, account, action: '确认提交', homeworkName,
+          homework: 'submitting', bankCount: 0, aiCount: 0, click: 'a.sgBtn.ok' })
+        await page.waitForTimeout(400)
+      } else await page.waitForTimeout(200)
     }
+    // 部分学校扫码成功只关闭弹窗；先等自动保存，仍未跳转才恢复一次原生提交。
+    if (!resumeAfterQr) break
   }
-  dumpSubmit('click-submit', { homeworkName })
-  await page.locator(SEL.submit).click()
-  let first = await clickOk(8000, 'first')
-  if (first === 'incomplete') return { ok: false, incomplete: true }
-  if (first === 'missing') {
-    await page.waitForTimeout(8000)
-    if (await page.locator(SEL.submit).count()) {
-      await page.locator(SEL.submit).click()
-      dumpSubmit('retry-submit', { homeworkName })
-      first = await clickOk(8000, 'first-retry')
-      if (first === 'incomplete') return { ok: false, incomplete: true }
-    }
-  }
-  if (first !== 'clicked') {
-    dumpSubmit('no-dialog', { homeworkName })
-    emitProgress({ local_id, slot, account, action: '提交弹窗未出现', homeworkName, homework: 'submit_failed', bankCount: 0, aiCount: 0 })
-    return { ok: false }
-  }
-  await page.locator(SUBMIT.ok).first().waitFor({ state: 'hidden', timeout: 2000 }).catch(() => {})
-  const second = await clickOk(5000, 'second')
-  if (second === 'incomplete') return { ok: false, incomplete: true }
-  dumpSubmit(second === 'clicked' ? 'second-ok' : 'no-second-ok', { homeworkName })
-  try {
-    await page.waitForURL((u) => u.pathname.includes('assignment-preview.aspx'), { timeout: 20000 })
-    dumpSubmit('navigated-preview', { homeworkName })
-  } catch {
-    dumpSubmit('still-on-answer', { homeworkName })
-  }
-  return { ok: true }
+  emitProgress({ local_id, slot, account, action: '提交后未返回作业预览，未确认交卷', homeworkName,
+    homework: 'submit_failed', bankCount: 0, aiCount: 0 })
+  return { ok: false }
 }
 
 export async function historyHasNew(page: Page, before: string[]): Promise<boolean> {
