@@ -25,20 +25,69 @@ try {
     }
     throw new Error('等待工作台真实状态超时')
   }
+  const selectStudentInUi = async (candidate) => {
+    const name = candidate.name || candidate.studentName
+    assert.ok(name, '切换学生失败：缺少学生姓名')
+    if ((await page.locator('#student-id').innerText()) === candidate.studentNo) return
+    const directPill = page.locator('.student-pill[data-student]').filter({ has: page.getByText(name, { exact: true }) }).first()
+    if (await directPill.count()) {
+      await directPill.click()
+    } else {
+      await page.getByRole('button', { name: '更多学生' }).click()
+      await page.locator('#student-more .source-popover button').filter({ has: page.getByText(name, { exact: true }) }).first().click()
+    }
+    await waitUntil(async () => (await page.locator('#student-id').innerText()) === candidate.studentNo)
+  }
   const selectCourseForUi = async (localId, courseName) => {
-    const item = page.locator('#course-list .course-item').filter({ hasText: courseName })
-    await item.getByText(courseName, { exact: true }).waitFor()
     const before = await renderer('window.kaida.snapshot()')
     const student = before.students.find((row) => row.local_id === localId)
     const alreadySelected = student?.selectedCourseNames.includes(courseName)
     const currentHeading = await page.locator('h1').innerText().catch(() => '')
     if (alreadySelected && currentHeading.includes(courseName)) return
+    const courseIndex = student?.courses.findIndex((row) => row.name === courseName) ?? -1
+    assert.ok(courseIndex >= 0, '目标课程不在当前学生快照中')
+    const targetPage = Math.floor(courseIndex / 7) + 1
+    const previous = page.getByRole('button', { name: '上一页课程' })
+    for (let guard = 0; guard < 20 && await previous.isEnabled().catch(() => false); guard++) {
+      await previous.click()
+    }
+    const next = page.getByRole('button', { name: '下一页课程' })
+    for (let currentPage = 1; currentPage < targetPage; currentPage++) {
+      await next.click()
+    }
+    const item = page.locator('#course-list .course-item').filter({ hasText: courseName })
+    await item.getByText(courseName, { exact: true }).waitFor()
     if (alreadySelected) {
       await item.getByText(courseName, { exact: true }).click()
       await waitUntil(async () => !(await renderer('window.kaida.snapshot()')).students.find((row) => row.local_id === localId)?.selectedCourseNames.includes(courseName))
     }
     await item.getByText(courseName, { exact: true }).click()
     await waitUntil(async () => (await renderer('window.kaida.snapshot()')).students.find((row) => row.local_id === localId)?.selectedCourseNames.includes(courseName))
+  }
+  const homeworkCardInUi = async (candidate) => {
+    await selectStudentInUi(candidate)
+    await selectCourseForUi(candidate.localId, candidate.course)
+    await page.locator('h1').filter({ hasText: candidate.course }).waitFor()
+    const snap = await renderer('window.kaida.snapshot()')
+    const student = snap.students.find((row) => row.local_id === candidate.localId)
+    const course = student?.courses.find((row) => row.name === candidate.course)
+    const rows = course?.groups.flatMap((group) => group.rows) || []
+    const homeworkIndex = rows.findIndex((row) => row.name === candidate.homework)
+    assert.ok(homeworkIndex >= 0, '目标作业不在当前课程快照中')
+    const targetPage = Math.floor(homeworkIndex / 4) + 1
+    const previous = page.getByRole('button', { name: '上一页作业' })
+    for (let guard = 0; guard < 20 && await previous.isEnabled().catch(() => false); guard++) {
+      await previous.click()
+    }
+    const next = page.getByRole('button', { name: '下一页作业' })
+    for (let currentPage = 1; currentPage < targetPage; currentPage++) {
+      await next.click()
+    }
+    const card = page.getByText(candidate.homework, { exact: true })
+      .locator('xpath=ancestor::div[contains(@class,"p-4")][1]')
+      .first()
+    await card.waitFor()
+    return card
   }
 
   const initial = await renderer('window.kaida.snapshot()')
@@ -85,16 +134,14 @@ try {
 
   assert.equal(await page.locator('#tool-stop, #tool-log, #tool-delete').count(), 3)
   assert.equal(await page.locator('#tool-refresh').count(), 0)
-  assert.equal(await page.locator('header').first().locator('nav a').count(), 4)
-  assert.equal(await page.locator('header').first().locator('button').count(), 0)
+  assert.equal(await page.locator('#header-nav a').count(), 4)
+  assert.equal(await page.locator('#header-nav button').count(), 0)
   await page.getByText('全部自动执行', { exact: true }).waitFor()
   await page.getByText('可选课程执行', { exact: true }).waitFor()
   await page.getByText('开始执行（已选 0 门）', { exact: true }).waitFor()
   assert.equal(await page.locator('#btn-primary-action').isDisabled(), true)
 
-  await page.locator('#student-more button').first().click()
-  await page.locator('#student-more .source-popover button').filter({ hasText: secondAccount.name }).click()
-  await waitUntil(async () => (await page.locator('#student-id').innerText()) === secondAccount.studentNo)
+  await selectStudentInUi(secondAccount)
   assert.equal(await page.locator('#tool-log').isDisabled(), true, '未选课程时日志按钮没有禁用')
   const secondCourse = secondStudent.courses.find((item) => item.groups.some((group) => group.rows.some((row) => row.previewHref)))
   assert.ok(secondCourse, '第二个学生没有可选课程')
@@ -110,11 +157,7 @@ try {
   await page.getByRole('heading', { name: '课程运行日志' }).waitFor()
   assert.ok((await page.getByRole('heading', { name: '课程运行日志' }).locator('xpath=ancestor::section[1]').innerText()).includes(secondCourse.name), '切换学生后课程日志仍显示旧课程')
   await page.getByRole('button', { name: '关闭课程日志' }).click()
-  if ((await page.locator('#student-id').innerText()) !== account.studentNo) {
-    await page.locator('#student-more button').first().click()
-    await page.locator('#student-more .source-popover button').filter({ hasText: account.name }).click()
-    await waitUntil(async () => (await page.locator('#student-id').innerText()) === account.studentNo)
-  }
+  await selectStudentInUi(account)
 
   const courseItem = page.locator('#course-list .course-item').filter({ hasText: course.name })
   await courseItem.getByText(course.name, { exact: true }).click()
@@ -164,38 +207,31 @@ try {
   await page.getByRole('button', { name: '关闭历史成绩' }).click()
 
   if (stageCourse) {
-    await page.locator('#student-more button').first().click()
-  await page.locator('#student-more .source-popover button').filter({ hasText: secondAccount.name }).click()
-  await waitUntil(async () => (await page.locator('#student-id').innerText()) === secondAccount.studentNo)
-  const stageItem = page.locator('#course-list .course-item').filter({ hasText: stageCourse.name })
-  await stageItem.getByText(stageCourse.name, { exact: true }).click()
-  await waitUntil(async () => {
-    const snap = await renderer('window.kaida.snapshot()')
-    return snap.students.find((item) => item.local_id === secondAccount.local_id)?.selectedCourseNames.includes(stageCourse.name)
-  })
-  await page.locator('h1').filter({ hasText: stageCourse.name }).waitFor()
-  const stageGroup = stageCourse.groups.find((group) => group.title === '阶段性测验')
-  const stageHomework = stageGroup?.rows.find((row) => row.previewHref)
-  assert.ok(stageHomework, '阶段性测验课程没有可查看历史的作业')
-  const stageHistory = await rendererCall((payload) => window.kaida.getHomeworkHistory(payload.id, payload.course, payload.homework), {
-    id: secondAccount.local_id,
-    course: stageCourse.name,
-    homework: stageHomework.name,
-  })
-  assert.equal(stageHistory.ok, true, stageHistory.error || '阶段性测验历史成绩读取失败')
-  stageHistoryItems = stageHistory.items.length
-  stageHistoryStates = [...new Set(stageHistory.items.map((item) => item.displayState))]
-  const stageHomeworkCard = page.getByText(stageHomework.name, { exact: true }).locator('xpath=ancestor::div[contains(@class,\"p-4\")][1]')
-  await stageHomeworkCard.getByRole('button', { name: '历史成绩' }).click()
-  await page.getByRole('heading', { name: '历史成绩' }).waitFor()
-  await page.getByText('正在读取真实历史记录', { exact: true }).waitFor({ state: 'hidden', timeout: 60_000 })
+    await selectStudentInUi(secondAccount)
+    await selectCourseForUi(secondAccount.local_id, stageCourse.name)
+    await page.locator('h1').filter({ hasText: stageCourse.name }).waitFor()
+    const stageGroup = stageCourse.groups.find((group) => group.title === '阶段性测验')
+    const stageHomework = stageGroup?.rows.find((row) => row.previewHref)
+    assert.ok(stageHomework, '阶段性测验课程没有可查看历史的作业')
+    const stageHistory = await rendererCall((payload) => window.kaida.getHomeworkHistory(payload.id, payload.course, payload.homework), {
+      id: secondAccount.local_id,
+      course: stageCourse.name,
+      homework: stageHomework.name,
+    })
+    assert.equal(stageHistory.ok, true, stageHistory.error || '阶段性测验历史成绩读取失败')
+    stageHistoryItems = stageHistory.items.length
+    stageHistoryStates = [...new Set(stageHistory.items.map((item) => item.displayState))]
+    const stageHomeworkCard = page.getByText(stageHomework.name, { exact: true }).locator('xpath=ancestor::div[contains(@class,\"p-4\")][1]')
+    await stageHomeworkCard.getByRole('button', { name: '历史成绩' }).click()
+    await page.getByRole('heading', { name: '历史成绩' }).waitFor()
+    await page.getByText('正在读取真实历史记录', { exact: true }).waitFor({ state: 'hidden', timeout: 60_000 })
     if (stageHistory.items.length) await page.locator('article').filter({ hasText: '第 ' + stageHistory.items[0].attempt + ' 次' }).first().waitFor()
-  else await page.getByText('暂无历史记录', { exact: true }).waitFor()
-  if (stageHistoryStates.includes('no_view')) {
-    const noViewButton = page.getByRole('button', { name: '无可靠查看入口', exact: true })
-    assert.equal(await noViewButton.count(), 1, '无查看入口历史记录没有显示明确状态')
-    assert.equal(await noViewButton.isDisabled(), true, '无查看入口历史记录仍允许打开')
-  }
+    else await page.getByText('暂无历史记录', { exact: true }).waitFor()
+    if (stageHistoryStates.includes('no_view')) {
+      const noViewButton = page.getByRole('button', { name: '无可靠查看入口', exact: true })
+      assert.equal(await noViewButton.count(), 1, '无查看入口历史记录没有显示明确状态')
+      assert.equal(await noViewButton.isDisabled(), true, '无查看入口历史记录仍允许打开')
+    }
     await page.getByRole('button', { name: '关闭历史成绩' }).click()
   }
 
@@ -254,15 +290,7 @@ try {
     no_view: '无可靠查看入口',
   }
   for (const [state, candidate] of Object.entries(historyStateEvidence)) {
-    const currentStudentNo = await page.locator('#student-id').innerText()
-    if (currentStudentNo !== candidate.studentNo) {
-      await page.locator('#student-more button').first().click()
-      await page.locator('#student-more .source-popover button').filter({ hasText: candidate.studentName }).click()
-      await waitUntil(async () => (await page.locator('#student-id').innerText()) === candidate.studentNo)
-    }
-    await selectCourseForUi(candidate.localId, candidate.course)
-    await page.locator('h1').filter({ hasText: candidate.course }).waitFor()
-    const candidateCard = page.getByText(candidate.homework, { exact: true }).locator('xpath=ancestor::div[contains(@class,\"p-4\")][1]')
+    const candidateCard = await homeworkCardInUi(candidate)
     await candidateCard.getByRole('button', { name: '历史成绩' }).click()
     await page.getByRole('heading', { name: '历史成绩' }).waitFor()
     await page.getByText('正在读取真实历史记录', { exact: true }).waitFor({ state: 'hidden', timeout: 60_000 })
@@ -281,15 +309,7 @@ try {
   }
   const verifyHistoryCandidate = async (candidate, expected) => {
     if (!candidate) return false
-    const currentStudentNo = await page.locator('#student-id').innerText()
-    if (currentStudentNo !== candidate.studentNo) {
-      await page.locator('#student-more button').first().click()
-      await page.locator('#student-more .source-popover button').filter({ hasText: candidate.studentName }).click()
-      await waitUntil(async () => (await page.locator('#student-id').innerText()) === candidate.studentNo)
-    }
-    await selectCourseForUi(candidate.localId, candidate.course)
-    await page.locator('h1').filter({ hasText: candidate.course }).waitFor()
-    const candidateCard = page.getByText(candidate.homework, { exact: true }).locator('xpath=ancestor::div[contains(@class,"p-4")][1]')
+    const candidateCard = await homeworkCardInUi(candidate)
     await candidateCard.getByRole('button', { name: '历史成绩' }).click()
     await page.getByRole('heading', { name: '历史成绩' }).waitFor()
     await page.getByText('正在读取真实历史记录', { exact: true }).waitFor({ state: 'hidden', timeout: 60_000 })
@@ -299,11 +319,7 @@ try {
   }
   const emptyHistoryChecked = await verifyHistoryCandidate(historyEmptyEvidence, '暂无历史记录')
   const failedHistoryChecked = await verifyHistoryCandidate(historyFailureEvidence, '该作业没有可靠历史页面链接')
-  if ((await page.locator('#student-id').innerText()) !== account.studentNo) {
-    await page.locator('#student-more button').first().click()
-    await page.locator('#student-more .source-popover button').filter({ hasText: account.name }).click()
-    await waitUntil(async () => (await page.locator('#student-id').innerText()) === account.studentNo)
-  }
+  await selectStudentInUi(account)
 
   await page.locator('#btn-primary-action').click()
   await waitUntil(async () => {
@@ -343,15 +359,11 @@ try {
   assert.match(await page.locator('#extract-stats').innerText(), /冲突/)
   assert.match(await page.locator('#extract-stats').innerText(), /失败/)
 
-  await page.locator('#student-more button').first().click()
-  await page.locator('#student-more .source-popover button').filter({ hasText: secondAccount.name }).click()
-  await waitUntil(async () => (await page.locator('#student-id').innerText()) === secondAccount.studentNo)
+  await selectStudentInUi(secondAccount)
   const secondLive = live.students.find((item) => item.local_id === secondAccount.local_id)
   assert.equal(await page.locator('#stat-repo').innerText(), String(secondLive.bankCount))
   assert.equal(await page.locator('#stat-ai').innerText(), String(secondLive.aiCount))
-  await page.locator('#student-more button').first().click()
-  await page.locator('#student-more .source-popover button').filter({ hasText: account.name }).click()
-  await waitUntil(async () => (await page.locator('#student-id').innerText()) === account.studentNo)
+  await selectStudentInUi(account)
 
   await rendererCall((id) => window.kaida.stop(id), account.local_id)
   await rendererCall((id) => window.kaida.stop(id), secondAccount.local_id)

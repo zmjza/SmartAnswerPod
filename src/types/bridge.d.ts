@@ -42,7 +42,7 @@ declare global {
       stopAllStudents: () => Promise<{ ok: boolean }>
       applyStudentSettingsToAll: (id: string) => Promise<{ ok: boolean; updated?: number; failed?: string[]; error?: string }>
       setDisplay: (id: string, mode: string) => Promise<{ ok: boolean; visible: boolean | null; error?: string }>
-      setWorkMode: (id: string, mode: string) => Promise<{ ok: boolean; error?: string }>
+      setWorkMode: (id: string, mode: 'answer' | 'extract' | 'noqr') => Promise<{ ok: boolean; error?: string }>
       setCourseScope: (id: string, scope: string) => Promise<{ ok: boolean; error?: string }>
       setSelectedCourses: (id: string, keys: string[]) => Promise<{ ok: boolean; error?: string; selected?: number; selectedNames?: string[]; selectedKeys?: string[] }>
       startSelectedCourses: () => Promise<{ ok: boolean; error?: string }>

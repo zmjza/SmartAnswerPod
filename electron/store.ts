@@ -6,8 +6,8 @@ import { assertNoSecretKey, decryptFromFile, encryptToFile } from './secrets'
 import { normalizeRunLimit } from './core/attempts'
 import { PUBLIC_SUPABASE_ANON, PUBLIC_SUPABASE_URL } from './core/public-config'
 import type { BankAccessState } from './core/bank-access'
+import { normalizeWorkMode, type WorkMode } from './core/work-mode'
 type DisplayMode = 'headless' | 'visual'
-type WorkMode = 'answer' | 'extract'
 type CourseScope = 'all' | 'selected'
 
 export type Settings = {
@@ -139,9 +139,21 @@ export function saveSettings(partial: Partial<Settings>): { ok: boolean; error?:
 export function listAccounts(): LocalAccount[] {
   return load().accounts.map((account) => ({
     ...account,
+    work_mode: normalizeWorkMode(account.work_mode),
     course_scope: account.course_scope === 'selected' ? 'selected' : 'all',
     answer_round_limit: normalizeRunLimit(account.answer_round_limit),
   }))
+}
+
+export function getAccountWorkMode(local_id: string): WorkMode {
+  return normalizeWorkMode(load().accounts.find((account) => account.local_id === local_id)?.work_mode)
+}
+
+export function patchAccountWorkMode(local_id: string, work_mode: WorkMode) {
+  const cur = load()
+  cur.accounts = cur.accounts.map((account) =>
+    account.local_id === local_id ? { ...account, work_mode: normalizeWorkMode(work_mode) } : account)
+  encryptToFile(filePath(), cur)
 }
 
 export function addAccount(row: { name: string; username: string; password: string }): LocalAccount {

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>合成登录页</title></head>
+<body>
+  <main>
+    <h1>合成在线学习平台</h1>
+    <input name="用户名" placeholder="用户名">
+    <input name="密码" type="password" placeholder="密码">
+    <button type="button" id="login">提交</button>
+  </main>
+  <script>
+    document.getElementById('login').addEventListener('click', async () => {
+      const button = document.getElementById('login')
+      button.textContent = '加载中...'
+      const response = await fetch('/fixture-login', { method: 'POST', body: '{}' })
+      if (!response.ok) {
+        button.textContent = '提交'
+        const error = document.createElement('p')
+        error.className = 'login-error'
+        error.textContent = '登录失败，请检查账号密码'
+        document.querySelector('main').append(error)
+        return
+      }
+      location.href = '/index.html'
+    })
+  </script>
+</body>
+</html>

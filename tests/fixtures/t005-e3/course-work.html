@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>形考作业</title></head>
+<body>
+  <nav class="top-nav van-nav-bar">
+    <button class="van-nav-bar__left" type="button">返回</button>
+    <div class="van-nav-bar__title">合成课程一</div>
+    <div class="van-nav-bar__right">
+      <button class="van-popover__wrapper" type="button">菜单</button>
+    </div>
+  </nav>
+  <div class="van-popover__content" role="menu" hidden>
+    <button class="van-popover__action top-pop-item" type="button" data-utility="language-zh">中文</button>
+    <button class="van-popover__action top-pop-item" type="button" data-utility="language-en">English</button>
+    <button class="van-popover__action top-pop-item" type="button" data-utility="switch">切换课程</button>
+    <button class="van-popover__action top-pop-item top-pop-active" type="button" data-course="1">合成课程一</button>
+    <button class="van-popover__action top-pop-item" type="button" data-course="2">合成课程二</button>
+  </div>
+  <main id="course-one">
+    <article class="work-item">
+      <h2 class="work-title">合成在线作业</h2>
+      <span class="work-type">客观题试卷</span>
+      <p class="work-info">权重: 100%</p>
+      <p class="work-info">形考开始时间: 2026-01-01 00:00:00</p>
+      <p class="work-info">形考结束时间: 2026-12-31 23:59:59</p>
+      <p class="work-info">批阅截止时间: 2027-01-01 00:00:00</p>
+      <p class="work-info">作答次数: 无限制</p>
+      <div class="work-btns">
+        <button class="btn-item" data-action="start" type="button">开始作答</button>
+        <button class="btn-item" data-action="record" type="button">作答记录(0)</button>
+      </div>
+    </article>
+    <article class="work-item">
+      <h2 class="work-title">合成非客观作业</h2>
+      <span class="work-type">课程论文</span>
+      <p class="work-info">权重: 10%</p>
+      <p class="work-info">形考开始时间: 2026-01-01 00:00:00</p>
+      <p class="work-info">形考结束时间: 2026-12-31 23:59:59</p>
+      <p class="work-info">批阅截止时间: 2027-01-01 00:00:00</p>
+      <p class="work-info">作答次数: 无限制</p>
+      <div class="work-btns">
+        <button class="btn-item" type="button" disabled>开始作答</button>
+        <button class="btn-item" type="button" disabled>作答记录(0)</button>
+      </div>
+    </article>
+  </main>
+  <main id="course-two" class="van-empty" hidden>暂无作业</main>
+  <script>
+    const popup = document.querySelector('.van-popover__content')
+    document.querySelector('.van-popover__wrapper').addEventListener('click', () => {
+      popup.hidden = !popup.hidden
+    })
+    for (const item of document.querySelectorAll('.top-pop-item')) {
+      item.addEventListener('click', () => {
+        for (const peer of document.querySelectorAll('.top-pop-item')) peer.classList.remove('top-pop-active')
+        item.classList.add('top-pop-active')
+        const second = item.dataset.course === '2'
+        document.querySelector('.van-nav-bar__title').textContent = item.textContent.trim()
+        document.querySelector('#course-one').hidden = second
+        document.querySelector('#course-two').hidden = !second
+        popup.hidden = true
+      })
+    }
+    for (const button of document.querySelectorAll('.work-btns .btn-item[data-action]')) {
+      button.addEventListener('click', () => {
+        if (button.dataset.action === 'start') {
+          location.href = '/course_work_detail/index.html?workId=work-1&courseId=course-1&workType=onlineWork'
+        } else {
+          location.href = '/course_work_record/index.html?workId=work-1&courseId=course-1&workType=onlineWork'
+        }
+      })
+    }
+    document.querySelector('.van-nav-bar__left').addEventListener('click', () => {
+      location.href = '/index.html'
+    })
+  </script>
+</body>
+</html>

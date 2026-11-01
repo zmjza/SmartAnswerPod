@@ -363,6 +363,8 @@ test('全部作业收尾才算课程完成，逐题快照不重复计数', () =>
   assert.equal(courseOutcome(['done_100', 'todo']), '尚未完成')
   assert.equal(courseOutcome(['done_100', 'pending_writeback']), '待回写')
   assert.equal(courseOutcome(['done_100', 'submit_failed']), '有失败待处理')
+  assert.equal(courseOutcome(['done_100', 'answer_page_interrupted']), '有失败待处理')
+  assert.equal(courseOutcome(['done_100', 'submitted_uncertain']), '有失败待处理')
   assert.equal(courseOutcome(['done_100', 'skip_bank_miss']), '有失败待处理')
   assert.equal(courseOutcome(['done_100', 'skip_full_score']), '本轮可做作业已完成')
   assert.equal(courseOutcome(['done_100', 'skip_attempts_exhausted']), '暂不可完成')

@@ -1,6 +1,6 @@
 import { app, BrowserWindow } from 'electron'
 import { createRequire } from 'node:module'
-import { isRunning } from './runner'
+import { isRunning } from './workbench-coordinator'
 import { UpdateFlow, type UpdateState } from './core/update-flow'
 
 export const otaConfig = { provider: 'github' as const, owner: 'zmjza', repo: 'SmartAnswerPod' }

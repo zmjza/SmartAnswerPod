@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { _electron as electron } from 'patchright'
 import { AI_MODELS } from '../electron/core/ai-parse.ts'
+
+const appVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
 const app = await electron.launch({ args: ['.'], env: { ...process.env, VITE_DEV_SERVER_URL: '' } })
 try {
@@ -21,7 +24,7 @@ try {
 
   await page.getByText('设置', { exact: true }).first().click()
   await page.getByRole('heading', { name: '系统偏好设置' }).waitFor()
-  await page.getByText('v0.1.7 开发版', { exact: true }).waitFor()
+  await page.locator('[data-settings-version]').getByText(`v${appVersion}`, { exact: true }).waitFor()
 
   const initialBrowserOn = await page.locator('#browser-toggle').isChecked()
   const initialLogOn = await page.locator('#log-toggle').isChecked()

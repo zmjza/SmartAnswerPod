@@ -32,7 +32,8 @@ import {
   stopAllStudents,
   stopStudent,
   toggleDisplay,
-} from './runner'
+  onNoqrChange,
+} from './workbench-coordinator'
 import { onProgress } from './progress'
 import { checkForUpdates, currentUpdateState, downloadUpdate, installUpdate, updaterFeed } from './ota'
 import * as XLSX from 'xlsx'
@@ -199,6 +200,7 @@ app.whenReady().then(() => {
   }
   createWindow()
   void checkForUpdates()
+  onNoqrChange(pushSnap)
   onProgress((e) => {
     win?.webContents.send('kaida:progress', e)
     pushSnap()
@@ -262,7 +264,7 @@ ipcMain.handle('kaida:accounts:add', (_e, row: { name: string; username: string;
   pushSnap()
   return { ok: true }
 })
-ipcMain.handle('kaida:accounts:update', (_e, id: string, row: { name?: string; password?: string; display_mode?: 'headless' | 'visual'; work_mode?: 'answer' | 'extract' }) => {
+ipcMain.handle('kaida:accounts:update', (_e, id: string, row: { name?: string; password?: string; display_mode?: 'headless' | 'visual'; work_mode?: 'answer' | 'extract' | 'noqr' }) => {
   if (!listAccounts().some((a) => a.local_id === id)) return { ok: false, error: '账号不存在' }
   const patch: Record<string, unknown> = {}
   if (row.name?.trim()) patch.name = row.name.trim()
@@ -407,7 +409,7 @@ ipcMain.handle('kaida:display', async (_e, id: string, mode: 'headless' | 'visua
   pushSnap()
   return result
 })
-ipcMain.handle('kaida:workMode', async (_e, id: string, mode: 'answer' | 'extract') => {
+ipcMain.handle('kaida:workMode', async (_e, id: string, mode: 'answer' | 'extract' | 'noqr') => {
   const result = await setWorkMode(id, mode)
   pushSnap()
   return result

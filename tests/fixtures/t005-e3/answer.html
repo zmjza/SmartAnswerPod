@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>合成在线作业</title></head>
+<body>
+  <nav class="top-nav van-nav-bar">
+    <button class="van-nav-bar__left" type="button">返回</button>
+    <div class="van-nav-bar__title">合成在线作业</div>
+  </nav>
+  <div class="content-area">
+    <div id="type-label">单选题</div>
+    <div id="position">1/4</div>
+    <div id="question-root"></div>
+    <button class="next-btn" type="button">下一题</button>
+    <div class="footer">
+      <button class="btn-item" id="answer-card" type="button">答题卡</button>
+      <button class="btn-item" id="finish" type="button">交卷</button>
+    </div>
+  </div>
+  <div class="van-overlay" style="display:none"></div>
+  <div class="van-popup van-popup--round van-popup--bottom" style="display:none">
+    <div class="question-card">
+      <div class="question-cart-title">第 1 大题: 综合题</div>
+      <div class="question-cart-items"></div>
+    </div>
+  </div>
+  <script>
+    const questions = [
+      { kind: 'single', label: '单选题', stem: '合成单选题一', options: ['甲', '乙'], answer: '1', ids: ['bg-1', 'q-1'] },
+      { kind: 'single', label: '单选题', stem: '合成单选题二', options: ['甲', '乙', '丙'], answer: '2', ids: ['bg-1', 'q-2'] },
+      { kind: 'multiple', label: '多选题', stem: '合成多选题', options: ['甲', '乙', '丙'], answers: ['0', '2'], ids: ['bg-2', 'q-3'] },
+      { kind: 'single', label: '单选题', stem: '合成最后一题', options: ['甲', '乙'], answer: '1', ids: ['bg-2', 'q-4'] },
+    ]
+    let current = 0
+    const saved = new Set()
+    const render = () => {
+      const q = questions[current]
+      document.querySelector('#type-label').textContent = q.label
+      document.querySelector('#position').textContent = (current + 1) + '/4'
+      const role = q.kind === 'multiple' ? 'checkbox' : 'radio'
+      document.querySelector('#question-root').innerHTML = `
+        <div class="question-info">
+          <span class="question-title">${q.stem}</span>
+          <div class="question-options">
+            ${q.options.map((text, index) => `<div role="${role}" aria-checked="false" class="option-item van-${role}" data-index="${index}">
+              <span class="van-${role}__label">${String.fromCharCode(65 + index)}. ${text}</span>
+            </div>`).join('')}
+          </div>
+        </div>`
+      for (const option of document.querySelectorAll('.option-item')) {
+        option.addEventListener('click', () => {
+          if (role === 'radio') {
+            for (const peer of document.querySelectorAll('.option-item')) peer.setAttribute('aria-checked', 'false')
+            option.setAttribute('aria-checked', 'true')
+          } else {
+            option.setAttribute('aria-checked', option.getAttribute('aria-checked') === 'true' ? 'false' : 'true')
+          }
+        })
+      }
+      renderCard()
+    }
+    const renderCard = () => {
+      document.querySelector('.question-cart-items').innerHTML = questions.map((_, index) =>
+        `<span class="sub-question ${saved.has(index) ? 'has-answered' : ''} ${index === current ? 'is-current' : ''}">${index + 1}</span>`
+      ).join('')
+    }
+    document.querySelector('.next-btn').addEventListener('click', async () => {
+      const q = questions[current]
+      const selected = [...document.querySelectorAll('.option-item[aria-checked="true"]')]
+        .map((node) => node.dataset.index).sort().join(',')
+      const response = await fetch('/dotNet_api/api/services/app/HomeWorkStudent/SubmitJsonAsync', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          workId: 'work-1', homeWorkUniqueFlag: 'flag-1', workType: 'onlineWork',
+          answer: { bigQuestionId: q.ids[0], questionId: q.ids[1], useTime: 0, answerContent: '', answerSelected: selected }
+        })
+      })
+      const payload = await response.json()
+      if (!payload.success) return
+      saved.add(current)
+      renderCard()
+      if (current === questions.length - 1) {
+        const toast = document.createElement('div')
+        toast.className = 'van-toast van-toast--text'
+        toast.textContent = '已是最后一题'
+        document.body.appendChild(toast)
+      } else {
+        current++
+        render()
+      }
+    })
+    document.querySelector('#answer-card').addEventListener('click', () => {
+      document.querySelector('.van-overlay').style.display = 'block'
+      document.querySelector('.van-popup--bottom').style.display = 'block'
+      renderCard()
+    })
+    document.querySelector('.van-overlay').addEventListener('click', () => {
+      document.querySelector('.van-overlay').style.display = 'none'
+      document.querySelector('.van-popup--bottom').style.display = 'none'
+    })
+    document.querySelector('#finish').addEventListener('click', async () => {
+      const response = await fetch('/dotNet_api/api/services/app/HomeWorkStudent/FinishJsonAsync', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          workId: 'work-1', workType: 'onlineWork', homeWorkUniqueFlag: 'flag-1',
+          paperStructUniqueFlag: 'paper-1', useTime: 0
+        })
+      })
+      const payload = await response.json()
+      if (!payload.success) return
+      document.querySelector('#finish').classList.add('disable-btn')
+      const toast = document.createElement('div')
+      toast.className = 'van-toast van-toast--success'
+      toast.textContent = '交卷成功!'
+      document.body.appendChild(toast)
+    })
+    document.querySelector('.van-nav-bar__left').addEventListener('click', () => {
+      location.href = '/course_work/index.html?courseId=course-1'
+    })
+    render()
+  </script>
+</body>
+</html>

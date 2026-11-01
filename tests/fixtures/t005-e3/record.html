@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>作答记录</title></head>
+<body>
+  <nav class="van-nav-bar">
+    <button class="van-nav-bar__left" type="button">返回</button>
+    <div class="van-nav-bar__title">作答记录</div>
+  </nav>
+  <main id="records">加载中</main>
+  <script>
+    fetch('/dotNet_api/api/services/app/HomeWorkStudent/GetAnswerHistoryListJsonAsync' + location.search)
+      .then((response) => response.json())
+      .then((payload) => {
+        const records = payload?.result?.data || []
+        if (!records.length) {
+          document.querySelector('#records').textContent = '暂无记录'
+          return
+        }
+        document.querySelector('#records').innerHTML = records.map((record) => `
+          <article class="record-item">
+            <div class="record-info">完成时间: ${record.finishedTime}</div>
+            <div class="record-info">用时: ${record.useTime}</div>
+            <div class="record-info get-score">得分: <span class="score-num">${record.score}</span></div>
+          </article>`).join('')
+      })
+    document.querySelector('.van-nav-bar__left').addEventListener('click', () => {
+      location.href = '/course_work/index.html?courseId=course-1'
+    })
+  </script>
+</body>
+</html>

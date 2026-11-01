@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>在线学习平台</title></head>
+<body>
+  <main>
+    <h1>上海开放大学在线学习平台</h1>
+    <input name="用户名" autocomplete="username">
+    <input name="密码" type="password" autocomplete="current-password">
+    <button id="submit" type="button">提交</button>
+  </main>
+  <script>
+    document.querySelector('#submit').addEventListener('click', async () => {
+      const button = document.querySelector('#submit')
+      button.textContent = '加载中...'
+      await fetch('/fixture/login', { method: 'POST' })
+      location.href = '/index.html'
+    })
+  </script>
+</body>
+</html>

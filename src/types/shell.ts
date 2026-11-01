@@ -2,7 +2,7 @@ export type PageId = 'home' | 'settings' | 'bank' | 'accounts'
 
 export type DisplayMode = 'headless' | 'visual'
 
-export type WorkMode = 'answer' | 'extract'
+export type WorkMode = 'answer' | 'extract' | 'noqr'
 export type CourseScope = 'all' | 'selected'
 
 export interface ExtractStats {

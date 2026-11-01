@@ -26,3 +26,7 @@ REQ-002、REQ-004、REQ-031；AC-002、AC-004、AC-032
 
 ## 微观任务
 见 `liran_docs/04-开发追踪.md` 中 TASK-B01/B02。
+
+## T005 模式持久化边界
+
+T005 只在本模块增加 `work_mode` 的 `noqr` 合法值与旧/非法值回退 `answer`，并保持运行锁/停止恢复。无码业务逻辑不进入本模块；应用当前配置到全部学生只同步 `work_mode`、`display_mode`、`course_scope`、`answer_round_limit`。详见 [N 模式入口](../N-无码答题独立模式/模式入口与运行隔离.md)。

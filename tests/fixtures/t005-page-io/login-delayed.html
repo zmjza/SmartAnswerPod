@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>合成延迟跳转登录页</title></head>
+<body>
+  <main>
+    <h1>合成在线学习平台</h1>
+    <input name="用户名">
+    <input name="密码" type="password">
+    <button type="button" id="login">提交</button>
+  </main>
+  <script>
+    document.getElementById('login').addEventListener('click', async () => {
+      const button = document.getElementById('login')
+      button.textContent = '加载中...'
+      await fetch('/fixture-login', { method: 'POST', body: '{}' })
+      button.textContent = '提交'
+      setTimeout(() => { location.href = '/index.html' }, 1_500)
+    })
+  </script>
+</body>
+</html>

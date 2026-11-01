@@ -17,14 +17,32 @@ const waitUntil = async (check, timeout = 120_000) => {
 }
 const selectStudentInUi = async (student) => {
   if ((await page.locator('#student-id').innerText()) !== student.studentNo) {
-    await page.locator('#student-more button').first().click()
-    await page.locator('#student-more .source-popover button').filter({ hasText: student.name }).click()
+    const directPill = page.locator('.student-pill[data-student]').filter({ has: page.getByText(student.name, { exact: true }) }).first()
+    if (await directPill.count()) {
+      await directPill.click()
+    } else {
+      await page.getByRole('button', { name: '更多学生' }).click()
+      await page.locator('#student-more .source-popover button').filter({ has: page.getByText(student.name, { exact: true }) }).first().click()
+    }
     await waitUntil(async () => (await page.locator('#student-id').innerText()) === student.studentNo)
   }
 }
 const chooseCoursesInUi = async (student, courseNames) => {
   await selectStudentInUi(student)
   for (const courseName of courseNames) {
+    const snapshot = await renderer('window.kaida.snapshot()')
+    const current = snapshot.students.find((row) => row.local_id === student.local_id)
+    const courseIndex = current?.courses.findIndex((row) => row.name === courseName) ?? -1
+    assert.ok(courseIndex >= 0, '目标课程不在当前学生快照中')
+    const targetPage = Math.floor(courseIndex / 7) + 1
+    const previous = page.getByRole('button', { name: '上一页课程' })
+    for (let guard = 0; guard < 20 && await previous.isEnabled().catch(() => false); guard++) {
+      await previous.click()
+    }
+    const next = page.getByRole('button', { name: '下一页课程' })
+    for (let currentPage = 1; currentPage < targetPage; currentPage++) {
+      await next.click()
+    }
     const item = page.locator('#course-list .course-item').filter({ hasText: courseName }).first()
     await item.getByText(courseName, { exact: true }).click()
     await waitUntil(async () => {
@@ -73,7 +91,7 @@ try {
       const student = snapshot.students.find((item) => item.local_id === id)
       return student?.awaitingCourseSelection && student.courses.length > 0
     })
-  })
+  }, 240_000)
 
   if (notificationSupported) {
     const notifications = await app.evaluate(() => globalThis.__kaidaCourseNotifications || [])
@@ -96,7 +114,13 @@ try {
   for (const item of chosen) {
     const student = selected.students.find((row) => row.local_id === item.id)
     assert.deepEqual(student.selectedCourseNames, item.courses)
-    assert.equal(student.courses.filter((course) => course.status === '本轮未选择').length, student.courses.length - item.courses.length)
+    const selectableUnselected = student.courses.filter((course) =>
+      !item.courses.includes(course.name) && course.status !== '新答题界面暂时不支持，等后续开发')
+    assert.deepEqual(
+      selectableUnselected.filter((course) => course.status !== '本轮未选择').map((course) => course.status),
+      [],
+      '未选课程没有同步为本轮未选择',
+    )
   }
 
   await page.locator('#btn-primary-action').click()

@@ -1,7 +1,6 @@
 import { constants } from 'node:fs'
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
-import os from 'node:os'
 import path from 'node:path'
 
 const root = process.cwd()
@@ -10,6 +9,7 @@ const packagePath = path.join(root, 'package.json')
 const packageSource = await readFile(packagePath, 'utf8')
 const builderVersion = /^\d+\.\d+$/.test(version) ? `${version}.0` : version
 const outputRoot = path.join(root, 'release', version)
+const builderCli = path.join(root, 'node_modules', 'electron-builder', 'cli.js')
 const platforms = [
   {
     name: 'mac-arm64',
@@ -51,7 +51,10 @@ async function normalizeArtifacts(outputDir, files) {
 const main = async () => {
   await mkdir(outputRoot, { recursive: true })
   run('npm', ['run', 'build'])
-  const tempRoot = await mkdtemp(path.join(os.tmpdir(), `kaida-package-${version}-`))
+  await access(builderCli, constants.R_OK)
+  const tempParent = path.join(root, '.package-tmp')
+  await mkdir(tempParent, { recursive: true })
+  const tempRoot = await mkdtemp(path.join(tempParent, `kaida-package-${version}-`))
   try {
     if (builderVersion !== version) {
       const packageJson = JSON.parse(packageSource)
@@ -63,8 +66,8 @@ const main = async () => {
       const outputDir = path.join(outputRoot, platform.name)
       await mkdir(outputDir, { recursive: true })
       run(process.execPath, ['scripts/prepare-browsers.mjs', platform.browser, browserDir])
-      run('npm', [
-        'exec', '--', 'electron-builder', ...platform.args,
+      run(process.execPath, [
+        builderCli, ...platform.args,
         `-c.directories.output=${outputDir}`, '--publish', 'never',
       ], {
         KAIDA_BROWSER_DIR: path.relative(root, browserDir),

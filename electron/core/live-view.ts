@@ -42,6 +42,19 @@ export type LiveHomework = {
   lastAttempt?: number
   lastScore?: number | null
   extractStats?: ExtractStats
+  noqrAnsweredQuestionCount?: number
+  noqrAverageQuestionDurationMs?: number
+  noqrMaxQuestionDurationMs?: number
+  noqrTotalDurationMs?: number
+}
+
+export function formatNoqrDurationMs(value?: number): string {
+  const durationMs = Number(value)
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return '--'
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000))
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${totalMinutes}分${String(seconds).padStart(2, '0')}秒`
 }
 
 export function homeworkScoreLabel(row: Pick<LiveHomework, 'attempt' | 'score' | 'lastAttempt' | 'lastScore' | 'status'>): string {
@@ -71,7 +84,11 @@ export type LiveCourse = {
 export function courseOutcome(statuses: string[]): string {
   if (!statuses.length) return '无作业'
   if (statuses.includes('pending_writeback')) return '待回写'
-  if (statuses.includes('submit_failed') || statuses.includes('skip_bank_miss')) return '有失败待处理'
+  if (statuses.some((status) =>
+    status === 'submit_failed' ||
+    status === 'answer_page_interrupted' ||
+    status === 'submitted_uncertain' ||
+    status === 'skip_bank_miss')) return '有失败待处理'
   if (statuses.some((s) => s === 'skip_attempts_exhausted' || s === 'skip_out_of_window')) return '暂不可完成'
   if (statuses.some((s) => !s.startsWith('skip_') && s !== 'done_100')) return '尚未完成'
   return '本轮可做作业已完成'

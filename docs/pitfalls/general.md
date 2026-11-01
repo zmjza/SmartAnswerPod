@@ -1447,3 +1447,114 @@
 - 相关文件或命令：npm run package；asar依赖清单、Mac成品启动与Chromium1243冒烟。
 - 适用范围：本机跨目录依赖链接的Electron本地打包；不因此改业务代码或新增依赖。
 - 来源：2026-10-12 2.5打包失败产物检查与完整副本修复、成品验收。
+
+## 页面已经推进后不能继续等待非必需的 loadingFinished
+
+- 现象：T005 英语答题页点击“下一题”后，页面已进入下一题，HTTP 200 和业务成功响应也已出现，但观察脚本仍继续等待 `Network.loadingFinished`，最长空等到 300 秒后才超时；最后一题保存成功时页面本来就不会换题，也容易被误判为没有点击或没有保存。
+- 根因：把 CDP `Network.loadingFinished` 当成必需的完成事件，而该事件在当前 ego-browser/页面链路中并不保证会被观察器收到；同时把“必须换题”错误地当成所有保存成功条件，没有覆盖最后一题只显示“已是最后一题”的正常分支。
+- 正确做法：点击前记录当前题目身份和请求计数；点击后先捕获新的 `HomeWorkStudent/SubmitJsonAsync` 或 `SubmitAllJsonAsync`，等待 XHR `readyState=4`/真实响应，校验 HTTP 2xx、`success:true`、`result.status="success"`，再检查题号/答题卡是否推进或最后一题提示。交卷则等待 `FinishJsonAsync` 成功、“交卷成功!”和交卷按钮禁用。`loadingFinished` 只能作为可选补充，不能作为唯一条件。
+- 验证方式：真实英语作业中，语法题保存请求约 60.5 秒后成功并推进；另一次语法保存约 70 秒后出现 HTTP 200 和下一题，脚本因继续等待 `loadingFinished` 又空等到 300 秒；听力整组保存成功后实际进入语法 1/10，脚本因错误等待语法 2/10 空等；最后一题保存请求 200 后只显示“已是最后一题”；最终 `FinishJsonAsync` 返回 200、`success:true` 并显示“交卷成功!”。
+- 禁止事项：不要在页面已经推进后继续空等非必需事件；不要因最后一题不换题而重复点击；不要只用 toast、遮罩、固定秒数或 `loadingFinished` 判定成功；不要在答题页刷新或重建会话。
+- 相关文件或命令：`无码答题模式页面结构.md`、`liran_docs/requirements/T005-无码答题模式-需求整理.md`；ego-browser 真实 XHR/CDP 观察。
+- 适用范围：T005 无码答题模式的登录、单题保存、整组保存、最后一题和交卷状态判定。
+- 来源：2026-11-01 真实英语答题页取证、用户指出脚本在页面已推进后仍运行时修正。
+
+## 真机侦察的预检参数必须在启动浏览器前提前退出
+
+- 现象：给只读侦察脚本传入 `--preflight` 后，旧实现仍继续进入浏览器启动和登录主流程，测试只能靠外层超时终止。
+- 根因：参数没有在入口处分流，预检只停留在调用意图，没有形成“解析凭据后立即结束”的硬门禁。
+- 正确做法：入口先解析参数和最新目标文件；预检分支只做内存解析与脱敏计数，随后退出。真实分支才允许启动浏览器。AI Key 只从目标文件运行时读取，通过进程环境在内存中注入，并在退出或 finally 恢复。
+- 验证方式：假数据测试覆盖 Key 解析、环境注入/恢复、普通和英语别名、冲突拒绝及零泄漏；真实目标文件只运行 `--preflight`，普通与英语别名均可选择，未产生新的浏览器 profile，进程表无残留侦察浏览器。
+- 禁止事项：不得把“带预检参数”当作已验证离线；不得在预检中启动浏览器、登录或访问学校站点；不得输出账号、密码、AI Key、题干或真实 ID。
+- 相关文件或命令：`tests/t005-real-recon.mjs`、`tests/helpers/t005-credentials.mjs`、`tests/t005-credentials.test.mts`；`node --experimental-strip-types tests/t005-real-recon.mjs --preflight`。
+- 适用范围：所有从私密目标文件装载真机凭据的侦察与 E2E 入口。
+- 来源：2026-11-01 T005 真机准备离线预检缺口、测试进程中止与修复后验证。
+
+## 真实产品 E2E 不能绕过 renderer bridge、真实按钮和终止诊断
+
+- 现象：真实产品 harness 直接用 `page.evaluate` 调用 `window.kaida` 时返回 bridge_missing；登录后进入 unsupported/released 时只报笼统的 phase_ended_before_target，无法判断真实终止原因。
+- 根因：preload bridge 存在于产品 BrowserWindow 的 renderer，而不是测试侧 Page；同时启动、选课和开始执行若直接走 IPC，会绕过用户实际点击链路；轮询只识别 login_failed/needs_user，漏掉 unsupported、stopped、round_ended。
+- 正确做法：通过 `app.evaluate(BrowserWindow...executeJavaScript)` 调用产品 bridge；启动与“开始执行”点击主按钮，课程选择点击真实课程卡，停止点击产品停止按钮。目标前终止时必须输出稳定错误码和脱敏 `lastAction`/`lastLogs`，不得输出账号、课程名、作业名、题干、URL 或真实 ID。
+- 验证方式：离线单测覆盖 renderer 入口、三类 UI 选择器、GET-only 题库、终止诊断和日志零泄漏；真实产品 login 阶段到达 scanning_courses 后通过产品停止按钮释放，未进入答题或交卷。
+- 禁止事项：不得用测试 Page 冒充产品 renderer；不得用全 IPC 代替关键用户操作；不得在终止诊断中回显原始 action/log；不得为了通过测试放宽 onlineWork/stageExam 白名单。
+- 相关文件或命令：`tests/t005-real-product.mjs`、`tests/t005-real-product.test.mts`；`KAIDA_T005_PHASE=login node --experimental-strip-types tests/t005-real-product.mjs`。
+- 适用范围：T005 真实 Electron 产品 E2E 和后续真机验收 harness。
+- 来源：2026-11-01 主对话真实产品试跑、基础设施修复、login 阶段复测和离线回归。
+
+## 课程菜单默认语言/切换项不能当课程
+
+- 现象：真实账号课程数比首页预期多 3；菜单中的“中文”“English”“切换课程”被送进课程检测、选课和并发统计，可能造成错课、空白课程和整轮 `not_full`。
+- 根因：`.van-popover__action.top-pop-item` 同时承载课程项与语言/操作默认项，旧实现把选择器命中的全部节点都当作课程。
+- 正确做法：按规范化文本排除“中文”“English”“切换课程”，再形成课程快照；保留真实课程原始 DOM 序号用于点击，不能压缩序号。
+- 验证方式：页面 I/O 夹具包含三个默认项并验证真实课程序号仍为 4/5/6；`NOQR-04` 真实菜单 10 项过滤后为 7 门课程。
+- 禁止事项：不要按固定前三个位置盲删、不要重排序号、不要把默认项计入课程并发或完成率。
+- 相关文件或命令：`electron/noqr/course.ts`、`tests/fixtures/t005-page-io/course-work.html`、`tests/t005-page-io.test.mts`。
+- 适用范围：新站形考作业课程菜单读取和切课。
+- 来源：2026-11-01 用户截图确认、真实 `NOQR-04` 菜单计数和红绿回归。
+
+## 复合题答题卡题位数不能等同于父题数
+
+- 现象：英语答题卡真实显示 15 个逻辑答题组，但保存子项按 45 个题位/槽位累计；若直接要求 45 个 `.sub-question`，会误报答题卡未加载或禁止交卷。
+- 根因：阅读、完型等题型的题号可能合并在同一答题卡组中，父题 DOM 数量、逻辑组数和保存子项数不是同一单位。
+- 正确做法：答题卡审计按本轮成功保存的逻辑组键验证，同时兼容合并题号和同题型独立大题；复合题耗时按实际子题位数均摊，不按父题数计。
+- 验证方式：运行时测试覆盖合并题号与独立同题型大题；英语真实快照保留五类计数；E3 复合统计单测验证 10 题位组按 10 道均摊。
+- 禁止事项：不要用父题数替代子题数、不要要求答题卡拆出未展示的 45 个节点、不要把整组耗时算成一道题。
+- 相关文件或命令：`electron/noqr/submit.ts`、`electron/noqr/timing.ts`、`tests/t005-runtime.test.mts`、`tests/t005-timing.test.mts`。
+- 适用范围：英语阅读/完型/听力/Picker 的答题卡审计和作业时长统计。
+- 来源：2026-11-01 英语答题卡结构诊断、逻辑组键修复和 E3 回归。
+
+## 保存请求总数不能直接等同于成功题位数
+
+- 现象：真实无头主链记录 `progressCount=25`，网络汇总却出现 26 个成功 `SubmitJsonAsync`；起初无法判断是否重复点击。
+- 根因：当前证据不足以证明额外请求来自状态化重试、页面重进或站点自动保存；只用请求总数或答题页请求数无法完成归因。
+- 正确做法：对请求体和题目身份生成不可逆安全指纹，分别统计重复请求体、重复题 ID 和补答日志；同题重复请求必须硬失败，额外唯一请求保留为来源审计项，不能直接写成重复点击。
+- 验证方式：最新真实无头 25 题主链 `duplicateBody=0`、`duplicateQuestion=0`、`repairLogCount=0`，但仍 `submit_one=26`；因此只证明未观察到同题重复，不能把 26 当成 25。
+- 禁止事项：不要用 `answerPageRequests` 解释保存请求数；不要把“请求已接受”推断成“无额外请求”；不要在日志输出原始请求体、题 ID、答案、账号或完整 URL。
+- 相关文件或命令：`tests/t005-real-product.mjs`、`tests/t005-real-product.test.mts`、`/tmp/t005-new-noqr01-question-fingerprint-final.log`。
+- 适用范围：T005 真实产品保存请求验收和重复点击排查。
+- 来源：2026-11-01 真实 25 题主链请求计数异常、请求体/题 ID 指纹复核和测试门禁补强。
+
+## 站点每个作答尝试的末题重复不能误判为程序重复点击
+
+- 本条修正上一条“保存请求总数不能直接等同于成功题位数”的初步结论：站点可在每个真实作答尝试末尾额外发送一次同类保存请求。
+- 现象：真实普通题 25 题主链出现 25 个唯一题位和 26 个成功 `SubmitJsonAsync`；英语低分重答轮出现 3 个尝试，每个尝试 16 请求/15 唯一题位/1 个相邻 `submit_all` 末题重复；若只看请求总数或只允许全局一次重复都会误报。
+- 根因：产品点击次数与唯一题位数一致且程序保存重试为 0，额外请求由站点页面自身在尝试末尾发出；现有 DOM 证据不足以在请求发出前阻止。
+- 正确做法：保存账本按“上下文+尝试作用域+安全题 ID”记录；每尝试最多允许一个按 `monitorOffsetMs` 排序的真实最后请求重复，并要求同 context/page/attempt、同端点、全部 accepted、重复请求体为 0、点击数等于唯一题位数、程序重试为 0。其它重复仍硬失败。
+- 验证方式：`NOQR-EN` 真实低分重答轮为 48 请求/45 唯一题位/3 尝试，3 个严格站点末题重复全部 accepted，`saveClickAttempts=45`、`saveRequestRetries=0`；修复后退出码 0，3 次 Finish accepted、pending/failed/uncertain 0、题库写 0。
+- 禁止事项：不得用该例外放过非末题重复、单尝试多重复、跨页面/尝试重复、点击数不匹配、程序重试或任何失败/不确定请求；不得把站点重复写成产品成功去重。
+- 相关文件或命令：`tests/t005-real-product.mjs`、`tests/t005-real-product.test.mts`、`/tmp/t005-noqr-en-reanswer-round2-20261101-165223.log`、`/tmp/t005-noqr-en-reanswer-score3-20261101-172020.log`。
+- 适用范围：T005 真实保存请求审计、慢站点复测和最终真机证据。
+- 来源：2026-11-01 强制重答、英语低分重答真实主链与请求账本复核。
+
+## 真机轮询先判终态会把同时达成的目标误报失败
+
+- 现象：真实答题已经取得100分、停止后槽位已释放，但测试退出码为1并报告 `product_round_ended`；产品日志同时出现 `finish_success_evidence_missing`，看起来像交卷失败。
+- 根因：测试轮询在同一个快照上先检查终态、后检查目标，目标已达成时仍被终态抢先判定；正常“等待交卷成功页面证据”文本又被安全诊断映射成失败码。
+- 正确做法：同一快照先执行目标断言，目标已达成时不再按终态失败；正常等待交卷证据映射为 `finish_success_wait`，只有“交卷响应成功但成功提示或按钮禁用证据不完整”才映射为 `finish_success_evidence_missing`。
+- 验证方式：先补 `T005-RP-10b` 目标优先于终态的红绿回归，再重跑真实25题；退出码0、100分、Finish请求1次、失败/不确定0、三格时长UI通过。
+- 禁止事项：不要通过放宽终态检查或忽略失败日志来让测试变绿；不要在目标未达成时允许 `round_ended` 通过。
+- 相关文件或命令：`tests/t005-real-product.mjs`、`tests/t005-real-product.test.mts`、`/tmp/t005-all-unit-sequential-20261101.log`。
+- 适用范围：真实 Electron 产品门禁、终态竞态和脱敏诊断码。
+- 来源：2026-11-01 真实25题运行退出码1排查、红绿回归和复测。
+
+## 真实 mutation 审计不能只按题 ID 和请求总数收口
+
+- 现象：同一题 ID 在低分重答的下一轮会再次出现，若只按“上下文+题 ID”去重会把合法重答判成重复点击；只要求至少一次 Finish 也会放过两次成功交卷。
+- 根因：不同作答轮次共享 workId 和题 ID，但具有不同的 `homeWorkUniqueFlag`；请求账本按页面排序后直接取最后两项，也不等于按真实发生时间；mutation 请求仍处于 pending 时，原有失败/不确定计数不会增加。
+- 正确做法：用 workId 与作业/试卷唯一标记生成不可逆的尝试作用域指纹，重复键使用“上下文+尝试作用域+安全题 ID”；站点末题例外按 `monitorOffsetMs` 排序并限定同一页面/尝试/端点；score 门禁按实际完成分数轮次要求对应数量的 accepted Finish、ledger 数量与请求计数一致、全部 mutation accepted，并用每尝试的请求间隔下界防止批量等待假通过。
+- 验证方式：`T005-RP-12c/12d/12f/19/20/21/21b` 红绿通过；真实普通25题和英语低分重答 `91→91` 均成功退出；低分轮为3次Finish accepted、48保存请求/45唯一题位、每尝试一个严格站点重复、pending/failed/uncertain 0、题库写0。
+- 禁止事项：不得跨作答轮次按题 ID 直接判重；不得按页面排序冒充真实时间；不得允许 pending/rejected/uncertain ledger 或第二次成功 Finish 通过。
+- 相关文件或命令：`tests/t005-real-product.mjs`、`tests/t005-real-product.test.mts`、`/tmp/t005-noqr01-pacing-final-gate-20261101.log`、`/tmp/t005-noqr-en-reanswer-score3-20261101-172020.log`。
+- 适用范围：真实产品保存/交卷请求账本、低分重答、并发页面和最终门禁。
+- 来源：2026-11-01 独立代码审查、红绿门禁补强和真实复测。
+
+## 停止后不能无限等待永不结束的保存/交卷响应
+
+- 现象：保存或交卷请求已经发出，但响应体永不结束；用户停止后任务仍卡在 `waitForResult`，无法按“结果不确定”收口和释放浏览器。
+- 根因：结果等待只监听网络变化与 observer dispose，不读取 AbortSignal；停止路径又要等学生任务结束后才释放 observer/page，形成互相等待。
+- 正确做法：结果等待接收停止信号并做有界轮询；停止后不再等待未完成响应，返回带 `stopped` 的结果不确定状态，由上层记录 `submitted_uncertain` 并释放页面。保存和交卷调用点必须显式传入同一停止信号。
+- 验证方式：先以永不产生响应事件的请求制造 RED，确认旧实现超时；修复后 `T005-RT15` 在约一个 250ms 轮询周期内返回“任务已停止，请求结果不确定”，并继续跑全量 T005/E3/构建。
+- 禁止事项：不要用固定业务超时判定学校请求失败；不要停止后继续等待无响应的响应体；不要把未确认请求写成成功；不要绕过保存/交卷真实成功证据。
+- 相关文件或命令：`electron/noqr/network.ts`、`electron/noqr/answer.ts`、`electron/noqr/submit.ts`、`tests/t005-runtime.test.mts`；`T005-RT15`。
+- 适用范围：T005 登录外的原子保存、整组保存、最终交卷、停止竞态和资源释放。
+- 来源：2026-11-01 最终独立安全审计发现、RED/GREEN 回归和修复。

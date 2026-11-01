@@ -3,10 +3,12 @@ node_modules/
 dist/
 dist-electron/
 release/
+.package-tmp/
 .env
 .env.*
 *.log
 .playwright/
+.codex-backups/
 playwright-report/
 coverage/
 pw-profiles/

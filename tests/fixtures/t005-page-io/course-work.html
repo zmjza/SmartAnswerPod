@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>形考作业</title></head>
+<body>
+  <nav class="van-nav-bar">
+    <button class="van-nav-bar__left" type="button">返回</button>
+    <div class="van-nav-bar__title">课程乙</div>
+    <div class="van-nav-bar__right">
+      <button class="van-popover__wrapper" type="button">菜单</button>
+    </div>
+  </nav>
+  <div class="van-popover__content" role="menu" hidden>
+    <button class="van-popover__action top-pop-item" data-utility="language-zh" type="button">中文</button>
+    <button class="van-popover__action top-pop-item" data-utility="language-en" type="button">English</button>
+    <button class="van-popover__action top-pop-item" data-utility="switch" type="button">切换课程</button>
+    <button class="van-popover__action top-pop-item" data-course-order="1" type="button">课程甲</button>
+    <button class="van-popover__action top-pop-item top-pop-active" data-course-order="2" type="button">课程乙</button>
+    <button class="van-popover__action top-pop-item" data-course-order="3" type="button">课程甲</button>
+  </div>
+  <main id="work-list">
+    <article class="work-item">
+      <h2 class="work-title">记分作业一</h2>
+      <span class="work-type">客观题试卷</span>
+      <p class="work-info">权重: 20%</p>
+      <p class="work-info">形考开始时间: 2026-01-01 00:00:00</p>
+      <p class="work-info">形考结束时间: 2026-12-31 23:59:59</p>
+      <p class="work-info">批阅截止时间: 2027-01-01 00:00:00</p>
+      <p class="work-info">作答次数: 无限制</p>
+      <div class="work-btns">
+        <button class="btn-item" data-action="start" type="button">开始作答</button>
+        <button class="btn-item" data-action="record" type="button">作答记录(2)</button>
+      </div>
+    </article>
+    <article class="work-item">
+      <h2 class="work-title">非客观作业</h2>
+      <span class="work-type">课程论文</span>
+      <p class="work-info">权重: 10%</p>
+      <p class="work-info">形考开始时间: 2026-01-01 00:00:00</p>
+      <p class="work-info">形考结束时间: 2026-12-31 23:59:59</p>
+      <p class="work-info">批阅截止时间: 2027-01-01 00:00:00</p>
+      <p class="work-info">作答次数: 无限制</p>
+      <div class="work-btns">
+        <button class="btn-item" type="button" disabled>不可作答</button>
+        <button class="btn-item" type="button">作答记录(0)</button>
+      </div>
+    </article>
+  </main>
+  <script>
+    const popup = document.querySelector('.van-popover__content')
+    document.querySelector('.van-popover__wrapper').addEventListener('click', () => {
+      popup.hidden = !popup.hidden
+    })
+    for (const item of document.querySelectorAll('.top-pop-item')) {
+      item.addEventListener('click', () => {
+        for (const other of document.querySelectorAll('.top-pop-item')) {
+          other.classList.remove('top-pop-active')
+        }
+        item.classList.add('top-pop-active')
+        document.querySelector('.van-nav-bar__title').textContent = item.textContent.trim()
+        popup.hidden = true
+      })
+    }
+    for (const button of document.querySelectorAll('.work-btns .btn-item')) {
+      button.addEventListener('click', () => {
+        if (button.dataset.action === 'start') location.href = '/course_work_detail/index.html?workId=fixture&courseId=course-a&workType=onlineWork'
+        if (button.dataset.action === 'record') location.href = '/course_work_record/index.html?workId=fixture&courseId=course-a&workType=onlineWork'
+      })
+    }
+  </script>
+</body>
+</html>

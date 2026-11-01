@@ -24,6 +24,7 @@ import { progressActionLabel } from './core/progress-label.ts'
 import { selectedRunReadiness, selectCoursesForRun, type CourseScope } from './core/course-scope.ts'
 import { runtimeLogLevel, sanitizeRuntimeLogText, type RuntimeLogLevel } from './core/runtime-log.ts'
 import { qrSnapshotMatches, verificationFailure, type QrSnapshot } from './core/qr.ts'
+import { normalizeLegacyWorkMode, type LegacyWorkMode } from './core/work-mode.ts'
 
 export type RuntimeCourseLog = {
   time: string
@@ -43,7 +44,7 @@ type StudentView = {
   major: string
   campus: string
   displayMode: 'headless' | 'visual'
-  workMode: 'answer' | 'extract'
+  workMode: LegacyWorkMode
   courseScope: CourseScope
   selectedCourseNames: string[]
   selectedCourseKeys: string[]
@@ -146,7 +147,7 @@ function viewOf(a: LocalAccount): StudentView {
     major: a.major || '',
     campus: a.campus || '',
     displayMode: a.display_mode,
-    workMode: a.work_mode,
+    workMode: normalizeLegacyWorkMode(a.work_mode) ?? 'answer',
     courseScope: a.course_scope,
     selectedCourseNames: [],
     selectedCourseKeys: [],
@@ -236,7 +237,7 @@ function syncHomeworkView(v: StudentView, courseKey: string, hw: DetectedHomewor
 }
 
 export function snapshot() {
-  const accounts = listAccounts()
+  const accounts = listAccounts().filter((account) => normalizeLegacyWorkMode(account.work_mode))
   const settings = getSettings()
   const students = accounts.map((a) => ({
     ...viewOf(a),
@@ -307,7 +308,9 @@ export function applyStudentSettingsToAll(local_id: string) {
   const accounts = listAccounts()
   const source = accounts.find((a) => a.local_id === local_id)
   if (!source) return { ok: false, error: '请先选择学生' }
-  const patch = { display_mode: source.display_mode, work_mode: source.work_mode, course_scope: source.course_scope, answer_round_limit: source.answer_round_limit }
+  const sourceWorkMode = normalizeLegacyWorkMode(source.work_mode)
+  if (!sourceWorkMode) return { ok: false, error: '该学生不属于旧答题或提取题库模式' }
+  const patch = { display_mode: source.display_mode, work_mode: sourceWorkMode, course_scope: source.course_scope, answer_round_limit: source.answer_round_limit }
   const failed: string[] = []
   let updated = 0
   for (const account of accounts) {
@@ -692,7 +695,7 @@ export async function deleteStudentRuntime(local_id: string) {
 async function runOne(a: LocalAccount) {
   const v = viewOf(a)
   const settings = { ...getSettings(), ...(runConcurrency || {}) }
-  v.workMode = a.work_mode
+  v.workMode = normalizeLegacyWorkMode(a.work_mode) ?? 'answer'
   v.courseScope = a.course_scope
   v.answerRoundLimit = a.answer_round_limit
   v.selectedCourseNames = []
@@ -789,7 +792,7 @@ async function runOne(a: LocalAccount) {
              slot: v.slot,
              index: i + j + 1,
              total: courses.length,
-             mode: a.work_mode,
+             mode: a.work_mode === 'extract' ? 'extract' : 'answer',
              answerRoundLimit: a.answer_round_limit,
              signal,
            })
@@ -1629,6 +1632,7 @@ async function maybeReview(preview: Page, results: QResult[], courseName: string
 
 function scheduleStudent(a: LocalAccount) {
   if (activeRuns.has(a.local_id) || stoppingAll) return false
+  if (!normalizeLegacyWorkMode(a.work_mode)) return false
   stopFlag.delete(a.local_id)
   stopControllers.set(a.local_id, new AbortController())
   runAccountIds.add(a.local_id)
@@ -1654,6 +1658,7 @@ function scheduleStudent(a: LocalAccount) {
 export function startStudent(local_id: string) {
   const account = listAccounts().find((a) => a.local_id === local_id)
   if (!account) return { ok: false, error: '学生账号不存在' }
+  if (!normalizeLegacyWorkMode(account.work_mode)) return { ok: false, error: '该学生不属于旧答题或提取题库模式' }
   if (stoppingAll || isStudentLocked(local_id)) return { ok: false, error: '该学生正在运行、排队或停止中' }
   if (!isRunning()) {
     runConcurrency = concurrencySnapshot(getSettings())
@@ -1668,7 +1673,9 @@ export function enqueueNewStudents(ids: string[]) {
   if (!isRunning() || stoppingAll) return 0
   const wanted = new Set(ids)
   let count = 0
-  for (const account of listAccounts()) if (wanted.has(account.local_id) && scheduleStudent(account)) count++
+  for (const account of listAccounts()) {
+    if (wanted.has(account.local_id) && normalizeLegacyWorkMode(account.work_mode) && scheduleStudent(account)) count++
+  }
   return count
 }
 
@@ -1686,7 +1693,8 @@ export async function stopAllStudents() {
 
 export async function loginAndRefresh(accountIds?: string[]) {
   if (isRunning()) return { ok: false, error: '任务运行中，请单独开始或停止学生' }
-  const accounts = listAccounts().filter((a) => !accountIds || accountIds.includes(a.local_id))
+  const accounts = listAccounts().filter((a) =>
+    normalizeLegacyWorkMode(a.work_mode) && (!accountIds || accountIds.includes(a.local_id)))
   if (!accounts.length) return { ok: false, error: '请先添加学生账号' }
   runConcurrency = concurrencySnapshot(getSettings())
   slots.setLimit(runConcurrency.account_parallel)

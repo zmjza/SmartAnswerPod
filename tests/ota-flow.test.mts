@@ -76,6 +76,13 @@ test('macOS Squirrel 安装更新后自动重新启动应用', async () => {
   assert.match(ota, /updater\.autoInstallOnAppQuit\s*=\s*false/)
 })
 
+test('更新安装门禁使用聚合工作台运行锁', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const ota = await readFile(new URL('../electron/ota.ts', import.meta.url), 'utf8')
+  assert.match(ota, /from ['"]\.\/workbench-coordinator(?:\.ts)?['"]/)
+  assert.doesNotMatch(ota, /from ['"]\.\/runner(?:\.ts)?['"]/)
+})
+
 test('ad-hoc 更新使用跨版本稳定的应用要求', async () => {
   const { readFile } = await import('node:fs/promises')
   const config = await readFile(new URL('../electron-builder.yml', import.meta.url), 'utf8')

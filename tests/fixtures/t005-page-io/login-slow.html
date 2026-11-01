@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>合成慢登录页</title></head>
+<body>
+  <main>
+    <h1>合成在线学习平台</h1>
+    <input name="用户名">
+    <input name="密码" type="password">
+    <button type="button" id="login">提交</button>
+  </main>
+  <script>
+    document.getElementById('login').addEventListener('click', async () => {
+      document.getElementById('login').textContent = '加载中...'
+      await fetch('/fixture-login', { method: 'POST', body: '{}' })
+      location.href = '/index.html'
+    })
+  </script>
+</body>
+</html>

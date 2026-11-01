@@ -19,7 +19,7 @@ export type LiveStudent = {
   campus: string
   displayMode: 'headless' | 'visual'
   browserWindowVisible: boolean | null
-  workMode: 'answer' | 'extract'
+  workMode: 'answer' | 'extract' | 'noqr'
   courseScope: 'all' | 'selected'
   selectedCourseNames: string[]
   selectedCourseKeys?: string[]

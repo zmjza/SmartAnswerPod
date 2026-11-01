@@ -27,3 +27,7 @@ REQ-016、REQ-017；AC-016、AC-017
 见 `liran_docs/04-开发追踪.md` TASK-L01。
 
 T003 增量：REQ-004/005，逐题参考答案优先、混合卷分流、矛盾跳过、待重试及旧删库保护；微观任务 T003-04/05，见 `liran_docs/T003-任务拆分与微观任务.md`。普通及四条英语批阅历史已只读取证；真实英语 6 行／卷缺可靠身份。状态：实现已落地，最终 AC 待收口。
+
+## T005 不进入本模块
+
+T005 批阅后只读取最新分数和是否满分，不读逐题对错，不调用 `reviewResults`、`extractReviewedQuestions`、`deleteByHash`、`protectReferenceHash` 或待回写补偿。无码模式没有题库写入/校对状态，不能进入本模块业务。

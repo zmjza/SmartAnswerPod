@@ -19,6 +19,12 @@
 | [作业作答页.md](作业作答页.md) | 在线作答（单选/多选/判断/提交） | `/study/assignment/preview.aspx` | 指向仓库根目录已有文档 |
 | [大学英语新题型和专属题型页面结构.md](大学英语新题型和专属题型页面结构.md) | 大学英语五类作答及已批阅历史结构 | `/study/assignment/preview.aspx`、`/study/assignment/history.aspx` | 作答页与历史页均已只读核对；真实保存行为待证 |
 
+## 其他站点
+
+| 文件 | 页面 | 路径 | 状态 |
+| --- | --- | --- | --- |
+| [无码答题模式页面结构.md](../../无码答题模式页面结构.md) | 上海开放大学在线学习平台无码入口 | `/login/index.html` 起逐级进入 `/index.html`、`/course_work/index.html`、`/course_work_detail/index.html`、`/course_work_record/index.html` | 2026-11-01 已完成登录、作业、普通题型、英语五类逐题型计数、单题/整组保存、交卷和分数真实取证；已确认课程菜单“中文 / English / 切换课程”为默认功能项并排除，真实课程保留 DOM 序号；CHG-006 已记录每题约 3 秒正常节奏、慢响应不额外等待和可停止中断；其他课程控件变体与 noqr >7 课第二页展示待补 |
+
 ## 还没有单独成文的页
 
 | 页面 | 路径 | 原因 |

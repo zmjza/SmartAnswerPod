@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>首页</title></head>
+<body>
+  <div class="menu-items"><button id="course-work" type="button"><span>形考作业</span></button></div>
+  <section class="course-card"><h3 class="course-title">合成课程一</h3></section>
+  <script>
+    document.querySelector('#course-work').addEventListener('click', () => {
+      location.href = '/course_work/index.html?courseId=course-1'
+    })
+  </script>
+</body>
+</html>

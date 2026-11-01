@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { CourseScope, DisplayMode, PageId, WorkMode } from '../types/shell'
 import { selectedStudentId, selectStudentId, resolveSelectedStudentId, useKaida } from '../useKaida'
 import { overflowStudentIndexes, visibleStudentIndexes } from '../student-switcher'
-import { homeworkScoreLabel } from '../../electron/core/live-view'
+import { formatNoqrDurationMs, homeworkScoreLabel } from '../../electron/core/live-view'
 import { pageForCourse, pageGroups, pageSlice, pageCountForCourses } from '../../electron/core/course-pager'
 
 const emit = defineEmits<{ go: [PageId] }>()
@@ -40,6 +40,7 @@ const qrOpen = ref(false)
 const qrLoading = ref(false)
 const qrError = ref('')
 const qrSnapshot = ref<QrSnapshotPayload | null>(null)
+const stoppingStudentId = ref('')
 let qrRequest = 0
 let historyRequest = 0
 let toastTimer: ReturnType<typeof setTimeout> | undefined
@@ -109,6 +110,7 @@ const currentGroups = computed(() => {
   if (liveGroups.length && (currentStudent.value.activeCourseKey ? currentStudent.value.activeCourseKey === currentCourseKey.value : currentStudent.value.activeCourseName === currentCourseName.value)) return liveGroups
   return []
 })
+const emptyHomeworkMessage = computed(() => allCourseRows.value.length ? '暂无可见作业' : '暂无可见课程')
 const currentHomeworkTotal = computed(() => currentGroups.value.reduce((sum, group) => sum + group.rows.length, 0))
 const homeworkPageCount = computed(() => Math.max(1, Math.ceil(currentHomeworkTotal.value / homeworkPageSize)))
 const visibleHomeworkGroups = computed(() => pageGroups(currentGroups.value, homeworkPageSize, homeworkPage.value))
@@ -128,6 +130,9 @@ const waitingForCourseSelection = computed(() => studentMeta.value.some((student
 const canOpenCourseLog = computed(() => Boolean(currentCourseName.value) && !(currentStudent.value.awaitingCourseSelection && currentStudent.value.courseScope === 'selected' && !selectedCourseKey.value))
 const controlsLocked = computed(() => Boolean(snap.value?.running))
 const studentConfigLocked = computed(() => Boolean(currentStudent.value.configLocked))
+const isStoppingCurrent = computed(() => Boolean(stoppingStudentId.value) && stoppingStudentId.value === currentStudent.value.local_id)
+const statusHeadline = computed(() => isStoppingCurrent.value ? '正在停止' : currentStudent.value.headline)
+const statusAction = computed(() => isStoppingCurrent.value ? '等待当前请求结束并释放浏览器' : currentStudent.value.action)
 const currentCourseLogs = computed(() => (currentStudent.value.courseLogs || []).filter((log) =>
   log.courseKey ? log.courseKey === currentCourseKey.value : log.courseName === currentCourseName.value && allCourseRows.value.filter((course) => course.name === log.courseName).length === 1,
 ).slice().reverse())
@@ -153,7 +158,7 @@ watch([selectedStudentId, studentMeta], async ([id, students]) => {
 }, { immediate: true })
 
 watch(needsVerify, (v) => {
-  if (v) showToast('请扫微信码，然后点绿色「验证完毕」')
+  if (v && workMode.value !== 'noqr') showToast('请扫微信码，然后点绿色「验证完毕」')
 })
 
 watch(() => [selectedStudentId.value, currentStudent.value.activeCourseKey || currentStudent.value.activeCourseName], ([studentId, activeCourse], [previousStudentId, previousCourse]) => {
@@ -223,29 +228,38 @@ function currentId() {
   return currentStudent.value.local_id
 }
 async function toggleMode(mode: DisplayMode) {
-  if (!currentId() || studentConfigLocked.value) return showToast('该学生运行中，浏览器模式已锁定')
-  const result = await window.kaida?.setDisplay(currentId(), mode)
+  const id = currentId()
+  if (!id || studentConfigLocked.value) return showToast('该学生运行中，浏览器模式已锁定')
+  const result = await window.kaida?.setDisplay(id, mode)
+  if (currentId() !== id) return
   if (!result?.ok) return showToast(result?.error || '浏览器模式切换失败')
   displayMode.value = mode
   showToast(mode === 'headless' ? '已设置无头模式，下次启动生效' : '已设置可视化模式，下次启动生效')
 }
 async function setWorkMode(mode: WorkMode) {
-  if (!currentId() || studentConfigLocked.value) return showToast('该学生运行中，工作模式已锁定')
-  const result = await window.kaida?.setWorkMode(currentId(), mode)
+  const id = currentId()
+  if (!id || studentConfigLocked.value) return showToast('该学生运行中，工作模式已锁定')
+  const result = await window.kaida?.setWorkMode(id, mode)
+  if (currentId() !== id) return
   if (!result?.ok) return showToast(result?.error || '工作模式修改失败')
   workMode.value = mode
-  showToast(mode === 'answer' ? '模式已设为：智能答题' : '模式已设为：提取题库')
+  showToast({ answer: '模式已设为：智能答题', extract: '模式已设为：提取题库', noqr: '模式已设为：无码答题' }[mode])
 }
 async function setCourseScope(scope: CourseScope) {
-  if (!currentId() || studentConfigLocked.value) return showToast('该学生运行中，课程范围已锁定')
-  const result = await window.kaida?.setCourseScope(currentId(), scope)
+  const id = currentId()
+  if (!id || studentConfigLocked.value) return showToast('该学生运行中，课程范围已锁定')
+  const result = await window.kaida?.setCourseScope(id, scope)
+  if (currentId() !== id) return
   if (!result?.ok) return showToast(result?.error || '课程范围修改失败')
   courseScope.value = scope
   showToast(scope === 'all' ? '本学生将执行全部课程' : '扫描后由你选择本轮课程')
 }
 async function setAnswerRoundLimit() {
-  if (!currentId() || studentConfigLocked.value) return showToast('该学生运行中，重新答题次数已锁定')
-  const result = await window.kaida?.setAnswerRoundLimit(currentId(), answerRoundLimit.value)
+  const id = currentId()
+  if (!id || studentConfigLocked.value) return showToast('该学生运行中，重新答题次数已锁定')
+  const limit = answerRoundLimit.value
+  const result = await window.kaida?.setAnswerRoundLimit(id, limit)
+  if (currentId() !== id) return
   showToast(result?.ok ? `每份作业本次最多答 ${answerRoundLimit.value} 轮` : (result?.error || '保存失败'))
 }
 async function applyAllSettings() {
@@ -254,8 +268,10 @@ async function applyAllSettings() {
   showToast(result?.ok ? `已将配置设置到全部 ${result.updated} 名学生` : `${result?.error || '同步失败'}；成功 ${result?.updated || 0} 名`)
 }
 async function startCurrentStudent() {
-  if (!currentId()) return
-  const result = await window.kaida?.startStudent(currentId())
+  const id = currentId()
+  if (!id) return
+  const result = await window.kaida?.startStudent(id)
+  if (currentId() !== id) return
   showToast(result?.ok ? '该学生已重新开始或进入队列' : (result?.error || '开始失败'))
 }
 async function loginRefresh() {
@@ -317,10 +333,22 @@ function selectStudent(i: number) {
   studentMoreOn.value = false
   showToast('已切换至学员：' + (studentMeta.value[i]?.name || ''))
 }
-function stopTask() {
+async function stopTask() {
+  const id = currentId()
   needsVerify.value = false
-  if (currentId()) void window.kaida?.stop(currentId())
-  showToast('已安全暂停当前答题任务')
+  if (!id) return
+  stoppingStudentId.value = id
+  showToast('正在停止当前答题任务')
+  const feedbackFloor = new Promise((resolveTimer) => setTimeout(resolveTimer, 200))
+  try {
+    await Promise.all([window.kaida?.stop(id), feedbackFloor])
+    if (currentId() !== id) return
+    showToast('当前答题任务已停止')
+  } catch (error) {
+    if (currentId() === id) showToast(error instanceof Error ? error.message : '停止任务失败')
+  } finally {
+    if (stoppingStudentId.value === id) stoppingStudentId.value = ''
+  }
 }
 async function stopAll() {
   await window.kaida?.stopAllStudents()
@@ -351,6 +379,7 @@ function pillDotClass(i: number) {
   return 'w-1.5 h-1.5 rounded-full bg-slate-300'
 }
 async function selectCourse(key: string) {
+  const id = currentId()
   selectedCourseKey.value = key
   const name = allCourseRows.value.find((course) => (course.key || course.name) === key)?.name || key
   if (courseScope.value !== 'selected' || !currentStudent.value.awaitingCourseSelection) {
@@ -360,7 +389,8 @@ async function selectCourse(key: string) {
   const keys = new Set(currentStudent.value.selectedCourseKeys || currentStudent.value.selectedCourseNames || [])
   if (keys.has(key)) keys.delete(key)
   else keys.add(key)
-  const result = await window.kaida?.setSelectedCourses(currentId(), [...keys])
+  const result = await window.kaida?.setSelectedCourses(id, [...keys])
+  if (currentId() !== id) return
   if (result?.ok) {
     const selected = result.selectedKeys || result.selectedNames || []
     selectedCourseKey.value = selected.includes(key) ? key : (selected[0] || '')
@@ -430,7 +460,9 @@ function statusLabel(status: string) {
     previewing: '预览中', clicking_do_homework: '点做作业', answering: '作答中', submitting: '提交中',
     waiting_grade: '等待批阅', reviewing: '校对中', extracting: '提取中', extracting_done: '提取完成', pending_writeback: '待回写', done_100: '已满分',
     skip_weight0: '权重 0% 跳过', skip_non_objective: '非客观题跳过', skip_out_of_window: '不在时间窗',
-    skip_attempts_exhausted: '次数用尽', skip_full_score: '已满分跳过', skip_no_history: '无历史链接跳过', submit_failed: '作业失败',
+    skip_attempts_exhausted: '次数用尽', skip_full_score: '已满分跳过', skip_no_history: '无历史链接跳过',
+    not_startable: '暂不可开始', date_unknown: '时间不可确认', submit_failed: '作业失败',
+    answer_page_interrupted: '答题页异常，已保留页面', submitted_uncertain: '提交结果不确定',
     skip_bank_miss: '听力题库缺项',
     not_full_next_time: '下次继续', spin_stopped: '已停止空转', todo: '待作答', '检测中': '检测中',
   }
@@ -464,7 +496,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <div v-else class="text-center text-sm text-rose-600">{{ qrError || '暂无可用二维码' }}</div>
 </div>
 <div class="flex flex-col gap-3 text-xs">
-<div class="rounded-xl border border-slate-200 bg-slate-50 p-3"><span class="text-slate-400">学生</span><p class="mt-1 font-semibold text-slate-800">{{ currentStudent.name }} · {{ currentStudent.id }} <span v-if="currentStudent.verified" class="text-emerald-700" aria-label="已授权">已授权</span></p></div>
+<div class="rounded-xl border border-slate-200 bg-slate-50 p-3"><span class="text-slate-400">学生</span><p class="mt-1 font-semibold text-slate-800">{{ currentStudent.name }} · {{ currentStudent.id }} <span v-if="currentStudent.verified && workMode !== 'noqr'" class="text-emerald-700" aria-label="已授权">已授权</span></p></div>
 <div class="rounded-xl border border-slate-200 bg-slate-50 p-3"><span class="text-slate-400">课程 / 作业</span><p class="mt-1 font-semibold text-slate-800">{{ qrSnapshot?.courseName || currentCourseName || '等待识别' }}</p><p class="mt-1 text-slate-600">{{ qrSnapshot?.homeworkName || '等待识别' }}</p></div>
 <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-700"><p class="font-semibold">{{ qrSnapshot?.status || '等待二维码' }}</p><p v-if="qrSnapshot" class="mt-1 font-mono text-[10px]">二维码 v{{ qrSnapshot.version }} · 程序 {{ qrSnapshot.appVersion }}</p></div>
 <p v-if="qrError && qrSnapshot" class="rounded-xl bg-rose-50 p-3 text-rose-600">{{ qrError }}</p>
@@ -606,7 +638,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#4F46E5] opacity-60"></span>
 <span class="relative inline-flex rounded-full h-2 w-2 bg-[#4F46E5] status-pulse-indigo"></span>
 </span>
-<span id="current-action" class="line-clamp-2 min-w-0 flex-1 break-words font-semibold text-[#4F46E5]" :title="currentStudent.action">{{ currentStudent.action }}</span>
+<span id="current-action" class="line-clamp-2 min-w-0 flex-1 break-words font-semibold text-[#4F46E5]" :title="statusAction">{{ statusAction }}</span>
 <span class="shrink-0 text-slate-400">（课程与作业状态实时同步）</span>
 </div>
 </div>
@@ -664,10 +696,24 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <span class="rounded-md bg-amber-50 px-1.5 py-1 text-center text-amber-700">冲突 {{ row.extractStats.conflict }}</span>
 <span class="rounded-md bg-rose-50 px-1.5 py-1 text-center text-rose-700">失败 {{ row.extractStats.failed }}</span>
 </div>
+<div v-if="workMode === 'noqr' && (row.noqrAnsweredQuestionCount || 0) > 0" data-noqr-timing class="mt-2 grid grid-cols-3 gap-1.5 text-[11px] tabular-nums" aria-live="polite">
+<div class="rounded-lg border border-indigo-100 bg-indigo-50/70 px-2.5 py-2">
+<span class="block text-[10px] font-medium text-indigo-500">平均每题</span>
+<span class="mt-0.5 block font-mono font-bold text-indigo-800">{{ formatNoqrDurationMs(row.noqrAverageQuestionDurationMs) }}</span>
+</div>
+<div class="rounded-lg border border-sky-100 bg-sky-50/70 px-2.5 py-2">
+<span class="block text-[10px] font-medium text-sky-600">最长单题</span>
+<span class="mt-0.5 block font-mono font-bold text-sky-800">{{ formatNoqrDurationMs(row.noqrMaxQuestionDurationMs) }}</span>
+</div>
+<div class="rounded-lg border border-emerald-100 bg-emerald-50/70 px-2.5 py-2">
+<span class="block text-[10px] font-medium text-emerald-600">作业总时长</span>
+<span class="mt-0.5 block font-mono font-bold text-emerald-800">{{ formatNoqrDurationMs(row.noqrTotalDurationMs) }}</span>
+</div>
+</div>
 <div class="pt-2 text-[12px] font-semibold tabular-nums" :class="row.score === 100 ? 'text-emerald-600' : 'text-indigo-600'" aria-live="polite">{{ homeworkScoreLabel(row) }}</div>
 </div>
 </div>
-<div v-if="!currentGroups.length" class="p-4 rounded-xl bg-[#F8FAFC] border border-slate-200 text-[13px] text-slate-400">等待课程检测结果</div>
+<div v-if="!currentGroups.length" class="p-4 rounded-xl bg-[#F8FAFC] border border-slate-200 text-[13px] text-slate-400">{{ emptyHomeworkMessage }}</div>
 </div>
 <div v-if="homeworkPageCount > 1" class="flex items-center justify-center gap-2 border-t border-slate-100 pt-3">
 <button type="button" aria-label="上一页作业" :disabled="homeworkPage <= 1" @click="homeworkPage--"><span class="material-symbols-outlined text-[16px]">chevron_left</span></button>
@@ -724,9 +770,10 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <div class="p-0.5 rounded-full bg-[#F5F3FF] flex items-center border border-[#EDE9FE]" id="work-mode-switcher">
 <button @click="setWorkMode('answer')" class="workmode-btn-ans disabled:cursor-not-allowed disabled:opacity-60" :class="workMode === 'answer' ? workOn : workOff" :disabled="studentConfigLocked">答题</button>
 <button @click="setWorkMode('extract')" class="workmode-btn-ext disabled:cursor-not-allowed disabled:opacity-60" :class="workMode === 'extract' ? workOn : workOff" :disabled="studentConfigLocked">提取题库</button>
+<button @click="setWorkMode('noqr')" class="workmode-btn-noqr disabled:cursor-not-allowed disabled:opacity-60" :class="workMode === 'noqr' ? workOn : workOff" :disabled="studentConfigLocked">无码答题</button>
 </div>
 </div>
-<div v-if="workMode === 'answer'" class="flex items-center justify-between gap-2">
+<div v-if="workMode === 'answer' || workMode === 'noqr'" class="flex items-center justify-between gap-2">
 <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">作业重新答题次数</span>
 <select v-model.number="answerRoundLimit" class="h-7 min-w-[72px] rounded-full border border-[#EDE9FE] bg-[#F5F3FF] px-3 text-[11px] font-semibold text-[#4F46E5] outline-none focus:border-[#A5B4FC]" aria-label="作业重新答题次数" :disabled="studentConfigLocked" @change="setAnswerRoundLimit">
 <option v-for="n in 10" :key="n" :value="n">{{ n }} 轮</option>
@@ -740,7 +787,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#4F46E5] opacity-60"></span>
 <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#4F46E5] status-pulse-indigo"></span>
 </span>
-<span class="line-clamp-2 min-w-0 break-words text-[13.5px] font-bold text-slate-900 tracking-tight" id="status-title" :title="currentStudent.headline">{{ currentStudent.headline }}</span>
+<span class="line-clamp-2 min-w-0 break-words text-[13.5px] font-bold text-slate-900 tracking-tight" id="status-title" :title="statusHeadline">{{ statusHeadline }}</span>
 </div>
 <div class="grid grid-cols-2 gap-2">
 <div class="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white border border-[#EDE9FE] shadow-sm transition-transform hover:scale-[1.02]">
@@ -758,7 +805,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 </div>
 <!-- Student details & Parallel badges -->
 <div class="flex flex-col gap-2 px-1 text-[12px]" id="student-meta">
-<div class="flex items-center justify-between"><span class="text-slate-400">学员姓名</span><span class="flex items-center gap-1.5 font-semibold text-slate-900" id="student-name">{{ currentStudent.name }}<span v-if="currentStudent.verified" class="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700" aria-label="已授权">已授权</span></span></div>
+<div class="flex items-center justify-between"><span class="text-slate-400">学员姓名</span><span class="flex items-center gap-1.5 font-semibold text-slate-900" id="student-name">{{ currentStudent.name }}<span v-if="currentStudent.verified && workMode !== 'noqr'" class="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700" aria-label="已授权">已授权</span></span></div>
 <div class="flex items-center justify-between"><span class="text-slate-400">学员学号</span><span class="font-mono text-slate-700 font-medium" id="student-id">{{ currentStudent.id }}</span></div>
 <div class="flex items-center justify-between"><span class="text-slate-400">登录账号</span><span class="font-mono text-slate-700 font-medium" id="student-account">{{ currentStudent.id }}</span></div>
 </div>
@@ -768,7 +815,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 <button type="button" class="px-2 py-1 rounded-full border border-indigo-200 text-indigo-600 text-[10px] font-semibold disabled:opacity-40" :disabled="controlsLocked || !currentId()" @click="applyAllSettings">将配置设置到全部</button>
 </div>
 <!-- Verification Warning Card -->
-<div v-if="needsVerify" class="p-3 rounded-xl bg-[#FEF3C7]/60 border border-[#FDE68A] flex flex-col gap-2">
+<div v-if="needsVerify && workMode !== 'noqr'" class="p-3 rounded-xl bg-[#FEF3C7]/60 border border-[#FDE68A] flex flex-col gap-2">
 <div class="flex items-center gap-1.5 text-[11px] font-medium text-[#F59E0B]">
 <span class="material-symbols-outlined text-[15px]">info</span>
 <span>微信扫码出现后：扫完再点「验证完毕」才会继续作答</span>

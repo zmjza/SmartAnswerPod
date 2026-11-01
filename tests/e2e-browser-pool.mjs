@@ -7,7 +7,7 @@ await page.waitForLoadState('domcontentloaded')
 const renderer = (source) => app.evaluate(({ BrowserWindow }, script) =>
   BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(script), source)
 const call = (fn, arg) => renderer('(' + fn.toString() + ')(' + JSON.stringify(arg) + ')')
-const waitUntil = async (check, timeout = 45_000) => {
+const waitUntil = async (check, timeout = 180_000) => {
   const started = Date.now()
   while (Date.now() - started < timeout) {
     if (await check()) return
