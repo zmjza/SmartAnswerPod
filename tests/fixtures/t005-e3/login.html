@@ -9,10 +9,14 @@
     <button id="submit" type="button">提交</button>
   </main>
   <script>
+    if (document.cookie.includes('fixture_e3_session=1')) {
+      location.replace('/index.html')
+    }
     document.querySelector('#submit').addEventListener('click', async () => {
       const button = document.querySelector('#submit')
       button.textContent = '加载中...'
       await fetch('/fixture/login', { method: 'POST' })
+      document.cookie = 'fixture_e3_session=1; path=/'
       location.href = '/index.html'
     })
   </script>

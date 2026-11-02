@@ -87,8 +87,10 @@ export function courseOutcome(statuses: string[]): string {
   if (statuses.some((status) =>
     status === 'submit_failed' ||
     status === 'answer_page_interrupted' ||
+    status === 'page_interrupted' ||
     status === 'submitted_uncertain' ||
     status === 'skip_bank_miss')) return '有失败待处理'
+  if (statuses.includes('score_unavailable')) return '分数待确认'
   if (statuses.some((s) => s === 'skip_attempts_exhausted' || s === 'skip_out_of_window')) return '暂不可完成'
   if (statuses.some((s) => !s.startsWith('skip_') && s !== 'done_100')) return '尚未完成'
   return '本轮可做作业已完成'

@@ -30,6 +30,8 @@ export type NoqrQuestionUnit = {
   qtype: QType
   stem: string
   options: NoqrOption[]
+  bigQuestionId?: string
+  questionId?: string
   blankIndex?: number
   currentText?: string
 }
@@ -332,6 +334,8 @@ type RawDomUnit = {
   stem: string
   options: RawDomOption[]
   pickerValue?: string
+  bigQuestionId?: string
+  questionId?: string
 }
 
 type RawDomQuestion = {
@@ -370,7 +374,7 @@ function inferReadKind(raw: RawDomQuestion): NoqrQuestionKind {
 export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionReadResult> {
   let raw: RawDomQuestion | null
   try {
-    raw = await page.locator('.content-area').evaluate((root) => {
+    raw = await page.locator('.content-area:visible').first().evaluate((root) => {
       const visible = (node: Element) => {
         const style = window.getComputedStyle(node)
         const rect = node.getBoundingClientRect()
@@ -407,20 +411,62 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
       const sharedStem = (directTitle?.textContent || '').replace(/\s+/g, ' ').trim()
       const subItems = [...questionInfo.querySelectorAll('.sub-questions > .sub-item')]
       const pickerRows = [...questionInfo.querySelectorAll('.question-options .van-cell.van-cell--clickable.van-field[role="button"]')]
+      const attrId = (node: Element | null | undefined, names: string[]): string => {
+        for (const name of names) {
+          const value = node?.getAttribute(name) || ''
+          if (value) return value
+        }
+        return ''
+      }
+      const hiddenId = (container: Element, names: string[]): string => {
+        for (const name of names) {
+          const node = container.querySelector(`input[name="${name}"], [data-${name}]`)
+          if (node) {
+            if (node instanceof HTMLInputElement && node.value) return node.value
+            const value = node.getAttribute(`data-${name}`) || ''
+            if (value) return value
+          }
+        }
+        return ''
+      }
+      const identityFor = (container: Element): { bigQuestionId: string; questionId: string } => ({
+        bigQuestionId: attrId(container, [
+          'data-big-question-id',
+          'data-bigquestionid',
+          'data-big-question',
+        ]) || hiddenId(container, ['bigQuestionId', 'bigquestionid']),
+        questionId: attrId(container, [
+          'data-question-id',
+          'data-questionid',
+          'data-id',
+        ]) || hiddenId(container, ['questionId', 'questionid', 'subQuestionId', 'subquestionid']),
+      })
+      const directIdentity = identityFor(questionInfo)
       const units: RawDomUnit[] = pickerRows.length
-        ? pickerRows.map((row) => ({
-            stem: (row.querySelector('.van-field__label')?.textContent || '').replace(/\s+/g, ' ').trim(),
-            options: [],
-            pickerValue: (row.querySelector('input[name="picker"]') as HTMLInputElement | null)?.value || '',
-          }))
+        ? pickerRows.map((row) => {
+            const identity = identityFor(row)
+            return {
+              stem: (row.querySelector('.van-field__label')?.textContent || '').replace(/\s+/g, ' ').trim(),
+              options: [],
+              pickerValue: (row.querySelector('input[name="picker"]') as HTMLInputElement | null)?.value || '',
+              bigQuestionId: identity.bigQuestionId || directIdentity.bigQuestionId,
+              questionId: identity.questionId || directIdentity.questionId,
+            }
+          })
         : subItems.length
-          ? subItems.map((item) => ({
-              stem: (item.querySelector('.question-title')?.textContent || '').replace(/\s+/g, ' ').trim(),
-              options: optionsIn(item),
-            }))
+          ? subItems.map((item) => {
+              const identity = identityFor(item)
+              return {
+                stem: (item.querySelector('.question-title')?.textContent || '').replace(/\s+/g, ' ').trim(),
+                options: optionsIn(item),
+                bigQuestionId: identity.bigQuestionId || directIdentity.bigQuestionId,
+                questionId: identity.questionId || directIdentity.questionId,
+              }
+            })
           : [{
               stem: sharedStem,
               options: optionsIn(questionInfo),
+              ...directIdentity,
             }]
 
       const pickerCandidates = [...root.querySelectorAll('.van-picker-column__item')]
@@ -499,6 +545,8 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
         index: option.index,
         text: normalizeOption(option.text, qtypeFor(option.role, index)),
       })),
+      bigQuestionId: unit.bigQuestionId || undefined,
+      questionId: unit.questionId || undefined,
       blankIndex: kind === 'english_cloze' ? raw.blankIndexes[index] : undefined,
       currentText: unit.pickerValue,
     }

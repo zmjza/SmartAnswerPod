@@ -13,6 +13,16 @@ export type NoqrHomeworkTiming = {
 
 export const NOQR_MIN_MS_PER_SAVED_QUESTION = 3_000
 
+export function noqrPacingElapsedMs(
+  questionStartedAt: number,
+  _saveRequestStartedAt: number | undefined,
+  now: number,
+): number {
+  // Pacing covers the whole question, including bank lookup, AI time and the
+  // save response. A slow non-save phase must not be followed by extra sleep.
+  return Math.max(0, Math.trunc(Number(now) - Number(questionStartedAt)) || 0)
+}
+
 export function noqrPacingDelayMs(
   elapsedMs: number,
   questionCount: number,

@@ -4,6 +4,7 @@ import { WORK_MODE_ORDER, normalizeLegacyWorkMode, normalizeWorkMode } from '../
 import { buildNoqrSnapshot } from '../electron/noqr/state.ts'
 import {
   applyNoqrFailureToView,
+  assertNoqrRecordPageCanReturn,
   decideNoqrRecovery,
   noqrAnswerProgressInterruption,
   noqrFailurePolicy,
@@ -13,7 +14,7 @@ import { evaluateNoqrSaveEvidence } from '../electron/noqr/save.ts'
 import { newestNoqrScoreRecord } from '../electron/noqr/score.ts'
 import { NoqrSessionError } from '../electron/noqr/session.ts'
 import { withNoqrStartupLock } from '../electron/noqr/startup-queue.ts'
-import { noqrHomeworkRuleStatus } from '../electron/noqr/homework.ts'
+import { noqrHomeworkRuleStatus, resolveNoqrHomeworkCard } from '../electron/noqr/homework.ts'
 import {
   createNoqrStudentView,
   emptyNoqrQuestionKindCounts,
@@ -132,6 +133,8 @@ test('T005-C03b 登录失败、空白、页面错误和作业不支持使用不�
   assert.equal(terminalNoqrPhase(new NoqrSessionError('page_error', 'fixture')), 'needs_user')
   assert.equal(terminalNoqrPhase(new NoqrSessionError('answer_interrupted', 'fixture')), 'needs_user')
   assert.equal(terminalNoqrPhase(new NoqrSessionError('submitted_uncertain', 'fixture')), 'needs_user')
+  assert.equal(terminalNoqrPhase(new NoqrSessionError('homework_contract', 'fixture')), 'unsupported')
+  assert.equal(terminalNoqrPhase(new NoqrSessionError('course_contract', 'fixture')), 'unsupported')
   assert.equal(terminalNoqrPhase(new Error('unsupported fixture')), 'unsupported')
 
   assert.deepEqual(noqrFailurePolicy(new NoqrSessionError('answer_interrupted', 'fixture')), {
@@ -144,7 +147,27 @@ test('T005-C03b 登录失败、空白、页面错误和作业不支持使用不�
     phase: 'needs_user',
     preservePage: true,
   })
+  assert.deepEqual(noqrFailurePolicy(new NoqrSessionError('blank_page', 'fixture')), {
+    status: 'page_interrupted',
+    phase: 'needs_user',
+    preservePage: false,
+  })
+  assert.deepEqual(noqrFailurePolicy(new NoqrSessionError('page_error', 'fixture')), {
+    status: 'page_interrupted',
+    phase: 'needs_user',
+    preservePage: false,
+  })
   assert.deepEqual(noqrFailurePolicy(new Error('unsupported fixture')), {
+    status: 'submit_failed',
+    phase: 'unsupported',
+    preservePage: false,
+  })
+  assert.deepEqual(noqrFailurePolicy(new NoqrSessionError('homework_contract', 'fixture')), {
+    status: 'submit_failed',
+    phase: 'unsupported',
+    preservePage: false,
+  })
+  assert.deepEqual(noqrFailurePolicy(new NoqrSessionError('course_contract', 'fixture')), {
     status: 'submit_failed',
     phase: 'unsupported',
     preservePage: false,
@@ -162,6 +185,8 @@ test('T005-C03c 答题页异常与结果不确定会更新真实学生视图并�
     course_scope: 'all',
     answer_round_limit: 3,
   })
+  assert.match(view.studentNo, /^....\*{4}....$/)
+  assert.notEqual(view.studentNo, view.name)
   const course = { key: 'course-a', name: '课程甲', order: 1, current: true }
   const homework = {
     key: 'homework-a',
@@ -224,6 +249,25 @@ test('T005-C03d 已产生答题进度的答题页出现任意异常都必须保�
     hasAnswerProgress: true,
     submitConfirmed: true,
   }), null)
+})
+
+test('T005-C03e 作答记录恢复遇到答题页时必须零返回并保留页面', () => {
+  const answerUrl = 'https://coursework.shou.org.cn/course_work_detail/index.html?workId=fixture&workType=onlineWork'
+  assert.throws(
+    () => assertNoqrRecordPageCanReturn(answerUrl, 'answer'),
+    (error: unknown) => error instanceof NoqrSessionError && error.code === 'answer_interrupted',
+  )
+  assert.throws(
+    () => assertNoqrRecordPageCanReturn(
+      'https://coursework.shou.org.cn/course_work_record/index.html?workId=fixture',
+      'auth_blocked',
+    ),
+    (error: unknown) => error instanceof NoqrSessionError && error.code === 'auth_blocked',
+  )
+  assert.doesNotThrow(() => assertNoqrRecordPageCanReturn(
+    'https://coursework.shou.org.cn/course_work_record/index.html?workId=fixture',
+    'record',
+  ))
 })
 
 test('T005-C04 最新分数按完成时间与有效记录选择，不按 DOM 顺序', () => {
@@ -417,4 +461,20 @@ test('T005-C08 停止后等待中的页面启动不会继续', async () => {
     (error) => error instanceof NoqrSessionError && error.code === 'stopped',
   )
   assert.equal(secondStarted, false)
+})
+
+test('T005-C09 恢复后作业 key 变化只允许按唯一名称重新绑定', () => {
+  const cards = [
+    { key: 'new-a', name: '记分作业一' },
+    { key: 'new-b', name: '记分作业二' },
+  ]
+  assert.equal(resolveNoqrHomeworkCard(cards, { key: 'new-a', name: '旧名称' }).key, 'new-a')
+  assert.equal(resolveNoqrHomeworkCard(cards, { key: 'stale-key', name: '记分作业二' }).key, 'new-b')
+  assert.throws(
+    () => resolveNoqrHomeworkCard([
+      { key: 'same-1', name: '同名作业' },
+      { key: 'same-2', name: '同名作业' },
+    ], { key: 'stale-key', name: '同名作业' }),
+    (error: unknown) => error instanceof NoqrSessionError && error.code === 'homework_contract',
+  )
 })

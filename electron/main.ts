@@ -205,7 +205,9 @@ app.whenReady().then(() => {
     win?.webContents.send('kaida:progress', e)
     pushSnap()
   })
-  setInterval(() => { void refreshBrowserMemorySamples().finally(pushSnap) }, 2000)
+  if (process.env.KAIDA_E2E_DISABLE_SNAPSHOT_INTERVAL !== '1') {
+    setInterval(() => { void refreshBrowserMemorySamples().finally(pushSnap) }, 2000)
+  }
   if (process.env.KAIDA_AUTO_DETECT === '1') {
     setTimeout(() => {
       void loginAndRefresh()

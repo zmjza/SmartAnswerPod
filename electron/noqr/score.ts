@@ -48,6 +48,7 @@ export function newestNoqrScoreRecord(records: readonly unknown[]): NoqrScoreRec
     const record = candidate as ScoreCandidate
     const time = parseNoqrTimestamp(record.finishedTime)
     if (time == null) continue
+    const raw = candidate as Record<string, unknown>
     const normalized = {
         finishedTime: String(record.finishedTime),
         score: Number(record.score),
@@ -56,8 +57,9 @@ export function newestNoqrScoreRecord(records: readonly unknown[]): NoqrScoreRec
         useTime: record.useTime as string | number | undefined,
         paperId: typeof record.paperId === 'string' ? record.paperId : undefined,
         remark: typeof record.remark === 'string' ? record.remark : undefined,
+        homeWorkUniqueFlag: typeof raw.homeWorkUniqueFlag === 'string' ? raw.homeWorkUniqueFlag : undefined,
+        paperStructUniqueFlag: typeof raw.paperStructUniqueFlag === 'string' ? raw.paperStructUniqueFlag : undefined,
     }
-    const raw = candidate as Record<string, unknown>
     const token = [
       normalized.score,
       normalized.paperId || '',

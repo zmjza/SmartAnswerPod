@@ -1,5 +1,6 @@
 import type { Page } from 'patchright'
 import { upsertHomework } from '../core/live-view.ts'
+import { NOQR_PATH } from './selectors.ts'
 import { classifyNoqrPage, isNoqrAnswerPath, NoqrSessionError } from './session.ts'
 import type { NoqrCourse, NoqrHomework, NoqrPageKind, NoqrPhase } from './types.ts'
 import { sanitizeNoqrLogText, type NoqrStudentView } from './view.ts'
@@ -19,7 +20,7 @@ export type NoqrRecoveryInput = {
 export type NoqrRecoveryDecision = 'ready' | 'wait' | 'refresh' | 'reenter' | 'stop'
 
 export type NoqrFailurePolicy = {
-  status: 'answer_page_interrupted' | 'submitted_uncertain' | 'submit_failed'
+  status: 'answer_page_interrupted' | 'page_interrupted' | 'submitted_uncertain' | 'submit_failed'
   phase: Extract<NoqrPhase, 'needs_user' | 'unsupported'>
   preservePage: boolean
 }
@@ -48,6 +49,12 @@ export function noqrFailurePolicy(error: unknown): NoqrFailurePolicy {
   if (code === 'answer_interrupted') {
     return { status: 'answer_page_interrupted', phase: 'needs_user', preservePage: true }
   }
+  if (code === 'blank_page' || code === 'page_error') {
+    // Contract/blank failures are isolated to the current course or homework.
+    // Only an answer page with saved progress is promoted to answer_interrupted
+    // and preserved for manual handling.
+    return { status: 'page_interrupted', phase: 'needs_user', preservePage: false }
+  }
   if (code === 'submitted_uncertain') {
     return { status: 'submitted_uncertain', phase: 'needs_user', preservePage: true }
   }
@@ -68,6 +75,23 @@ export function noqrAnswerProgressInterruption(input: {
 }): NoqrSessionError | null {
   if (!input.hasAnswerProgress || input.submitConfirmed || !isNoqrAnswerPath(input.url)) return null
   return new NoqrSessionError('answer_interrupted', '已作答答题页出现异常，保留当前页面并等待人工处理')
+}
+
+export function assertNoqrRecordPageCanReturn(url: string, surface: NoqrPageKind | string): void {
+  if (isNoqrAnswerPath(url)) {
+    throw new NoqrSessionError(
+      'answer_interrupted',
+      '作答记录流程误入答题页，已保留页面且禁止点击返回',
+    )
+  }
+  if (surface === 'auth_blocked' || surface === 'login') {
+    throw new NoqrSessionError('auth_blocked', '作答记录读取后进入登录或人工认证页面')
+  }
+}
+
+export function shouldRestoreNoqrRecordPage(currentPath: string, stopRequested: boolean): boolean {
+  if (stopRequested) return false
+  return currentPath.replace(/\/+$/, '') !== NOQR_PATH.courseWork
 }
 
 export function applyNoqrFailureToView(

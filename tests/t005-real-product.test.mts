@@ -20,12 +20,17 @@ import {
   classifyAnswerWorkType,
   createGetOnlyBankService,
   debugDiagnosticsForStudent,
+  displayEvidenceCount,
   diagnosticsForStudent,
   isSiteGeneratedFinalDuplicate,
   missingEnglishQuestionKinds,
+  normalHomeworkSlotFailure,
+  normalHomeworkSlotFailures,
+  noqrLoginReuseFailure,
   noqrPacingViolationCount,
   noqrScoreNetworkFailure,
   normalizeHarnessConfig,
+  recordDisplayEvidence,
   safeDiagnosticCode,
   shouldFailTerminalBeforeTarget,
   summarizeStudentForLog,
@@ -68,6 +73,24 @@ function threeNormalAccountGoalText() {
   ].join('\n')
 }
 
+function manyNormalAccountGoalText(count: number) {
+  const lines = [
+    `ai的apikey：${FIXTURE_KEY}`,
+    '大学英语专属题型账号密码：',
+    `账号：${ENGLISH_USER}`,
+    `密码：${ENGLISH_PASSWORD}`,
+    '',
+    '正常题型账号密码：',
+  ]
+  for (let index = 0; index < count; index++) {
+    const suffix = String(index + 1).padStart(2, '0')
+    lines.push(`账号：${['fixture', 'user', 'normal', suffix].join('-')}`)
+    lines.push(`密码：${['fixture', 'pass', 'normal', suffix].join('-')}`)
+    lines.push('')
+  }
+  return lines.join('\n')
+}
+
 test('T005-RP-01 exposes only the confirmed answer work-type whitelist', () => {
   assert.deepEqual([...OBSERVED_ANSWER_WORK_TYPES], ['onlineWork', 'stageExam'])
   assert.equal(classifyAnswerWorkType('onlineWork'), 'onlineWork')
@@ -75,15 +98,22 @@ test('T005-RP-01 exposes only the confirmed answer work-type whitelist', () => {
   assert.equal(classifyAnswerWorkType('otherWork'), 'unsupported')
 })
 
+test('T005-RP-01b repeated login submissions fail the real-product gate', () => {
+  assert.equal(noqrLoginReuseFailure({ loginSubmissionRequests: 1 }, 1), '')
+  assert.equal(noqrLoginReuseFailure({ loginSubmissionRequests: 3 }, 1), 'login_submission_repeated')
+  assert.equal(noqrLoginReuseFailure({ loginSubmissionRequests: 2 }, 2), '')
+  assert.equal(noqrLoginReuseFailure({ loginSubmissionRequests: 0 }, 1), '')
+})
+
 test('T005-RP-02 normalizes phases, aliases, display, and course scope strictly', () => {
-  const credentials = parseT005Credentials(fixtureGoalText())
+  const credentials = parseT005Credentials(threeNormalAccountGoalText())
   for (const phase of SUPPORTED_TEST_PHASES) {
     const config = normalizeHarnessConfig({
       KAIDA_T005_PHASE: phase,
-      KAIDA_TEST_ALIAS: phase === 'concurrency' ? 'NOQR-01,NOQR-EN' : 'NOQR-01',
+      KAIDA_TEST_ALIAS: phase === 'concurrency' ? 'NOQR-01,NOQR-02,NOQR-03' : 'NOQR-01',
     }, credentials)
     assert.equal(config.phase, phase)
-    assert.equal(config.accounts.length, phase === 'concurrency' ? 2 : 1)
+    assert.equal(config.accounts.length, phase === 'concurrency' ? 3 : 1)
     assert.equal(config.maxRuntimeMs, Number.POSITIVE_INFINITY)
   }
   for (const displayMode of SUPPORTED_DISPLAY_MODES) {
@@ -126,7 +156,8 @@ test('T005-RP-02 normalizes phases, aliases, display, and course scope strictly'
   const concurrent = normalizeHarnessConfig({
     KAIDA_T005_PHASE: 'concurrency',
   }, credentials)
-  assert.deepEqual(concurrent.accounts.map((account) => account.alias), ['NOQR-01', 'NOQR-EN'])
+  assert.deepEqual(concurrent.accounts.map((account) => account.alias), ['NOQR-EN', 'NOQR-01', 'NOQR-02'])
+  assert.equal(concurrent.accountParallel, 2)
 
   assert.throws(
     () => normalizeHarnessConfig({ KAIDA_T005_PHASE: 'unknown' }, credentials),
@@ -171,13 +202,31 @@ test('T005-RP-02b course match is applied before strategy and index', () => {
     courseIndex: 0,
     courseMatch: '不存在',
   }), null)
+
+  const completedEnglish = [{
+    key: 'd',
+    name: '大学英语（3）',
+    groups: [{ rows: [{ status: 'done_100' }] }],
+  }]
+  assert.equal(chooseNoqrTestCourse(completedEnglish, {
+    courseStrategy: 'max-todo',
+    courseIndex: 0,
+    courseMatch: '大学英语',
+    forceRetry: false,
+  }), null)
+  assert.equal(chooseNoqrTestCourse(completedEnglish, {
+    courseStrategy: 'max-todo',
+    courseIndex: 0,
+    courseMatch: '大学英语',
+    forceRetry: true,
+  })?.key, 'd')
 })
 
 test('T005-RP-02A concurrency account limit defaults to two and stays within one to eight', () => {
-  const credentials = parseT005Credentials(threeNormalAccountGoalText())
+  const credentials = parseT005Credentials(manyNormalAccountGoalText(9))
   const baseEnv = {
     KAIDA_T005_PHASE: 'concurrency',
-    KAIDA_TEST_ALIAS: 'NOQR-01,NOQR-02,NOQR-03',
+    KAIDA_TEST_ALIAS: Array.from({ length: 9 }, (_, index) => `NOQR-${String(index + 1).padStart(2, '0')}`).join(','),
   }
 
   assert.equal(normalizeHarnessConfig(baseEnv, credentials).accountParallel, 2)
@@ -214,6 +263,13 @@ test('T005-RP-02C test-only score stop round is bounded and backward compatible'
   assert.equal(normalizeHarnessConfig({
     KAIDA_T005_STOP_AFTER_FIRST_SCORE: '1',
   }, credentials).stopAfterScoreRound, 1)
+  assert.equal(normalizeHarnessConfig({}, credentials).requireNormalKinds, true)
+  assert.equal(normalizeHarnessConfig({
+    KAIDA_T005_REQUIRE_NORMAL_KINDS: '0',
+  }, credentials).requireNormalKinds, false)
+  assert.equal(normalizeHarnessConfig({
+    KAIDA_T005_REQUIRE_NORMAL_KINDS: '1',
+  }, credentials).requireNormalKinds, true)
 
   for (const value of ['0', '11', '1.5', 'second']) {
     assert.throws(
@@ -223,6 +279,12 @@ test('T005-RP-02C test-only score stop round is bounded and backward compatible'
       (error) => error instanceof T005HarnessError && error.code === 'invalid_stop_after_score_round',
     )
   }
+  assert.throws(
+    () => normalizeHarnessConfig({
+      KAIDA_T005_REQUIRE_NORMAL_KINDS: 'mixed',
+    }, credentials),
+    (error) => error instanceof T005HarnessError && error.code === 'invalid_require_normal_kinds',
+  )
 })
 
 test('T005-RP-02B concurrency observation requires a queue and caps held account slots', () => {
@@ -232,6 +294,7 @@ test('T005-RP-02B concurrency observation requires a queue and caps held account
 
   const queued = inspect({
     running: true,
+    machine: { browsers: 2 },
     students: [
       { name: aliases[0], slot: 'occupied', queued: false },
       { name: aliases[1], slot: 'occupied', queued: false },
@@ -245,15 +308,18 @@ test('T005-RP-02B concurrency observation requires a queue and caps held account
   assert.equal(queued.withinLimit, true)
   assert.equal(queued.queueObserved, true)
   assert.equal(queued.ready, true)
+  assert.equal(queued.browserCount, 2)
 
   const overLimit = inspect({
     running: true,
+    machine: { browsers: 3 },
     students: aliases.map((name) => ({ name, slot: 'occupied', queued: false })),
   }, aliases, 2)
   assert.equal(overLimit.heldCount, 3)
   assert.equal(overLimit.occupiedCount, 3)
   assert.equal(overLimit.withinLimit, false)
   assert.equal(overLimit.ready, false)
+  assert.equal(overLimit.browserCount, 3)
 
   const released = inspect({
     running: false,
@@ -333,6 +399,8 @@ test('T005-RP-03b read-only bank proxy forwards GET only and never sends writes 
 
 test('T005-RP-04 child environment cannot inherit credentials or fixture routing', () => {
   const env = buildProductChildEnv({
+    PATH: '/usr/bin',
+    HOME: '/tmp/home',
     SAFE_FLAG: '1',
     KAIDA_SILICONFLOW_KEY: 'inherited-key',
     KAIDA_SUPABASE_URL: 'https://inherited.example',
@@ -344,7 +412,9 @@ test('T005-RP-04 child environment cannot inherit credentials or fixture routing
     KAIDA_E2E_MOCK_COURSES: '1',
     VITE_DEV_SERVER_URL: 'http://127.0.0.1:9',
   }, '/project/.playwright/profile')
-  assert.equal(env.SAFE_FLAG, '1')
+  assert.equal(env.PATH, '/usr/bin')
+  assert.equal(env.HOME, '/tmp/home')
+  assert.equal(env.SAFE_FLAG, undefined)
   assert.equal(env.KAIDA_E2E_USERDATA, '/project/.playwright/profile')
   for (const key of [
     'KAIDA_SILICONFLOW_KEY',
@@ -359,6 +429,12 @@ test('T005-RP-04 child environment cannot inherit credentials or fixture routing
   ]) {
     assert.equal(env[key], '')
   }
+  assert.equal(env.KAIDA_T005_FORCE_RETRY, undefined)
+  const forced = buildProductChildEnv({
+    PATH: '/usr/bin',
+    KAIDA_T005_FORCE_RETRY: '0',
+  }, '/project/.playwright/profile', { forceRetry: true })
+  assert.equal(forced.KAIDA_T005_FORCE_RETRY, '1')
 })
 
 test('T005-RP-05 log summaries contain only aliases, enums, booleans, and counts', () => {
@@ -548,6 +624,12 @@ test('T005-RP-09 debug diagnostics preserve failure stages without raw business 
       `课程 private-course-name 作业 private-homework-name 作答记录接口失败 https://coursework.shou.org.cn/?id=${NORMAL_USER}`,
       `题干 private-question-stem`,
     ],
+    courseLogs: [{
+      courseName: 'private-course-name',
+      homeworkName: 'private-homework-name',
+      level: 'error',
+      reason: `课程检测已隔离 · private-course-name 请求失败 https://coursework.shou.org.cn/?id=${NORMAL_USER}`,
+    }],
     courses: [{
       name: 'private-course-name',
       status: '有失败待处理',
@@ -590,6 +672,9 @@ test('T005-RP-09 debug diagnostics preserve failure stages without raw business 
   assert.equal(debug.bankCount, 2)
   assert.equal(debug.aiCount, 1)
   assert.equal(debug.selectedCourseCount, 1)
+  assert.deepEqual(debug.courseFailureReasons, [
+    '课程检测已隔离 · [课程] 请求失败 [地址已隐藏]',
+  ])
   const serialized = JSON.stringify(debug)
   for (const privateText of [
     NORMAL_USER,
@@ -601,6 +686,44 @@ test('T005-RP-09 debug diagnostics preserve failure stages without raw business 
   ]) {
     assert.equal(serialized.includes(privateText), false)
   }
+})
+
+test('T005-RP-09A course diagnostics preserve normal detection and completion states', () => {
+  const student = {
+    courses: [
+      { name: 'course-1', status: '本轮可做作业已完成', groups: [] },
+      { name: 'course-2', status: '尚无作业', groups: [] },
+      { name: 'course-3', status: '无作业', groups: [] },
+      { name: 'course-4', status: '尚未完成', groups: [] },
+      { name: 'course-5', status: '暂不可完成', groups: [] },
+      { name: 'course-6', status: '分数待确认', groups: [] },
+      { name: 'course-7', status: '检测失败', groups: [] },
+      { name: 'course-8', status: '待检测', groups: [] },
+      { name: 'course-9', status: '检测中', groups: [] },
+    ],
+  }
+  const debug = debugDiagnosticsForStudent('NOQR-01', student)
+  assert.deepEqual(debug.courseStateCounts, {
+    completed: 1,
+    empty: 2,
+    incomplete: 1,
+    unavailable: 1,
+    score_unavailable: 1,
+    detection_failed: 1,
+    pending: 1,
+    detecting: 1,
+  })
+})
+
+test('T005-RP-09B diagnostics distinguish answer-card timeout from generic page failures', () => {
+  assert.equal(
+    safeDiagnosticCode('答题卡审计超过总时限，已保留当前页面并停止当前作业'),
+    'answer_card_audit_timeout',
+  )
+  assert.equal(
+    safeDiagnosticCode('答案已保存但页面未推进，已保留当前答题页并停止当前作业'),
+    'save_advance_not_observed',
+  )
 })
 
 test('T005-RP-09A English score evidence requires all five saved question kinds', () => {
@@ -617,6 +740,61 @@ test('T005-RP-09A English score evidence requires all five saved question kinds'
     picker: 0,
     english_reading: undefined,
   }), ['picker', 'english_reading'])
+})
+
+test('T005-RP-09A2 Normal score evidence requires one homework covering single, multiple, and judge', () => {
+  const complete = {
+    homeworkQuestionKindSlotCounts: [{
+      index: 3,
+      questionKindSlotCounts: { single: 10, multiple: 10, judge: 5 },
+    }],
+  }
+  assert.equal(normalHomeworkSlotFailure(complete), null)
+  assert.deepEqual(normalHomeworkSlotFailures([
+    { alias: 'NOQR-01', kind: 'normal' },
+    { alias: 'NOQR-EN', kind: 'english' },
+  ], [complete, {}]), [])
+  const split = {
+    homeworkQuestionKindSlotCounts: [
+      { index: 0, questionKindSlotCounts: { single: 5, multiple: 5 } },
+      { index: 1, questionKindSlotCounts: { judge: 5 } },
+    ],
+  }
+  const failure = normalHomeworkSlotFailure(split)
+  assert.equal(failure?.code, 'normal_question_slots_missing')
+  assert.deepEqual(normalHomeworkSlotFailures([
+    { alias: 'NOQR-01', kind: 'normal' },
+  ], [split]), [{
+    alias: 'NOQR-01',
+    code: 'normal_question_slots_missing',
+    missingKinds: [],
+    evidence: [
+      { index: 0, questionKindSlotCounts: { single: 5, multiple: 5 } },
+      { index: 1, questionKindSlotCounts: { judge: 5 } },
+    ],
+  }])
+
+  const accountSweepOnlySingle = {
+    homeworkQuestionKindSlotCounts: [{
+      index: 0,
+      questionKindSlotCounts: { single: 10 },
+    }],
+    questionKindSlotCounts: { single: 10 },
+  }
+  assert.deepEqual(normalHomeworkSlotFailures([
+    { alias: 'NOQR-01', kind: 'normal' },
+  ], [accountSweepOnlySingle], false), [])
+  assert.deepEqual(normalHomeworkSlotFailures([
+    { alias: 'NOQR-01', kind: 'normal' },
+  ], [{
+    homeworkQuestionKindSlotCounts: [],
+    questionKindSlotCounts: {},
+  }], false), [{
+    alias: 'NOQR-01',
+    code: 'normal_question_slots_missing',
+    missingKinds: ['single', 'multiple', 'judge'],
+    evidence: [],
+  }])
 })
 
 test('T005-RP-09B English score gate requires saved slot evidence, not group counts', () => {
@@ -825,11 +1003,29 @@ test('T005-RP-10 safe diagnostic codes cover save, submit, history, and page rec
     ['等待交卷成功页面证据 5 秒', 'finish_success_wait'],
     ['目标作业卡已变化，禁止按旧位置点击', 'homework_card_changed'],
     ['选项选中状态与目标不一致', 'option_state_mismatch'],
+    ['答题卡漏题，回跳补答 · 多选题#10', 'answer_card_repair_started'],
+    ['答题卡中找不到漏题题号', 'answer_card_repair_target_missing'],
+    ['答题卡跳转后未到达目标题：多选题#10', 'answer_card_jump_target_missing'],
     ['未知业务原文', 'operation_failed'],
   ])
   for (const [raw, expected] of cases) {
     assert.equal(safeDiagnosticCode(raw), expected)
   }
+})
+
+test('T005-RP-10a needs-user diagnostics preserve the precise safe failure code', () => {
+  const student = {
+    phase: 'needs_user',
+    account: 'needs_verify',
+    slot: 'occupied',
+    action: '交卷响应成功，但成功提示或按钮禁用证据不完整',
+    logs: ['交卷响应成功，但成功提示或按钮禁用证据不完整'],
+  }
+  const diagnostics = t005Harness.diagnosticsForStudent('NOQR-01', student)
+  assert.equal(diagnostics.lastAction, 'finish_success_evidence_missing')
+  const debug = t005Harness.debugDiagnosticsForStudent('NOQR-01', student)
+  assert.equal(debug.lastActionCode, 'finish_success_evidence_missing')
+  assert.deepEqual(debug.logCodes, ['finish_success_evidence_missing'])
 })
 
 test('T005-RP-10b a reached target wins over a simultaneous terminal snapshot', () => {
@@ -856,6 +1052,26 @@ test('T005-RP-10b a reached target wins over a simultaneous terminal snapshot', 
     allowTerminal: true,
     targetReached: false,
   }), false)
+  assert.equal(shouldFailTerminalBeforeTarget({
+    ...base,
+    terminalCode: 'product_needs_user',
+    terminalNeedsAttention: true,
+    allowTerminal: true,
+    targetReached: false,
+  }), true)
+  assert.equal(shouldFailTerminalBeforeTarget({
+    ...base,
+    terminalCode: 'product_stopped',
+    allowTerminal: true,
+    allowExplicitStop: true,
+    targetReached: false,
+  }), false)
+  assert.equal(shouldFailTerminalBeforeTarget({
+    ...base,
+    terminalCode: 'product_stopped',
+    allowTerminal: true,
+    targetReached: false,
+  }), true)
   assert.equal(shouldFailTerminalBeforeTarget({
     ...base,
     terminalCode: null,
@@ -1554,6 +1770,18 @@ test('T005-RP-19 score network gate requires exactly one accepted Finish and no 
   assert.equal(noqrScoreNetworkFailure(network({
     mutationDuplicateBodyRequests: { submit_one: 0, submit_all: 1, finish: 0 },
   }), false), 'duplicate_save_request')
+  const siteFinalCompositeDuplicate = network({
+    mutationRequests: { submit_one: 0, submit_all: 2, finish: 1 },
+    mutationAccepted: { submit_one: 0, submit_all: 2, finish: 1 },
+    mutationDuplicateBodyRequests: { submit_one: 0, submit_all: 1, finish: 0 },
+    mutationRequestLedger: {
+      submit_one: [],
+      submit_all: [acceptedLedgerEntry('submit_all'), acceptedLedgerEntry('submit_all')],
+      finish: [acceptedLedgerEntry('finish')],
+    },
+  })
+  assert.equal(noqrScoreNetworkFailure(siteFinalCompositeDuplicate, false), 'duplicate_save_request')
+  assert.equal(noqrScoreNetworkFailure(siteFinalCompositeDuplicate, true), null)
 })
 
 test('T005-RP-19b score network gate can verify the expected reanswer round count', () => {
@@ -1625,7 +1853,41 @@ test('T005-RP-21b score stop counts cumulative score events across homework atte
   assert.equal(t005Harness.noqrScoreHistoryReached(history, ['NOQR-EN', 'NOQR-EN-02'], 3), false)
 })
 
-test('T005-RP-20 pacing interval audit checks each answer attempt and ignores the first observed gap', () => {
+test('T005-RP-22 display evidence survives terminal release and counts only occupied browsers', () => {
+  const evidence = new Map<string, Set<boolean>>()
+  assert.equal(recordDisplayEvidence(evidence, 'NOQR-EN', {
+    slot: 'queued',
+    browserWindowVisible: null,
+  }), false)
+  assert.equal(recordDisplayEvidence(evidence, 'NOQR-EN', {
+    slot: 'occupied',
+    browserWindowVisible: false,
+  }), true)
+  assert.equal(recordDisplayEvidence(evidence, 'NOQR-EN', {
+    slot: 'released',
+    browserWindowVisible: null,
+  }), false)
+  assert.equal(displayEvidenceCount(evidence, ['NOQR-EN'], false), 1)
+  assert.equal(displayEvidenceCount(evidence, ['NOQR-EN'], true), 0)
+
+  const concurrent = new Map<string, Set<boolean>>()
+  recordDisplayEvidence(concurrent, 'NOQR-01', {
+    slot: 'occupied',
+    browserWindowVisible: false,
+  })
+  recordDisplayEvidence(concurrent, 'NOQR-02', {
+    slot: 'occupied',
+    browserWindowVisible: false,
+  })
+  recordDisplayEvidence(concurrent, 'NOQR-03', {
+    slot: 'queued',
+    browserWindowVisible: null,
+  })
+  assert.equal(displayEvidenceCount(concurrent, ['NOQR-01', 'NOQR-02', 'NOQR-03'], false), 2)
+  assert.equal(displayEvidenceCount(concurrent, ['NOQR-01'], true), 0)
+})
+
+test('T005-RP-20 pacing audit tolerates one fast gap after a slow phase but rejects sustained bursts', () => {
   const scope = {
     kind: 'submit_one',
     contextSequence: 1,
@@ -1650,7 +1912,18 @@ test('T005-RP-20 pacing interval audit checks each answer attempt and ignores th
     entry(1, 1_000),
     entry(2, 4_000),
     entry(3, 6_000),
+  ], 2_500), 0)
+  assert.equal(noqrPacingViolationCount([
+    entry(1, 1_000),
+    entry(2, 4_000),
+    entry(3, 6_000),
+    entry(4, 8_000),
   ], 2_500), 1)
+  assert.equal(noqrPacingViolationCount([
+    entry(1, 1_000),
+    entry(2, 2_000),
+    entry(3, 4_000),
+  ], 2_500), 2)
   assert.equal(noqrPacingViolationCount([
     entry(1, 1_000),
     entry(2, 4_000),

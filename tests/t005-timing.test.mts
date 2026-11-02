@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import {
   createNoqrTimingAccumulator,
   noqrPacingDelayMs,
+  noqrPacingElapsedMs,
   recordNoqrGroupTiming,
   snapshotNoqrTiming,
 } from '../electron/noqr/timing.ts'
@@ -51,6 +52,14 @@ test('T005-TIME04 每个成功保存题位至少保持三秒节奏，慢响应�
   assert.equal(noqrPacingDelayMs(5_000, 10), 25_000)
   assert.equal(noqrPacingDelayMs(31_000, 10), 0)
   assert.equal(noqrPacingDelayMs(-1, 0), 3_000)
+})
+
+test('T005-TIME04b 节奏从当前题开始处理时计算，题库和 AI 耗时也计入约三秒', () => {
+  assert.equal(noqrPacingElapsedMs(1_000, 1_900, 2_000), 1_000)
+  assert.equal(noqrPacingDelayMs(noqrPacingElapsedMs(1_000, 1_900, 2_000), 1), 2_000)
+  assert.equal(noqrPacingDelayMs(noqrPacingElapsedMs(1_000, 9_900, 10_000), 1), 0)
+  assert.equal(noqrPacingElapsedMs(1_000, undefined, 2_000), 1_000)
+  assert.equal(noqrPacingElapsedMs(1_000, 0, 2_000), 1_000)
 })
 
 test('T005-TIME05 慢保存超过三秒后不再追加三秒节奏', () => {

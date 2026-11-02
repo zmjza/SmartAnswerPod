@@ -356,6 +356,68 @@ test('T005-Q11 Patchright 从真实新站 DOM 契约读取当前多选组', asyn
   }
 })
 
+test('T005-Q11b 复合子题缺少独立 ID 时继承父题可校验身份', async () => {
+  const browser = await launchFixtureBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div>阅读理解 1/2</div>
+        <div class="question-info" data-big-question-id="bg-parent" data-question-id="q-parent">
+          <span class="question-title">共享材料</span>
+          <div class="sub-questions">
+            <div class="sub-item" data-question-id="q-child-1">
+              <span class="question-title">子题一</span>
+              <div class="question-options">
+                <div role="radio" aria-checked="false" class="option-item" data-index="1"><span>A. 正确</span></div>
+                <div role="radio" aria-checked="false" class="option-item" data-index="0"><span>B. 错误</span></div>
+              </div>
+            </div>
+            <div class="sub-item">
+              <span class="question-title">子题二</span>
+              <div class="question-options">
+                <div role="radio" aria-checked="false" class="option-item" data-index="1"><span>A. 正确</span></div>
+                <div role="radio" aria-checked="false" class="option-item" data-index="0"><span>B. 错误</span></div>
+              </div>
+            </div>
+            <div class="sub-item">
+              <span class="question-title">子题三</span>
+              <div class="question-options">
+                <div role="radio" aria-checked="false" class="option-item" data-index="1"><span>A. 正确</span></div>
+                <div role="radio" aria-checked="false" class="option-item" data-index="0"><span>B. 错误</span></div>
+              </div>
+            </div>
+            <div class="sub-item">
+              <span class="question-title">子题四</span>
+              <div class="question-options">
+                <div role="radio" aria-checked="false" class="option-item" data-index="1"><span>A. 正确</span></div>
+                <div role="radio" aria-checked="false" class="option-item" data-index="0"><span>B. 错误</span></div>
+              </div>
+            </div>
+            <div class="sub-item">
+              <span class="question-title">子题五</span>
+              <div class="question-options">
+                <div role="radio" aria-checked="false" class="option-item" data-index="1"><span>A. 正确</span></div>
+                <div role="radio" aria-checked="false" class="option-item" data-index="0"><span>B. 错误</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await readNoqrQuestionGroup(page)
+    assert.equal(result.ok, true)
+    if (!result.ok) return
+    assert.equal(result.group.units[0]?.bigQuestionId, 'bg-parent')
+    assert.equal(result.group.units[0]?.questionId, 'q-child-1')
+    assert.equal(result.group.units[1]?.bigQuestionId, 'bg-parent')
+    assert.equal(result.group.units[1]?.questionId, 'q-parent')
+    assert.equal(result.group.units.length, 5)
+  } finally {
+    await browser.close()
+  }
+})
+
 test('T005-Q12 Picker 读取通过真实弹层读取候选并取消，不改变答案', async () => {
   const browser = await launchFixtureBrowser()
   try {

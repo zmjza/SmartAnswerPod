@@ -121,6 +121,16 @@ async function startFixtureServer() {
     if (url.pathname === '/dotNet_api/api/services/app/HomeWorkStudent/FinishJsonAsync' && request.method === 'POST') {
       state.finish.push(await body())
       state.finished = true
+      const now = new Date()
+      state.finishedAt = [
+        now.getFullYear(),
+        String(now.getMonth() + 1).padStart(2, '0'),
+        String(now.getDate()).padStart(2, '0'),
+      ].join('-') + ' ' + [
+        String(now.getHours()).padStart(2, '0'),
+        String(now.getMinutes()).padStart(2, '0'),
+        String(now.getSeconds()).padStart(2, '0'),
+      ].join(':')
       json(envelope(null))
       return
     }
@@ -129,7 +139,7 @@ async function startFixtureServer() {
       const data = state.finished ? [{
         homeWorkUniqueFlag: 'flag-1',
         paperStructUniqueFlag: 'paper-1',
-        finishedTime: '2026-11-01 12:00:00',
+        finishedTime: state.finishedAt,
         score: 100,
         useTime: 60,
         isMarked: true,
@@ -178,11 +188,19 @@ async function launchProduct(fixtureOrigin, bankOrigin) {
     const { chromium } = createRequire(app.getAppPath() + '/package.json')('patchright')
     const systemChrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
     chromium.executablePath = () => systemChrome
-    const state = globalThis.__t005E3 = { contexts: [], requests: [] }
+    const state = globalThis.__t005E3 = { contexts: [], requests: [], pageRequests: [] }
     const original = chromium.launchPersistentContext
     chromium.launchPersistentContext = async function (profile, options) {
       const context = await original.call(this, profile, options)
       state.contexts.push(context)
+      const watchPage = (schoolPage) => {
+        schoolPage.on('request', (request) => {
+          const url = new URL(request.url())
+          state.pageRequests.push({ path: url.pathname, method: request.method() })
+        })
+      }
+      for (const schoolPage of context.pages()) watchPage(schoolPage)
+      context.on('page', watchPage)
       context.on('request', (request) => {
         const url = new URL(request.url())
         state.requests.push({ host: url.hostname, path: url.pathname, method: request.method() })
@@ -248,6 +266,38 @@ async function launchProduct(fixtureOrigin, bankOrigin) {
     id: setup.id,
     renderer,
     requests: () => app.evaluate(() => globalThis.__t005E3.requests),
+    pageRequests: () => app.evaluate(() => globalThis.__t005E3.pageRequests),
+    answerCardDiagnostic: () => app.evaluate(async () => {
+      const contexts = globalThis.__t005E3.contexts
+      for (let index = contexts.length - 1; index >= 0; index--) {
+        for (const schoolPage of contexts[index].pages()) {
+          if (!schoolPage.url().includes('/course_work_detail/index.html')) continue
+          return schoolPage.evaluate(() => {
+            const visible = (node) => {
+              if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return false
+              const style = getComputedStyle(node)
+              return style.display !== 'none' && style.visibility !== 'hidden'
+            }
+            return {
+              cards: [...document.querySelectorAll('.question-card')].map((card) => ({
+                visible: visible(card),
+                title: (card.querySelector('.question-cart-title')?.textContent || '')
+                  .replace(/\s+/g, ' ').trim(),
+                rows: [...card.querySelectorAll('.sub-question')].map((row) => ({
+                  visible: visible(row),
+                  text: (row.textContent || '').replace(/\s+/g, ' ').trim(),
+                  answered: row.classList.contains('has-answered'),
+                  current: row.classList.contains('is-current'),
+                })),
+              })),
+              popupVisible: [...document.querySelectorAll('.van-popup--bottom')].some(visible),
+              overlayVisible: [...document.querySelectorAll('.van-overlay')].some(visible),
+            }
+          })
+        }
+      }
+      return null
+    }),
     close: () => app.close(),
   }
 }
@@ -305,7 +355,7 @@ try {
       const snapshot = await product.renderer('window.kaida.snapshot()')
       const row = snapshot.students.find((item) => item.local_id === product.id)
       return !snapshot.running && row?.slot === 'released' && row?.account === 'round_ended'
-    }, '无码全链路完成与释放', 60_000)
+    }, '无码全链路完成与释放', 30_000)
   } catch (error) {
     const snapshot = await product.renderer('window.kaida.snapshot()')
     console.log('T005 E3 执行诊断', JSON.stringify({
@@ -314,6 +364,10 @@ try {
       fixture: { saves: fixtureServer.state.saves.length, finish: fixtureServer.state.finish.length, historyGets: fixtureServer.state.historyGets },
       bankQueries: fixtureServer.state.bankQueries,
       requests: (await product.requests()).slice(-50),
+      pageRequests: (await product.pageRequests()).slice(-50),
+      answerCard: await product.answerCardDiagnostic().catch((error) => ({
+        error: error instanceof Error ? error.message : String(error),
+      })),
     }))
     throw error
   }
@@ -345,7 +399,9 @@ try {
   assert.equal(fixtureServer.state.finish.length, 1, '最终交卷请求数量不正确')
   assert.ok(fixtureServer.state.saves.every((body) => body.workId === 'work-1' && body.homeWorkUniqueFlag === 'flag-1'))
   assert.equal(fixtureServer.state.finish[0].paperStructUniqueFlag, 'paper-1')
-  assert.ok(fixtureServer.state.historyGets >= 2, '作答记录接口没有被真实读取')
+  // The forced-retry path intentionally skips the baseline history read; the
+  // post-submit score read must still happen at least once.
+  assert.ok(fixtureServer.state.historyGets >= 1, '作答记录接口没有被真实读取')
   assert.equal(fixtureServer.state.bankWrites, 0, '无码模式出现题库写请求')
   assert.ok(fixtureServer.state.bankGets >= 4, '题库只读请求数量不足')
 

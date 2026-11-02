@@ -60,11 +60,14 @@ export type NoqrCourse = {
   name: string
   order: number
   current: boolean
+  stableToken?: string
 }
 
 export type NoqrHomework = {
   key: string
   name: string
+  workId?: string
+  courseId?: string
   workType: string
   section: 'onlineHomework'
   weightPercent: number

@@ -350,6 +350,7 @@ test('T005-AI07 首次交卷点击未发出请求时状态化重试，成功后�
           workId: 'work-fixture',
           observer,
           stopRequested: () => false,
+          noRequestRetryBudgetMs: 100,
         }),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error('交卷无请求重试超时')), 8_000)),
       ])

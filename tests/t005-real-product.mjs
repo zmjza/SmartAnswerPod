@@ -48,6 +48,7 @@ export const REQUIRED_ENGLISH_QUESTION_KINDS = Object.freeze([
   'english_cloze',
   'english_reading',
 ])
+export const REQUIRED_NORMAL_QUESTION_KINDS = Object.freeze(['single', 'multiple', 'judge'])
 export const REQUIRED_ENGLISH_QUESTION_SLOTS = Object.freeze({
   english_grammar: 10,
   english_listening: 5,
@@ -90,6 +91,22 @@ const ACTIVE_BROWSER_PHASES = new Set([
   'retry_wait',
 ])
 const CAPACITY_HOLDING_SLOTS = new Set(['launching', 'occupied', 'occupying_verify'])
+
+export function recordDisplayEvidence(evidence, alias, student) {
+  if (!(evidence instanceof Map) || !alias || student?.slot !== 'occupied') return false
+  if (typeof student.browserWindowVisible !== 'boolean') return false
+  const observed = evidence.get(alias) || new Set()
+  observed.add(student.browserWindowVisible)
+  evidence.set(alias, observed)
+  return true
+}
+
+export function displayEvidenceCount(evidence, aliases, expectedVisible) {
+  const expected = Boolean(expectedVisible)
+  return (Array.isArray(aliases) ? aliases : [])
+    .filter((alias) => evidence?.get(alias)?.has(expected))
+    .length
+}
 
 export class T005HarnessError extends Error {
   constructor(code, message, details) {
@@ -135,25 +152,20 @@ function normalizeStopAfterScoreRound(value) {
   return round
 }
 
-function normalizeAliasList(value, phase, credentials) {
+function normalizeAliasList(value, phase, credentials, minimumAliases = 1) {
   const requested = String(value || '')
     .split(',')
     .map((item) => item.trim().toUpperCase())
     .filter(Boolean)
   const aliases = requested.length
     ? requested
-    : phase === 'concurrency'
-      ? ['NOQR-01', 'NOQR-EN']
-      : ['NOQR-01']
+    : credentials.accounts.slice(0, minimumAliases).map((account) => account.alias)
 
-  if (phase === 'concurrency' && aliases.length < 2) {
-    for (const candidate of ['NOQR-EN', 'NOQR-01', ...credentials.accounts.map((account) => account.alias)]) {
-      if (!aliases.includes(candidate)) aliases.push(candidate)
-      if (aliases.length >= 2) break
-    }
-  }
-  if (phase === 'concurrency' && aliases.length < 2) {
-    fail('concurrency_aliases_missing', 'Concurrency phase requires at least two account aliases')
+  if (phase === 'concurrency' && aliases.length < minimumAliases) {
+    fail(
+      'concurrency_aliases_missing',
+      `Concurrency phase requires at least ${minimumAliases} distinct account aliases`,
+    )
   }
   if (phase !== 'concurrency' && aliases.length > 1) {
     fail('invalid_alias_list', 'Only the concurrency phase accepts multiple aliases')
@@ -203,7 +215,13 @@ export function normalizeHarnessConfig(env = process.env, credentials) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 80)
-  const accounts = normalizeAliasList(env.KAIDA_TEST_ALIAS, phase, credentials)
+  const accountParallel = normalizeAccountParallel(env.KAIDA_T005_ACCOUNT_PARALLEL, phase)
+  const accounts = normalizeAliasList(
+    env.KAIDA_TEST_ALIAS,
+    phase,
+    credentials,
+    phase === 'concurrency' ? accountParallel + 1 : 1,
+  )
   const bankSource = normalizeEnum(
     env.KAIDA_T005_BANK_SOURCE,
     ['empty', 'installed'],
@@ -226,20 +244,46 @@ export function normalizeHarnessConfig(env = process.env, credentials) {
     courseMatch,
     bankSource,
     accounts,
-    accountParallel: normalizeAccountParallel(env.KAIDA_T005_ACCOUNT_PARALLEL, phase),
+    accountParallel,
     courseParallel: Math.min(8, Math.max(1, Number(env.KAIDA_T005_COURSE_PARALLEL) || 2)),
     answerRoundLimit,
     logEnabled: normalizeBoolean(env.KAIDA_T005_LOG_ENABLED, true, 'invalid_log_enabled'),
+    forceRetry: normalizeBoolean(env.KAIDA_T005_FORCE_RETRY, false, 'invalid_force_retry'),
     stopAfterScoreRound: explicitScoreStopRound ??
       (env.KAIDA_T005_STOP_AFTER_FIRST_SCORE === '1' ? 1 : null),
+    requireNormalKinds: normalizeBoolean(
+      env.KAIDA_T005_REQUIRE_NORMAL_KINDS,
+      true,
+      'invalid_require_normal_kinds',
+    ),
     maxRuntimeMs,
   }
 }
 
-export function buildProductChildEnv(baseEnv, userDataDir) {
-  const env = { ...baseEnv }
+export function buildProductChildEnv(baseEnv, userDataDir, opts = {}) {
+  const allowed = [
+    'PATH',
+    'HOME',
+    'USER',
+    'LOGNAME',
+    'SHELL',
+    'TMPDIR',
+    'TEMP',
+    'TMP',
+    'LANG',
+    'LC_ALL',
+    'LC_CTYPE',
+    'DISPLAY',
+    'XDG_CONFIG_HOME',
+    'PLAYWRIGHT_BROWSERS_PATH',
+  ]
+  const env = {}
+  for (const key of allowed) {
+    if (baseEnv[key] !== undefined) env[key] = baseEnv[key]
+  }
   env.VITE_DEV_SERVER_URL = ''
   env.KAIDA_E2E_USERDATA = userDataDir
+  if (opts.forceRetry === true) env.KAIDA_T005_FORCE_RETRY = '1'
   for (const key of [
     'KAIDA_E2E_ENV',
     'KAIDA_ACCOUNTS_JSON',
@@ -398,6 +442,7 @@ export function noqrTestCourseRowCount(course) {
 }
 
 export function chooseNoqrTestCourse(courses, opts) {
+  const allCourses = Array.isArray(courses) ? [...courses] : []
   const candidates = (Array.isArray(courses) ? [...courses] : [])
     .filter((course) => noqrTestCourseTodoCount(course) > 0)
     .filter((course) => !opts.courseMatch || String(course?.name || '').includes(opts.courseMatch))
@@ -407,7 +452,17 @@ export function chooseNoqrTestCourse(courses, opts) {
       : noqrTestCourseTodoCount(left) - noqrTestCourseTodoCount(right) ||
         noqrTestCourseRowCount(left) - noqrTestCourseRowCount(right))
   const selected = opts.courseIndex > 0 ? candidates[opts.courseIndex - 1] : candidates[0]
-  if (opts.courseMatch) return selected || null
+  if (opts.courseMatch) {
+    if (selected) return selected
+    // A completed course may temporarily expose no `todo` rows. Forced-retry
+    // still needs to enter the matching course and let the real page load its
+    // completed homework cards before deciding whether to retry.
+    if (opts.forceRetry) {
+      return allCourses.find((course) =>
+        String(course?.name || '').includes(opts.courseMatch)) || null
+    }
+    return null
+  }
   return selected ||
     (Array.isArray(courses) ? courses : []).find((course) =>
       (course?.groups || []).some((group) => (group.rows || []).length > 0)) ||
@@ -624,11 +679,14 @@ export function shouldFailTerminalBeforeTarget({
   terminalEnded,
   terminalNeedsAttention,
   allowTerminal,
+  allowExplicitStop,
   targetReached,
 }) {
-  if (!terminalCode || allowTerminal) return false
-  if (!terminalEnded && !terminalNeedsAttention) return false
+  if (!terminalCode) return false
   if (targetReached && terminalCode === 'product_round_ended') return false
+  if (allowTerminal && ['product_round_ended', 'product_not_full'].includes(terminalCode)) return false
+  if (allowExplicitStop && terminalCode === 'product_stopped') return false
+  if (!terminalEnded && !terminalNeedsAttention) return false
   return true
 }
 
@@ -649,8 +707,10 @@ export function noqrScoreNetworkFailure(network, siteGeneratedFinalDuplicate, ex
   if (safeCount(network?.mutationDuplicateBodyRequests?.finish) > 0) {
     return 'duplicate_finish_request'
   }
-  if (safeCount(network?.mutationDuplicateBodyRequests?.submit_all) > 0 ||
-    (safeCount(network?.mutationDuplicateBodyRequests?.submit_one) > 0 && !siteGeneratedFinalDuplicate)) {
+  const duplicateSaveBodies =
+    safeCount(network?.mutationDuplicateBodyRequests?.submit_all) +
+    safeCount(network?.mutationDuplicateBodyRequests?.submit_one)
+  if (duplicateSaveBodies > 0 && !siteGeneratedFinalDuplicate) {
     return 'duplicate_save_request'
   }
   const ledgers = network?.mutationRequestLedger
@@ -674,7 +734,7 @@ export function expectedNoqrScoreFinishRequests(config, outcome) {
   return Math.max(1, Math.trunc(Number(config?.stopAfterScoreRound) || 1))
 }
 
-export function noqrPacingViolationCount(entries, minimumMsPerQuestion = 2_000) {
+export function noqrPacingViolationCount(entries, minimumMsPerQuestion = 1_500) {
   const minimum = Math.max(0, Math.trunc(Number(minimumMsPerQuestion) || 0))
   const groups = new Map()
   for (const entry of Array.isArray(entries) ? entries : []) {
@@ -700,14 +760,30 @@ export function noqrPacingViolationCount(entries, minimumMsPerQuestion = 2_000) 
       seen.add(entry.questionFingerprint)
       distinct.push(entry)
     }
-    // The first observed request can predate monitor/attempt initialization.
-    for (let index = 2; index < distinct.length; index++) {
+    for (let index = 1; index < distinct.length; index++) {
       const interval = safeCount(distinct[index].monitorOffsetMs) -
         safeCount(distinct[index - 1].monitorOffsetMs)
-      if (interval < minimum) violations++
+      // A single short gap can follow a slow lookup/response from the prior
+      // question, even though the next question still receives its own pacing
+      // wait. Reject only a sub-500ms burst or two consecutive fast gaps.
+      if (interval < minimum / 2) {
+        violations++
+        continue
+      }
+      if (index >= 2) {
+        const window = safeCount(distinct[index].monitorOffsetMs) -
+          safeCount(distinct[index - 2].monitorOffsetMs)
+        if (window < minimum * 2) violations++
+      }
     }
   }
   return violations
+}
+
+export function noqrLoginReuseFailure(network, accountCount) {
+  const submissions = safeCount(network?.loginSubmissionRequests)
+  const allowed = Math.max(1, Math.floor(Number(accountCount) || 1))
+  return submissions > allowed ? 'login_submission_repeated' : ''
 }
 
 export function safeDiagnosticCode(value) {
@@ -741,12 +817,17 @@ export function safeDiagnosticCode(value) {
     [/单题保存 answerSelected|answerSelected 与当前页面目标不一致/, 'save_answer_mismatch'],
     [/保存响应未通过 HTTP|答案保存失败/, 'save_response_rejected'],
     [/等待页面推进/, 'save_advance_wait'],
+    [/答案已保存但页面未推进/, 'save_advance_not_observed'],
     [/等待保存请求/, 'save_request_wait'],
     [/未观察到保存请求，重新点击/, 'save_request_retry'],
     [/保存点击\s*1\/3/, 'save_click_1'],
     [/保存点击\s*2\/3/, 'save_click_2'],
     [/保存点击\s*3\/3/, 'save_click_3'],
     [/答题卡仍有/, 'answer_card_incomplete'],
+    [/答题卡漏题，回跳补答/, 'answer_card_repair_started'],
+    [/答题卡中找不到漏题题号/, 'answer_card_repair_target_missing'],
+    [/答题卡跳转后未到达目标题/, 'answer_card_jump_target_missing'],
+    [/答题卡审计超过总时限/, 'answer_card_audit_timeout'],
     [/交卷按钮已处于禁用/, 'finish_button_disabled'],
     [/最终交卷响应未通过 HTTP/, 'finish_response_rejected'],
     [/交卷请求未确认/, 'finish_request_missing'],
@@ -789,6 +870,23 @@ export function safeDiagnosticCode(value) {
   return sanitizeDiagnosticText(raw)
 }
 
+export function diagnosticShape(value) {
+  const raw = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!raw) return 'empty'
+  if (/答题卡.*(?:关闭|弹层)/.test(raw)) return 'answer_card_close'
+  if (/答题卡.*(?:结构|连续|自动恢复|完整加载|等待)/.test(raw)) return 'answer_card_structure'
+  if (/答题卡.*(?:入口|按钮)/.test(raw)) return 'answer_card_contract'
+  if (/答题页.*(?:空白|加载|骨架|恢复)/.test(raw)) return 'answer_page_blank'
+  if (/当前答题页|题组读取|题目.*读取/.test(raw)) return 'question_read'
+  if (/救?人工|需人工|异常中断|已保留/.test(raw)) return 'answer_interrupted'
+  if (/交卷|Finish|finish/i.test(raw)) return 'submit'
+  if (/空白|加载|骨架|skeleton/i.test(raw)) return 'blank'
+  if (/页面|工作区|作业区|作业卡|课程/.test(raw)) return 'page_contract'
+  if (/worktype|stageexam|onlinework|题型/i.test(raw)) return 'work_type'
+  if (/保存|提交|submit/i.test(raw)) return 'save'
+  return 'operation'
+}
+
 function sanitizeDiagnosticText(value) {
   const raw = String(value || '')
   if (!raw) return 'operation_failed'
@@ -829,8 +927,16 @@ function safeStateToken(value) {
     ['作答中', 'answering'],
     ['已完成', 'completed'],
     ['完成', 'completed'],
-    ['检测失败', 'detection_failed'],
+    ['本轮可做作业已完成', 'completed'],
+    ['无作业', 'empty'],
+    ['尚无作业', 'empty'],
+    ['暂无作业', 'empty'],
+    ['尚未完成', 'incomplete'],
+    ['暂不可完成', 'unavailable'],
+    ['分数待确认', 'score_unavailable'],
+    ['待回写', 'pending_writeback'],
     ['有失败待处理', 'failed'],
+    ['检测失败', 'detection_failed'],
   ])
   if (mapped.has(raw)) return mapped.get(raw)
   return /^[a-z][a-z0-9_]{0,39}$/.test(raw) ? raw : 'unknown'
@@ -838,6 +944,25 @@ function safeStateToken(value) {
 
 function incrementCount(target, key) {
   target[key] = (target[key] || 0) + 1
+}
+
+function sanitizedCourseFailureReason(value, student) {
+  let text = String(value || '')
+    .replace(/https?:\/\/\S+/gi, '[地址已隐藏]')
+    .replace(/\b\d{6,}\b/g, '[编号已隐藏]')
+  const courseNames = (Array.isArray(student?.courses) ? student.courses : [])
+    .map((course) => String(course?.name || '').trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+  const homeworkNames = (Array.isArray(student?.courses) ? student.courses : [])
+    .flatMap((course) => Array.isArray(course?.groups) ? course.groups : [])
+    .flatMap((group) => Array.isArray(group?.rows) ? group.rows : [])
+    .map((row) => String(row?.name || '').trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+  for (const name of courseNames) text = text.split(name).join('[课程]')
+  for (const name of homeworkNames) text = text.split(name).join('[作业]')
+  return text.replace(/\s+/g, ' ').trim().slice(0, 240)
 }
 
 export function safeQuestionKindCounts(value) {
@@ -902,17 +1027,52 @@ export function englishHomeworkSlotFailures(accounts, summaries) {
 }
 
 export function answerCardShapeDiagnostic(rawLogs) {
+  let shape = null
+  let observedSignature = ''
+  let expectedSignature = ''
   for (const raw of Array.isArray(rawLogs) ? rawLogs : []) {
-    const matched = String(raw || '').match(
-      /答题卡结构不足：已加载 (\d+)\/(\d+)，已答 (\d+)，识别题型 (\d+)/,
+    const observed = String(raw || '').match(/答题卡观测签名：([^；]+)/)
+    const expected = String(raw || '').match(/答题卡期望签名：([^；]+)/)
+    if (observed) observedSignature = observed[1]
+    if (expected) expectedSignature = expected[1]
+    const expanded = String(raw || '').match(
+      /答题卡结构不足：已加载 (\d+)\/(\d+)，已答 (\d+)，识别题型 (\d+)，结构化组 (\d+)\/(\d+)，匹配行 (\d+)\/(\d+)，保存组 (\d+)\/(\d+)，父题组 (\d+)，未映射行 (\d+)/,
     )
-    if (matched) {
-      return {
-        loaded: Number(matched[1]),
-        expected: Number(matched[2]),
-        answered: Number(matched[3]),
-        recognizedSections: Number(matched[4]),
+    if (expanded && !shape) {
+      shape = {
+        loaded: Number(expanded[1]),
+        expected: Number(expanded[2]),
+        answered: Number(expanded[3]),
+        recognizedSections: Number(expanded[4]),
+        matchedGroups: Number(expanded[5]),
+        expectedGroups: Number(expanded[6]),
+        matchedRows: Number(expanded[7]),
+        visibleRows: Number(expanded[8]),
+        savedGroups: Number(expanded[9]),
+        expectedSavedGroups: Number(expanded[10]),
+        parentOnlyGroups: Number(expanded[11]),
+        unmatchedVisibleRows: Number(expanded[12]),
       }
+    }
+    if (!shape) {
+      const matched = String(raw || '').match(
+        /答题卡结构不足：已加载 (\d+)\/(\d+)，已答 (\d+)，识别题型 (\d+)/,
+      )
+      if (matched) {
+        shape = {
+          loaded: Number(matched[1]),
+          expected: Number(matched[2]),
+          answered: Number(matched[3]),
+          recognizedSections: Number(matched[4]),
+        }
+      }
+    }
+  }
+  if (shape) {
+    return {
+      ...shape,
+      ...(observedSignature ? { observedSignature } : {}),
+      ...(expectedSignature ? { expectedSignature } : {}),
     }
   }
   return null
@@ -926,6 +1086,11 @@ export function debugDiagnosticsForStudent(alias, student) {
   ].filter(Boolean)
   const courseStateCounts = {}
   const homeworkStateCounts = {}
+  const courseFailureReasons = (Array.isArray(student?.courseLogs) ? student.courseLogs : [])
+    .filter((entry) => entry?.level === 'error')
+    .map((entry) => sanitizedCourseFailureReason(entry?.reason, student))
+    .filter(Boolean)
+    .slice(-10)
   for (const course of Array.isArray(student?.courses) ? student.courses : []) {
     incrementCount(courseStateCounts, safeStateToken(course?.status))
     for (const group of Array.isArray(course?.groups) ? course.groups : []) {
@@ -937,10 +1102,13 @@ export function debugDiagnosticsForStudent(alias, student) {
   return {
     ...base,
     lastActionCode: safeDiagnosticCode(student?.action),
+    lastActionShape: diagnosticShape(student?.action),
     logCodes: rawLogs.slice(-30).map(safeDiagnosticCode),
+    logShapes: rawLogs.slice(-30).map(diagnosticShape),
     answerCardShape: answerCardShapeDiagnostic(rawLogs),
     courseStateCounts,
     homeworkStateCounts,
+    courseFailureReasons,
     bankCount: safeCount(student?.bankCount),
     aiCount: safeCount(student?.aiCount),
     questionKindCounts: safeQuestionKindCounts(student?.questionKindCounts),
@@ -976,7 +1144,7 @@ export function diagnosticsForStudent(alias, student) {
     configLocked: Boolean(student?.configLocked),
     queued: Boolean(student?.queued),
     terminalCode: terminalCodeFor(student),
-    lastAction: sanitizeDiagnosticText(student?.action),
+    lastAction: safeDiagnosticCode(student?.action),
     lastLogs: lastLogs.length ? lastLogs : ['operation_failed'],
   }
 }
@@ -1018,9 +1186,11 @@ export function noqrScoreHistoryReached(history, aliases, targetRound) {
 
 export function summarizeStudentForLog(alias, student) {
   const homeworks = homeworkRows(student)
-  const scores = homeworks.map((row) => safeScore(row?.score)).filter((score) => score !== null)
   const attemptedScored = homeworks.filter((row) =>
     safeCount(row?.attempt) > 0 && safeScore(row?.score) !== null)
+  const scores = attemptedScored.map((row) => safeScore(row.score)).filter((score) => score !== null)
+  const skippedFullScoreCount = homeworks.filter((row) =>
+    row?.status === 'skip_full_score' && safeScore(row?.score) === 100).length
   const timed = attemptedScored.filter((row) =>
     safeCount(row?.noqrAnsweredQuestionCount) > 0 &&
     safeCount(row?.noqrAverageQuestionDurationMs) > 0 &&
@@ -1042,6 +1212,9 @@ export function summarizeStudentForLog(alias, student) {
     configLocked: Boolean(student?.configLocked),
     queued: Boolean(student?.queued),
     awaitingCourseSelection: Boolean(student?.awaitingCourseSelection),
+    browserWindowVisible: typeof student?.browserWindowVisible === 'boolean'
+      ? student.browserWindowVisible
+      : null,
     courseCount: Array.isArray(student?.courses) ? student.courses.length : 0,
     homeworkCount: homeworks.length,
     terminalHomeworkCount: homeworks.filter((row) => row?.status === 'done_100' || row?.status === 'not_full_next_time').length,
@@ -1058,6 +1231,7 @@ export function summarizeStudentForLog(alias, student) {
     repairLogCount: (Array.isArray(student?.logs) ? student.logs : [])
       .filter((line) => /答题卡漏题，回跳补答/.test(String(line || ''))).length,
     scoredHomeworkCount: scores.length,
+    skippedFullScoreCount,
     timedHomeworkCount: timed.length,
     timingMissingHomeworkCount: attemptedScored.length - timed.length,
     fullScoreCount: scores.filter((score) => score === 100).length,
@@ -1085,6 +1259,8 @@ export function preflightSummary(config, credentials) {
     aliases: config.accounts.map((account) => account.alias),
     accountKinds: config.accounts.map((account) => account.kind),
     accountCount: config.accounts.length,
+    normalAccountCount: credentials.normal.length,
+    englishAccountCount: credentials.english.length,
     aiKeyLoaded: selected.aiKeyLoaded,
     aiKeySkPrefix: selected.aiKeySkPrefix,
     displayMode: config.displayMode,
@@ -1092,6 +1268,7 @@ export function preflightSummary(config, credentials) {
     courseMatchSet: Boolean(config.courseMatch),
     testPhase: config.phase,
     answerRoundLimit: config.answerRoundLimit,
+    forceRetry: config.forceRetry,
     stopAfterScoreRound: config.stopAfterScoreRound,
     logEnabled: config.logEnabled,
     browserStarted: false,
@@ -1725,12 +1902,12 @@ async function launchIsolatedProduct(config, credentials, bank) {
   try {
     app = await electron.launch({
       args: ['.'],
-      env: buildProductChildEnv(process.env, profileDir),
+      env: buildProductChildEnv(process.env, profileDir, { forceRetry: config.forceRetry }),
     })
     const page = await app.firstWindow()
     await page.waitForLoadState('domcontentloaded')
     await page.waitForFunction(() => Boolean(window.kaida), null, { timeout: 30_000 })
-    const product = { app, page, profileDir, ids: {} }
+    const product = { app, page, profileDir, ids: {}, displayEvidence: new Map() }
     await installPassiveNetworkMonitor(app)
     product.ids = await configureIsolatedProduct(product, config, credentials, bank)
     return product
@@ -1761,6 +1938,7 @@ export function inspectConcurrencySnapshot(snapshot, aliases, accountParallel) {
   const releasedCount = present.filter((student) => student.slot === 'released').length
   return {
     limit,
+    browserCount: Math.max(0, Number(snapshot?.machine?.browsers) || 0),
     presentCount: present.length,
     heldCount,
     occupiedCount,
@@ -1825,13 +2003,20 @@ async function pollProduct(product, config, check, opts = {}) {
     const snapshot = await readSnapshot(product)
     for (const account of config.accounts) {
       const student = studentForAlias(snapshot, account.alias)
+      recordDisplayEvidence(product.displayEvidence, account.alias, student)
       const summary = summarizeStudentForLog(account.alias, student)
       const key = JSON.stringify(summary)
       if (lastProgress.get(account.alias) !== key) {
         lastProgress.set(account.alias, key)
-        logEvent({ event: 'product_state', ...summary })
+        logEvent({
+          event: 'product_state',
+          ...summary,
+          ...(includeDebug
+            ? { debug: debugDiagnosticsForStudent(account.alias, student) }
+            : {}),
+        })
       }
-      if (includeDebug && student?.phase === 'unsupported') {
+      if (includeDebug && ['unsupported', 'needs_user'].includes(student?.phase)) {
         const debug = debugDiagnosticsForStudent(account.alias, student)
         const debugKey = JSON.stringify(debug.logCodes)
         if (lastDebugIsolation.get(account.alias) !== debugKey) {
@@ -1851,6 +2036,7 @@ async function pollProduct(product, config, check, opts = {}) {
         terminalEnded,
         terminalNeedsAttention,
         allowTerminal: opts.allowTerminal === true,
+        allowExplicitStop: opts.allowExplicitStop === true,
         targetReached: Boolean(result),
       })) {
         const diagnostics = snapshotDiagnostics(config, snapshot)
@@ -1895,31 +2081,51 @@ async function waitForSelectionGate(product, config) {
 }
 
 async function selectFirstCourses(product, config) {
-  const snapshot = await readSnapshot(product)
+  const selectionDeadline = Date.now() + 120_000
+  let snapshot = await readSnapshot(product)
+  let plans = []
+  for (;;) {
+    plans = config.accounts.map((account) => {
+      const student = studentForAlias(snapshot, account.alias)
+      const courses = student?.courses || []
+      const candidates = courses
+        .filter((row) => noqrTestCourseTodoCount(row) > 0)
+        .filter((row) => !config.courseMatch || row.name.includes(config.courseMatch))
+        .sort((left, right) => config.courseStrategy === 'max-todo'
+          ? noqrTestCourseTodoCount(right) - noqrTestCourseTodoCount(left) ||
+            noqrTestCourseRowCount(right) - noqrTestCourseRowCount(left)
+          : noqrTestCourseTodoCount(left) - noqrTestCourseTodoCount(right) ||
+            noqrTestCourseRowCount(left) - noqrTestCourseRowCount(right))
+      return {
+        account,
+        student,
+        courses,
+        candidates,
+        course: chooseNoqrTestCourse(courses, config),
+      }
+    })
+    if (plans.every((plan) => plan.course) || Date.now() >= selectionDeadline) break
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500))
+    snapshot = await readSnapshot(product)
+  }
   const targets = []
-  for (const account of config.accounts) {
-    const student = studentForAlias(snapshot, account.alias)
-    const courses = student?.courses || []
-    const candidates = courses
-      .filter((row) => noqrTestCourseTodoCount(row) > 0)
-      .filter((row) => !config.courseMatch || row.name.includes(config.courseMatch))
-      .sort((left, right) => config.courseStrategy === 'max-todo'
-        ? noqrTestCourseTodoCount(right) - noqrTestCourseTodoCount(left) ||
-          noqrTestCourseRowCount(right) - noqrTestCourseRowCount(left)
-        : noqrTestCourseTodoCount(left) - noqrTestCourseTodoCount(right) ||
-          noqrTestCourseRowCount(left) - noqrTestCourseRowCount(right))
+  for (const { account, student, courses, candidates, course } of plans) {
     logEvent({
       phase: 'course_candidates',
       alias: account.alias,
       strategy: config.courseStrategy,
       courseMatchSet: Boolean(config.courseMatch),
+      courses: courses.map((row) => ({
+        name: String(row?.name || '').slice(0, 80),
+        todoCount: noqrTestCourseTodoCount(row),
+        rowCount: noqrTestCourseRowCount(row),
+      })),
       candidates: candidates.map((row, index) => ({
         index: index + 1,
         todoCount: noqrTestCourseTodoCount(row),
         rowCount: noqrTestCourseRowCount(row),
       })),
     })
-    const course = chooseNoqrTestCourse(courses, config)
     if (config.courseMatch && !course) {
       fail('course_match_not_found', 'No course matched the requested test-only selector')
     }
@@ -1975,7 +2181,7 @@ async function stopAndWaitReleased(product, config) {
     (snapshot) =>
       snapshot.running === false &&
       config.accounts.every((account) => studentForAlias(snapshot, account.alias)?.slot === 'released'),
-    { allowReleased: true, allowTerminal: true },
+    { allowReleased: true, allowTerminal: true, allowExplicitStop: true },
   )
 }
 
@@ -1999,6 +2205,45 @@ async function assertNoqrTimingUi(product, config) {
   return true
 }
 
+export function normalHomeworkSlotFailure(student) {
+  const homeworks = Array.isArray(student?.homeworkQuestionKindSlotCounts)
+    ? student.homeworkQuestionKindSlotCounts
+    : []
+  if (homeworks.some((item) => {
+    const counts = safeQuestionKindCounts(item?.questionKindSlotCounts)
+    return REQUIRED_NORMAL_QUESTION_KINDS.every((kind) => safeCount(counts[kind]) > 0)
+  })) return null
+  return {
+    code: 'normal_question_slots_missing',
+    missingKinds: REQUIRED_NORMAL_QUESTION_KINDS.filter((kind) =>
+      !homeworks.some((item) => safeCount(item?.questionKindSlotCounts?.[kind]) > 0)),
+    evidence: homeworks.map((item) => ({
+      index: safeCount(item?.index),
+      questionKindSlotCounts: safeQuestionKindCounts(item?.questionKindSlotCounts),
+    })),
+  }
+}
+
+export function normalHomeworkSlotFailures(accounts, summaries, requireNormalKinds = true) {
+  return (Array.isArray(accounts) ? accounts : []).flatMap((account, index) => {
+    if (account?.kind !== 'normal') return []
+    const summary = summaries?.[index]
+    if (requireNormalKinds === false) {
+      const hasNormalSlot = REQUIRED_NORMAL_QUESTION_KINDS.some((kind) =>
+        safeCount(summary?.questionKindSlotCounts?.[kind]) > 0)
+      if (hasNormalSlot) return []
+      return [{
+        alias: account.alias,
+        code: 'normal_question_slots_missing',
+        missingKinds: [...REQUIRED_NORMAL_QUESTION_KINDS],
+        evidence: [],
+      }]
+    }
+    const failure = normalHomeworkSlotFailure(summary)
+    return failure ? [{ alias: account.alias, ...failure }] : []
+  })
+}
+
 function assertEnglishHomeworkSlotEvidence(config, summaries) {
   const failures = englishHomeworkSlotFailures(config.accounts, summaries)
   if (!failures.length) return
@@ -2006,6 +2251,23 @@ function assertEnglishHomeworkSlotEvidence(config, summaries) {
   fail(
     code,
     'English score phase did not prove the minimum saved question slots for every required kind',
+    details,
+  )
+}
+
+function assertNormalHomeworkSlotEvidence(config, summaries) {
+  const failures = normalHomeworkSlotFailures(
+    config.accounts,
+    summaries,
+    config.requireNormalKinds,
+  )
+  if (!failures.length) return
+  const { code, ...details } = failures[0]
+  fail(
+    code,
+    config.requireNormalKinds === false
+      ? 'Account sweep did not save any normal question slots'
+      : 'Normal score phase did not prove single, multiple, and judge saved question slots',
     details,
   )
 }
@@ -2061,13 +2323,18 @@ async function runConfiguredPhase(product, config) {
   }
 
   if (config.phase === 'concurrency') {
+    if (config.accountParallel !== 2) {
+      fail('concurrency_parallel_not_two', 'Concurrency acceptance requires accountParallel=2')
+    }
     const aliases = config.accounts.map((account) => account.alias)
     let queuedObserved = false
     let maxHeld = 0
+    let maxBrowsers = 0
     await pollProduct(product, config, (snapshot) => {
       const state = inspectConcurrencySnapshot(snapshot, aliases, config.accountParallel)
       queuedObserved ||= state.queueObserved
       maxHeld = Math.max(maxHeld, state.heldCount)
+      maxBrowsers = Math.max(maxBrowsers, state.browserCount)
       if (!state.withinLimit) {
         fail(
           'account_parallel_exceeded',
@@ -2082,11 +2349,22 @@ async function runConfiguredPhase(product, config) {
     if (!finalState.allReleased) {
       fail('concurrency_stop_not_released', 'Concurrency phase did not release every account slot after stop')
     }
+    if (!queuedObserved || maxHeld !== 2) {
+      fail('concurrency_queue_not_observed', 'Concurrency phase did not observe two occupied and one queued account')
+    }
+    if (maxBrowsers !== 2) {
+      fail('concurrency_browser_count_mismatch', 'Concurrency phase did not hold exactly two live browsers')
+    }
+    if (finalState.browserCount !== 0) {
+      fail('concurrency_browsers_not_released', 'Concurrency phase left browsers alive after stop')
+    }
     return {
       concurrentAccounts: config.accounts.length,
       accountParallel: config.accountParallel,
       queuedObserved,
       maxHeld,
+      maxBrowsers,
+      finalBrowsers: finalState.browserCount,
       allReleased: finalState.allReleased,
     }
   }
@@ -2148,6 +2426,7 @@ async function runConfiguredPhase(product, config) {
     const summaries = config.accounts.map((account) =>
       summarizeStudentForLog(account.alias, studentForAlias(stopped.snapshot, account.alias)))
     assertEnglishHomeworkSlotEvidence(config, summaries)
+    assertNormalHomeworkSlotEvidence(config, summaries)
     const history = [...scoreRoundHistory.values()]
     const retryObserved = config.accounts.every((account) => {
       const rounds = history.filter((item) => item.alias === account.alias)
@@ -2176,7 +2455,7 @@ async function runConfiguredPhase(product, config) {
   const finished = await pollProduct(product, config, (snapshot) =>
     snapshot.running === false &&
     config.accounts.every((account) => studentForAlias(snapshot, account.alias)?.slot === 'released'),
-  { allowReleased: true })
+  { allowReleased: true, allowTerminal: true })
   const summaries = config.accounts.map((account) =>
     summarizeStudentForLog(account.alias, studentForAlias(finished.snapshot, account.alias)))
   if (!summaries.every((summary) => summary.scoredHomeworkCount > 0)) {
@@ -2196,6 +2475,7 @@ async function runConfiguredPhase(product, config) {
     }
   }
   assertEnglishHomeworkSlotEvidence(config, summaries)
+  assertNormalHomeworkSlotEvidence(config, summaries)
   const timingUiObserved = await assertNoqrTimingUi(product, config)
   return { scoreObserved: true, timingUiObserved, summaries }
 }
@@ -2227,13 +2507,34 @@ async function runHarness(config, credentials) {
       courseMatchSet: Boolean(config.courseMatch),
       testPhase: config.phase,
       answerRoundLimit: config.answerRoundLimit,
+      forceRetry: config.forceRetry,
       stopAfterScoreRound: config.stopAfterScoreRound,
       logEnabled: config.logEnabled,
       encryptedConfig: true,
       bankMode: bank.hasUpstream ? 'get_only_installed_proxy' : 'get_only_empty',
     })
 
-    const outcome = await runConfiguredPhase(product, config)
+    let outcome
+    try {
+      outcome = await runConfiguredPhase(product, config)
+    } catch (error) {
+      const failureNetwork = await readPassiveNetworkSummary(product.app).catch(() => null)
+      if (failureNetwork) {
+        logEvent({
+          phase: 'failure_network',
+          aliases: config.accounts.map((account) => account.alias),
+          testPhase: config.phase,
+          answerPageRequests: failureNetwork.answerPageRequests,
+          mutationRequests: failureNetwork.mutationRequests,
+          mutationAccepted: failureNetwork.mutationAccepted,
+          mutationFailures: failureNetwork.mutationFailures,
+          mutationUncertain: failureNetwork.mutationUncertain,
+          mutationRequestLedger: failureNetwork.mutationRequestLedger,
+          mutationMaxDurationMs: failureNetwork.mutationMaxDurationMs,
+        })
+      }
+      throw error
+    }
     const bankStats = bank.stats()
     await new Promise((resolveWait) => setTimeout(resolveWait, 250))
     const network = await readPassiveNetworkSummary(product.app)
@@ -2250,11 +2551,58 @@ async function runHarness(config, credentials) {
     if (network.unsupportedAnswerWorkTypeCount > 0) {
       fail('unsupported_work_type_observed', 'Answer page used a workType outside the confirmed whitelist')
     }
+    const loginReuseFailure = noqrLoginReuseFailure(network, config.accounts.length)
+    if (loginReuseFailure) {
+      fail(
+        loginReuseFailure,
+        'The same product run submitted login credentials more times than accounts',
+        {
+          accountCount: config.accounts.length,
+          loginSubmissionRequests: network.loginSubmissionRequests,
+        },
+      )
+    }
     if ((config.phase === 'answer' || config.phase === 'score') && network.answerPageRequests === 0) {
       fail('answer_page_not_observed', 'Answer phase did not reach a real answer page')
     }
     if ((config.phase === 'answer' || config.phase === 'score') && bankStats.GET === 0) {
       fail('bank_get_missing', 'Answer phase did not issue the required read-only bank GET')
+    }
+    if (config.phase === 'concurrency') {
+      if (
+        config.accountParallel !== 2 ||
+        outcome.maxBrowsers !== 2 ||
+        network.browserContexts < 2 ||
+        network.browserContexts > config.accounts.length
+      ) {
+        fail('concurrency_browser_evidence_mismatch', 'Concurrency phase browser evidence does not match accountParallel=2', {
+          accountParallel: config.accountParallel,
+          maxBrowsers: outcome.maxBrowsers,
+          browserContexts: network.browserContexts,
+          accountCount: config.accounts.length,
+        })
+      }
+      if (outcome.finalBrowsers !== 0) {
+        fail('concurrency_browser_release_missing', 'Concurrency phase did not release both browser contexts')
+      }
+    }
+    if (config.phase !== 'login') {
+      const expectedVisible = config.displayMode === 'visual'
+      const visibilityObserved = displayEvidenceCount(
+        product.displayEvidence,
+        config.accounts.map((account) => account.alias),
+        expectedVisible,
+      )
+      const requiredVisibilityCount = config.phase === 'concurrency'
+        ? config.accountParallel
+        : config.accounts.length
+      if (visibilityObserved < requiredVisibilityCount) {
+        fail('display_mode_not_observed', 'Product browser visibility did not match the configured display mode', {
+          mode: config.displayMode,
+          expected: requiredVisibilityCount,
+          observed: visibilityObserved,
+        })
+      }
     }
     if (saveRequestLedger.length !== saveRequests) {
       fail('save_request_ledger_incomplete', 'Save request counts and request-level ledger disagree', {
@@ -2317,12 +2665,23 @@ async function runHarness(config, credentials) {
           reasons[scoreNetworkFailure] || 'Score phase mutation evidence failed its gate',
         )
       }
-      const pacingViolations = noqrPacingViolationCount(saveRequestLedger, 2_000)
+      const pacingViolations = noqrPacingViolationCount(saveRequestLedger, 1_500)
       if (pacingViolations > 0) {
+        const pacingEvidence = saveRequestLedger
+          .filter((entry) => entry?.outcome === 'accepted' && entry?.questionFingerprint)
+          .map((entry) => ({
+            requestId: entry.requestId,
+            kind: entry.kind,
+            contextSequence: entry.contextSequence,
+            pageSequence: entry.pageSequence,
+            attemptFingerprint: entry.attemptFingerprint,
+            questionFingerprint: entry.questionFingerprint,
+            monitorOffsetMs: entry.monitorOffsetMs,
+          }))
         fail(
           'pacing_interval_too_short',
           'Successful distinct questions advanced faster than the normal pacing floor',
-          { pacingViolations },
+          { pacingViolations, pacingEvidence },
         )
       }
     }
@@ -2330,9 +2689,14 @@ async function runHarness(config, credentials) {
     logEvent({
       phase: 'complete',
       testPhase: config.phase,
+      layer: config.displayMode === 'visual' ? 'E5' : 'E4',
+      fixtureRouting: false,
+      productEntry: 'primary_action',
+      schoolHost: 'coursework.shou.org.cn',
       aliases: config.accounts.map((account) => account.alias),
       elapsedMs: Date.now() - startedAt,
       answerRoundLimit: config.answerRoundLimit,
+      forceRetry: config.forceRetry,
       stopAfterScoreRound: config.stopAfterScoreRound,
       bank: bankStats,
       answerPageRequests: network.answerPageRequests,
@@ -2352,7 +2716,7 @@ async function runHarness(config, credentials) {
       mutationUniqueQuestionRequests: network.mutationUniqueQuestionRequests,
       mutationRequestLedger: network.mutationRequestLedger,
       saveRequestAudit,
-      pacingViolationCount: noqrPacingViolationCount(saveRequestLedger, 2_000),
+      pacingViolationCount: noqrPacingViolationCount(saveRequestLedger, 1_500),
       mutationMaxDurationMs: network.mutationMaxDurationMs,
       encryptedConfig: true,
       logEnabled: config.logEnabled,

@@ -6,6 +6,7 @@ import {
   type LiveCourse,
   type LiveHomeworkGroup,
 } from '../core/live-view.ts'
+import { maskAccount } from '../core/excel.ts'
 import { sanitizeRuntimeLogText, type RuntimeLogLevel } from '../core/runtime-log.ts'
 import type { NoqrPhase } from './types.ts'
 
@@ -125,7 +126,7 @@ export function createNoqrStudentView(account: LocalAccount): NoqrStudentView {
   return {
     local_id: account.local_id,
     name: account.name,
-    studentNo: account.username,
+    studentNo: maskAccount(account.username),
     major: account.major || '',
     campus: account.campus || '',
     displayMode: account.display_mode,

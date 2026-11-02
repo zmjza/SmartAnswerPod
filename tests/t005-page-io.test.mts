@@ -15,6 +15,7 @@ import {
   openNoqrCourseWork,
   readNoqrCourseMenu,
   switchNoqrCourse,
+  waitForNoqrCourseWorkReady,
 } from '../electron/noqr/course.ts'
 import {
   evaluateNoqrHomeworkRule,
@@ -68,7 +69,7 @@ async function withTimeout<T>(task: Promise<T>, message: string, ms = 8_000): Pr
 }
 
 async function installFixtureRoutes(context: BrowserContext, options: {
-  loginMode?: 'success' | 'slow' | 'failure' | 'blocked' | 'blank' | 'delayed-redirect' | 'unrelated-4xx' | 'no-form-failure'
+  loginMode?: 'success' | 'slow' | 'failure' | 'blocked' | 'blank' | 'delayed-redirect' | 'unrelated-4xx' | 'no-form-failure' | 'session-storage' | 'session-storage-no-redirect'
   loginDocumentDelayMs?: number
   courseMode?: 'ready' | 'empty' | 'skeleton-once'
 } = {}) {
@@ -86,7 +87,11 @@ async function installFixtureRoutes(context: BrowserContext, options: {
     if (pathname === '/login/index.html') {
       if (options.loginDocumentDelayMs) await new Promise((resolve) => setTimeout(resolve, options.loginDocumentDelayMs))
       if (signedIn) {
-        await route.fulfill({ status: 302, headers: { location: '/index.html' } })
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: '<!doctype html><html><body><script>location.replace("/index.html")</script></body></html>',
+        })
         return
       }
       if (optionsWithDefaults.loginMode === 'blank') {
@@ -106,6 +111,10 @@ async function installFixtureRoutes(context: BrowserContext, options: {
                 ? 'login-delayed.html'
                 : optionsWithDefaults.loginMode === 'unrelated-4xx'
                   ? 'login-unrelated-4xx.html'
+                : optionsWithDefaults.loginMode === 'session-storage'
+                  ? 'login-session.html'
+                  : optionsWithDefaults.loginMode === 'session-storage-no-redirect'
+                    ? 'login-session-no-redirect.html'
                   : 'login.html'),
       })
       return
@@ -191,6 +200,81 @@ test('T005-P01 已有会话从登录入口复用首页，不重复提交账号�
   }
 })
 
+test('T005-P18 新标签页复用已登录 sessionStorage，不重复提交账号密码', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  await installFixtureRoutes(context, { loginMode: 'session-storage' })
+  const first = await newPage(context)
+  let loginSubmissions = 0
+  let loginDocuments = 0
+  context.on('request', (request) => {
+    if (request.url().includes('/fixture-login')) loginSubmissions++
+    if (new URL(request.url()).pathname === '/login/index.html') loginDocuments++
+  })
+  try {
+    const firstResult = await withTimeout(
+      ensureNoqrSession(first, { username: 'fixture-user', password: 'fixture-pass' }),
+      '首次 sessionStorage 登录没有完成',
+    )
+    assert.equal(firstResult.reused, false)
+    assert.equal(loginSubmissions, 1)
+    assert.equal(loginDocuments, 1)
+    assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture_session_token')), '1')
+
+    const second = await newPage(context)
+    const secondResult = await withTimeout(
+      ensureNoqrSession(second, { username: 'fixture-user', password: 'fixture-pass' }),
+      '新标签页复用 sessionStorage 没有完成',
+    )
+    assert.equal(secondResult.reused, true)
+    assert.equal(loginSubmissions, 1)
+    assert.equal(loginDocuments, 2)
+    assert.equal(await second.evaluate(() => sessionStorage.getItem('fixture_session_token')), '1')
+    assert.equal(await classifyNoqrPage(second), 'home')
+  } finally {
+    await context.close()
+    await browser.close()
+  }
+})
+
+test('T005-P18b 登录页不自动跳转时从唯一登录入口受控续接一次', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  await installFixtureRoutes(context, { loginMode: 'session-storage-no-redirect' })
+  const first = await newPage(context)
+  let loginSubmissions = 0
+  let loginDocuments = 0
+  let homeDocuments = 0
+  context.on('request', (request) => {
+    if (request.url().includes('/fixture-login')) loginSubmissions++
+    const path = new URL(request.url()).pathname
+    if (path === '/login/index.html') loginDocuments++
+    if (path === '/index.html') homeDocuments++
+  })
+  try {
+    const firstResult = await withTimeout(
+      ensureNoqrSession(first, { username: 'fixture-user', password: 'fixture-pass' }),
+      '首次 sessionStorage 登录没有完成',
+    )
+    assert.equal(firstResult.reused, false)
+    assert.equal(loginSubmissions, 1)
+
+    const second = await newPage(context)
+    const secondResult = await withTimeout(
+      ensureNoqrSession(second, { username: 'fixture-user', password: 'fixture-pass' }),
+      '登录页不自动跳转时会话受控续接没有完成',
+    )
+    assert.equal(secondResult.reused, true)
+    assert.equal(loginSubmissions, 1)
+    assert.equal(loginDocuments, 2)
+    assert.equal(homeDocuments, 2)
+    assert.equal(await classifyNoqrPage(second), 'home')
+  } finally {
+    await context.close()
+    await browser.close()
+  }
+})
+
 test('T005-P02 慢登录不按固定 5 秒失败，真实完成后才判成功', async () => {
   const browser = await launchBrowser()
   const context = await browser.newContext()
@@ -230,7 +314,11 @@ test('T005-P04 登录页无活动空白按预算刷新，认证阻塞页立即�
   const blankPage = await newPage(blankContext)
   try {
     await assert.rejects(
-      withTimeout(ensureNoqrSession(blankPage, { username: 'fixture-user', password: 'fixture-pass' }), '空白登录页没有被安全隔离'),
+      withTimeout(ensureNoqrSession(blankPage, {
+        username: 'fixture-user',
+        password: 'fixture-pass',
+        blankGraceMs: 30,
+      }), '空白登录页没有被安全隔离'),
       (error: unknown) => error instanceof NoqrSessionError && error.code === 'blank_page',
     )
   } finally {
@@ -383,7 +471,10 @@ test('T005-P05b 课程切换骨架刷新后会重新定位并点击原目标课�
     await ensureNoqrSession(page, { username: 'fixture-user', password: 'fixture-pass' })
     await withTimeout(openNoqrCourseWork(page), '形考作业入口没有打开')
     const courses = await withTimeout(readNoqrCourseMenu(page), '课程菜单没有读取')
-    await withTimeout(switchNoqrCourse(page, courses[0]!, { refreshBudget: 2 }), '刷新后没有重新点击目标课程')
+    await withTimeout(switchNoqrCourse(page, courses[0]!, {
+      refreshBudget: 2,
+      blankGraceMs: 30,
+    }), '刷新后没有重新点击目标课程')
     assert.equal((await page.locator('.van-nav-bar__title').innerText()).trim(), '课程甲')
     assert.equal(await page.evaluate(() => localStorage.getItem('t005-switch-once')), '1')
   } finally {
@@ -399,8 +490,8 @@ test('T005-P06 非答题页骨架等待、空白刷新后读取作业卡，不�
   const page = await newPage(context)
   try {
     await ensureNoqrSession(page, { username: 'fixture-user', password: 'fixture-pass' })
-    await withTimeout(openNoqrCourseWork(page), '形考作业入口没有打开')
-    const homeworks = await withTimeout(readNoqrHomeworks(page), '作业卡没有恢复读取')
+    await withTimeout(openNoqrCourseWork(page, { blankGraceMs: 30 }), '形考作业入口没有打开')
+    const homeworks = await withTimeout(readNoqrHomeworks(page, { blankGraceMs: 30 }), '作业卡没有恢复读取')
     assert.equal(homeworks.length, 2)
     assert.equal(homeworks[0]?.name, '记分作业一')
     assert.equal(homeworks[0]?.workType, 'onlineWork')
@@ -410,6 +501,38 @@ test('T005-P06 非答题页骨架等待、空白刷新后读取作业卡，不�
     assert.equal(new URL(page.url()).pathname, '/course_work/index.html')
   } finally {
     await context.close()
+    await browser.close()
+  }
+})
+
+test('T005-P06b 形考作业页连续刷新仍无作业时按当前课程无作业收口', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let courseLoads = 0
+  try {
+    await page.route(`${ORIGIN}/course_work/index.html*`, async (route) => {
+      courseLoads++
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: `<div class="van-nav-bar">
+          <div class="van-nav-bar__title">空课程</div>
+          <div class="van-nav-bar__right"><div class="van-popover__wrapper">菜单</div></div>
+        </div>`,
+      })
+    })
+    await page.goto(pageUrl('/course_work/index.html?courseId=course-empty'), {
+      waitUntil: 'domcontentloaded',
+    })
+    const homeworks = await withTimeout(
+      readNoqrHomeworks(page, { blankGraceMs: 30, refreshBudget: 1 }),
+      '连续空白没有按无作业收口',
+      3_000,
+    )
+    assert.deepEqual(homeworks, [])
+    assert.equal(courseLoads, 2)
+  } finally {
+    await page.close()
     await browser.close()
   }
 })
@@ -559,6 +682,7 @@ test('T005-P15 标题型登录空白页按刷新预算收口', async () => {
         ensureNoqrSession(page, {
           username: 'fixture-user',
           password: 'fixture-password',
+          blankGraceMs: 30,
         }),
         '标题型登录空白页没有按预算收口',
         4_000,
@@ -585,7 +709,7 @@ test('T005-P16 活动慢登录请求即使超过空闲预算仍继续等待', as
         return
       }
       if (path === '/index.html') {
-        await route.fulfill({ status: 200, contentType: 'text/html', body: '<div class="menu-items">首页</div>' })
+        await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: '<div class="menu-items">形考作业</div>' })
         return
       }
       await route.fulfill({
@@ -638,12 +762,385 @@ test('T005-P17 只有标题的首页按刷新预算收口', async () => {
     })
     await page.goto(pageUrl('/index.html'), { waitUntil: 'domcontentloaded' })
     await assert.rejects(
-      withTimeout(ensureNoqrHomeReady(page, { refreshBudget: 3 }), '标题型首页没有按预算收口', 4_000),
+      withTimeout(ensureNoqrHomeReady(page, {
+        refreshBudget: 3,
+        blankGraceMs: 30,
+      }), '标题型首页没有按预算收口', 4_000),
       (error: unknown) => error instanceof NoqrSessionError && error.code === 'blank_page',
     )
     assert.equal(loads, 4)
   } finally {
     await context.close()
+    await browser.close()
+  }
+})
+
+test('T005-P19 非答题恢复流程绝不刷新已有内容的答题页', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let loads = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      loads++
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: '<div class="van-nav-bar"><div class="van-nav-bar__title">答题页</div></div><div class="question-info"><div class="question-title">合成题</div></div>',
+      })
+    })
+    await page.goto(pageUrl('/course_work_detail/index.html?workId=fixture'), { waitUntil: 'domcontentloaded' })
+    await assert.rejects(
+      withTimeout(ensureNoqrHomeReady(page, { blankGraceMs: 20 }), '答题页被错误刷新'),
+      (error: unknown) => error instanceof NoqrSessionError && error.code === 'answer_interrupted',
+    )
+    assert.equal(loads, 1)
+    assert.equal(await classifyNoqrPage(page), 'answer')
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T005-P19b 通用刷新入口必须集中拒绝答题页', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let loads = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      loads++
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: '<div class="van-nav-bar"><div class="van-nav-bar__title">答题页</div></div><div class="question-info"><div class="question-title">合成题</div></div>',
+      })
+    })
+    await page.goto(pageUrl('/course_work_detail/index.html?workId=fixture'), { waitUntil: 'domcontentloaded' })
+    await assert.rejects(
+      withTimeout(reloadNoqrPage(page), '通用刷新入口错误刷新了答题页'),
+      (error: unknown) => error instanceof NoqrSessionError && error.code === 'answer_interrupted',
+    )
+    assert.equal(loads, 1)
+    assert.equal(await classifyNoqrPage(page), 'answer')
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T005-P20 业务点击同步发出的慢请求在空白计时前已被监听', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let courseLoads = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (path === '/index.html') {
+        await route.fulfill({ status: 200, contentType: 'text/html', body: fixture('home.html') })
+        return
+      }
+      if (path === '/course_work/index.html') {
+        courseLoads++
+        await new Promise((resolveWait) => setTimeout(resolveWait, 450))
+        await route.fulfill({ status: 200, contentType: 'text/html', body: fixture('course-work.html') })
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await page.goto(pageUrl('/index.html'), { waitUntil: 'domcontentloaded' })
+    await withTimeout(
+      openNoqrCourseWork(page, { blankGraceMs: 30, refreshBudget: 1 }),
+      '慢业务请求被误判为空白',
+    )
+    assert.equal(courseLoads, 1)
+    assert.equal(await classifyNoqrPage(page), 'course_work')
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T005-P20b 同源心跳不能无限推迟无活动空白恢复', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let courseLoads = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (path === '/course_work/index.html') {
+        courseLoads++
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<div class="van-nav-bar"><div class="van-nav-bar__title">课程作业</div></div>
+            <script>setInterval(() => fetch('/heartbeat').catch(() => undefined), 20)</script>`,
+        })
+        return
+      }
+      if (path === '/heartbeat') {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await page.goto(pageUrl('/course_work/index.html?courseId=course-1'), { waitUntil: 'domcontentloaded' })
+    assert.equal(
+      await withTimeout(waitForNoqrCourseWorkReady(page, {
+        blankGraceMs: 100,
+        refreshBudget: 1,
+      }), '同源心跳让空白恢复永久挂起', 3_000),
+      'empty',
+    )
+    assert.equal(courseLoads, 2)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T005-P20c 同路径不同查询的慢业务请求不能被当成心跳', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let courseLoads = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname === '/course_work/index.html') {
+        courseLoads++
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<div class="van-nav-bar"><div class="van-nav-bar__title">课程作业</div></div>
+            <script>
+              fetch('/api/data?courseId=course-a').then(() =>
+                fetch('/api/data?courseId=course-b'))
+            </script>`,
+        })
+        return
+      }
+      if (url.pathname === '/api/data' && url.searchParams.get('courseId') === 'course-a') {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+        return
+      }
+      if (url.pathname === '/api/data' && url.searchParams.get('courseId') === 'course-b') {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 1_500))
+        await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await page.goto(pageUrl('/course_work/index.html?courseId=course-a'), { waitUntil: 'domcontentloaded' })
+    const waiting = waitForNoqrCourseWorkReady(page, {
+      blankGraceMs: 50,
+      refreshBudget: 1,
+    })
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500))
+    assert.equal(courseLoads, 1, '慢业务请求仍处于活动状态时页面被提前刷新')
+    assert.equal(
+      await withTimeout(waiting, '慢业务请求结束后空白恢复没有收口', 5_000),
+      'empty',
+    )
+    assert.equal(courseLoads, 2)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T005-P20d 同路径动态查询心跳不能无限推迟空白恢复', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let courseLoads = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname === '/course_work/index.html') {
+        courseLoads++
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<div class="van-nav-bar"><div class="van-nav-bar__title">课程作业</div></div>
+            <script>
+              let heartbeat = 0
+              setInterval(() => {
+                heartbeat++
+                fetch('/status?ts=' + heartbeat).catch(() => undefined)
+              }, 20)
+            </script>`,
+        })
+        return
+      }
+      if (url.pathname === '/status') {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 220))
+        await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await page.goto(pageUrl('/course_work/index.html?courseId=course-1'), { waitUntil: 'domcontentloaded' })
+    assert.equal(
+      await withTimeout(waitForNoqrCourseWorkReady(page, {
+        blankGraceMs: 100,
+        refreshBudget: 1,
+      }), '动态查询心跳让空白恢复永久挂起', 4_000),
+      'empty',
+    )
+    assert.equal(courseLoads, 2)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T005-P20e 同路径三个以上稳定业务参数仍分别计为业务活动', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let courseLoads = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname === '/course_work/index.html') {
+        courseLoads++
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<div class="van-nav-bar"><div class="van-nav-bar__title">课程作业</div></div>
+            <script>
+              fetch('/api/data?page=1')
+                .then(() => fetch('/api/data?page=2'))
+                .then(() => fetch('/api/data?page=3'))
+            </script>`,
+        })
+        return
+      }
+      if (url.pathname === '/api/data') {
+        if (url.searchParams.get('page') === '3') {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 1_500))
+        }
+        await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await page.goto(pageUrl('/course_work/index.html?courseId=course-a'), { waitUntil: 'domcontentloaded' })
+    const waiting = waitForNoqrCourseWorkReady(page, {
+      blankGraceMs: 50,
+      refreshBudget: 1,
+    })
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500))
+    assert.equal(courseLoads, 1, '第三个不同业务参数请求仍被误判为静默')
+    assert.equal(
+      await withTimeout(waiting, '第三个业务请求结束后空白恢复没有收口', 5_000),
+      'empty',
+    )
+    assert.equal(courseLoads, 2)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T005-P21 首页和答题页隐藏的业务标记不能冒充页面就绪', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (path === '/index.html') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<div class="menu-items" style="display:none">形考作业</div>
+            <div class="course-card" style="display:none">隐藏课程</div>
+            <main>首页加载中</main>`,
+        })
+        return
+      }
+      if (path === '/course_work_detail/index.html') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<div class="van-nav-bar"><div class="van-nav-bar__title">测试作业</div></div>
+            <div class="content-area">
+              <div class="question-info" style="display:none">
+                <span class="question-title">隐藏题目</span>
+              </div>
+              <main>页面加载中</main>
+            </div>`,
+        })
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+
+    await page.goto(pageUrl('/index.html'), { waitUntil: 'domcontentloaded' })
+    assert.equal(await classifyNoqrPage(page), 'home_blank')
+    await page.locator('.menu-items').evaluate((node) => {
+      ;(node as HTMLElement).style.display = 'block'
+    })
+    assert.equal(await classifyNoqrPage(page), 'home')
+
+    await page.goto(pageUrl('/course_work_detail/index.html?workId=work-1&courseId=course-1&workType=onlineWork'), {
+      waitUntil: 'domcontentloaded',
+    })
+    assert.notEqual(await classifyNoqrPage(page), 'answer')
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T005-P22 隐藏的旧作业卡不参与读取或点击', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (path === '/course_work/index.html') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<!doctype html><body>
+            <div class="van-nav-bar">
+              <div class="van-nav-bar__title">课程甲</div>
+              <div class="van-nav-bar__right"><div class="van-popover__wrapper">菜单</div></div>
+            </div>
+            <article class="work-item" data-work-id="hidden-old" style="display:none">
+              <span class="work-title">旧课程作业</span>
+              <div class="work-btns">
+                <button class="btn-item" onclick="window.__oldClicked=true">开始作答</button>
+                <button class="btn-item">作答记录(0)</button>
+              </div>
+            </article>
+            <article class="work-item" data-work-id="new">
+              <span class="work-title">当前课程作业</span>
+              <div class="work-btns">
+                <button class="btn-item" onclick="location.href='/course_work_detail/index.html?workId=new&courseId=course&workType=onlineWork'">开始作答</button>
+                <button class="btn-item">作答记录(0)</button>
+              </div>
+            </article>
+          </body>`,
+        })
+        return
+      }
+      if (path === '/course_work_detail/index.html') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: '<div class="van-nav-bar"><div class="van-nav-bar__title">测试作业</div></div>',
+        })
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await page.goto(pageUrl('/course_work/index.html?courseId=course'), { waitUntil: 'domcontentloaded' })
+    const homeworks = await readNoqrHomeworks(page, { blankGraceMs: 50, refreshBudget: 1 })
+    assert.equal(homeworks.length, 1)
+    assert.equal(homeworks[0]?.name, '当前课程作业')
+    await openNoqrHomework(page, homeworks[0]!, 'start', { blankGraceMs: 50, refreshBudget: 1 })
+    assert.match(page.url(), /workId=new/)
+    assert.equal(await page.evaluate(() => Boolean((window as typeof window & { __oldClicked?: boolean }).__oldClicked)), false)
+  } finally {
+    await page.close()
     await browser.close()
   }
 })

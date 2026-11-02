@@ -1,4 +1,5 @@
 import type { Page, Request, Response } from 'patchright'
+import { NOQR_MUTATION_RESPONSE_HARD_WAIT_MS } from './limits.ts'
 import { NOQR_API } from './selectors.ts'
 
 export type NoqrMutationKind = 'submit_one' | 'submit_all' | 'finish'
@@ -77,12 +78,14 @@ export class NoqrMutationObserver {
     after: number
     kinds: NoqrMutationKind[]
     workId: string
+    matches?: (request: NoqrMutationRequest) => boolean
   }): NoqrMutationRequest | null {
     const allowed = new Set(opts.kinds)
     return this.requests.find((item) => {
       if (item.sequence <= opts.after || !allowed.has(item.kind)) return false
       this.hydrateRequest(item)
-      return String(item.body.workId || '') === opts.workId
+      return String(item.body.workId || '') === opts.workId &&
+        (!opts.matches || opts.matches(item))
     }) || null
   }
 
@@ -129,8 +132,13 @@ export class NoqrMutationObserver {
   async waitForResult(request: NoqrMutationRequest, opts: {
     stopRequested: () => boolean
     onWaiting?: (elapsedMs: number) => void
+    hardDeadlineMs?: number
   }): Promise<NoqrMutationResult> {
     const startedAt = Date.now()
+    const hardDeadlineMs = Math.max(
+      50,
+      Number(opts.hardDeadlineMs) || NOQR_MUTATION_RESPONSE_HARD_WAIT_MS,
+    )
     while (!this.disposed) {
       const result = this.results.get(request.request)
       if (result?.endedAt) return result
@@ -142,7 +150,15 @@ export class NoqrMutationObserver {
           stopped: true,
         }
       }
-      opts.onWaiting?.(Date.now() - startedAt)
+      const elapsedMs = Date.now() - startedAt
+      if (elapsedMs >= hardDeadlineMs) {
+        return {
+          ...request,
+          requestError: '请求响应读取超过安全上限，结果不确定',
+          endedAt: Date.now(),
+        }
+      }
+      opts.onWaiting?.(elapsedMs)
       // Stop state is a pollable signal, so every result wait must wake even
       // when the page emits no further network event.
       await this.waitForChangeWithin(250)

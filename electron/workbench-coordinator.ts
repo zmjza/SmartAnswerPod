@@ -61,7 +61,7 @@ export function snapshot() {
           ...current,
           local_id: account.local_id,
           name: account.name,
-          studentNo: account.username,
+          studentNo: current.studentNo,
           major: account.major || '',
           campus: account.campus || '',
           configLocked: isStudentLocked(account.local_id),

@@ -106,6 +106,19 @@ export function parseT005Credentials(text) {
     alias: numberedAlias('NOQR-', index),
     kind: 'normal',
   }))
+  const seen = new Map()
+  for (const account of [...english, ...normal]) {
+    const previous = seen.get(account.username)
+    if (previous) {
+      fail(
+        previous.password === account.password
+          ? 'account_cross_section_duplicate'
+          : 'account_cross_section_conflict',
+        'The same account appears in both English and normal sections',
+      )
+    }
+    seen.set(account.username, account)
+  }
 
   return {
     aiKey: readAiKey(normalized),

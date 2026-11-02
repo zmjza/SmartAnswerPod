@@ -11,6 +11,19 @@ const accounts = [
   { name: 'E2E 无码甲', username: 't005-ui-a-001', password: ['fixture', 'ui', 'password', 'a'].join('-') },
   { name: 'E2E 无码乙', username: 't005-ui-b-001', password: ['fixture', 'ui', 'password', 'b'].join('-') },
 ]
+const maskAccount = (value) => {
+  const account = String(value)
+  return account.length >= 8 ? account.slice(0, 4) + '****' + account.slice(-4) : '****'
+}
+
+async function waitForStudentNo(page, renderer, index, fallback) {
+  const snapshot = await renderer('window.kaida.snapshot()').catch(() => null)
+  const expected = snapshot?.students?.[index]?.studentNo || fallback
+  await page.waitForFunction(
+    (studentNo) => document.querySelector('#student-id')?.textContent === studentNo,
+    expected,
+  )
+}
 
 mkdirSync(userData, { recursive: true })
 
@@ -52,6 +65,7 @@ async function launchApp() {
       VITE_DEV_SERVER_URL: '',
       KAIDA_E2E_USERDATA: userData,
       KAIDA_E2E_MOCK_COURSES: '1',
+      KAIDA_E2E_DISABLE_SNAPSHOT_INTERVAL: '1',
       KAIDA_SUPABASE_URL: '',
       KAIDA_SUPABASE_ANON: '',
       KAIDA_SILICONFLOW_KEY: '',
@@ -159,7 +173,7 @@ try {
     document.querySelector('.student-pill[data-student="1"]')?.click()
   })
   await waitUntil(async () => (await renderer('window.kaida.snapshot()')).students.find((student) => student.local_id === first.ids[0])?.workMode === 'noqr', '无码模式异步写入')
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[1].username)
+  await waitForStudentNo(page, renderer, 1, accounts[1].username)
   await new Promise((resolveWait) => setTimeout(resolveWait, 250))
   const secondView = (await renderer('window.kaida.snapshot()')).students.find((student) => student.local_id === first.ids[1])
   assert.equal(secondView.workMode, 'answer', '切换学生误改了另一名学生的工作模式')
@@ -194,7 +208,7 @@ try {
   await pushSnapshot(first, answerWithVerify)
 
   await page.locator('.student-pill[data-student="0"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[0].username)
+  await waitForStudentNo(page, renderer, 0, accounts[0].username)
   await page.locator('#work-mode-switcher button').nth(2).click()
   await waitUntil(async () => (await renderer('window.kaida.snapshot()')).students.find((student) => student.local_id === first.ids[0])?.workMode === 'noqr', '无码模式 UI 写入')
   assert.equal(await selectedWorkMode(page), '无码答题')
@@ -219,7 +233,7 @@ try {
   await pushSnapshot(first, (await renderer('window.kaida.snapshot()')))
 
   await page.locator('.student-pill[data-student="1"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[1].username)
+  await waitForStudentNo(page, renderer, 1, accounts[1].username)
   await page.locator('.workmode-btn-ext').click()
   await waitUntil(async () => (await renderer('window.kaida.snapshot()')).students.find((student) => student.local_id === first.ids[1])?.workMode === 'extract', '提取模式二维码检查写入')
   const extractVerify = structuredClone(await renderer('window.kaida.snapshot()'))
@@ -233,7 +247,7 @@ try {
   await page.locator('.workmode-btn-ans').click()
   await waitUntil(async () => (await renderer('window.kaida.snapshot()')).students.find((student) => student.local_id === first.ids[1])?.workMode === 'answer', '二维码检查后恢复答题模式')
   await page.locator('.student-pill[data-student="0"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[0].username)
+  await waitForStudentNo(page, renderer, 0, accounts[0].username)
 
   await page.getByRole('button', { name: '可选课程执行', exact: true }).click()
   await waitUntil(async () => (await renderer('window.kaida.snapshot()')).students.find((student) => student.local_id === first.ids[0])?.courseScope === 'selected', '甲学生课程范围保存')
@@ -245,17 +259,17 @@ try {
     document.querySelector('.student-pill[data-student="1"]')?.click()
     document.querySelector('.student-pill[data-student="0"]')?.click()
   })
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[0].username)
+  await waitForStudentNo(page, renderer, 0, accounts[0].username)
   assert.equal(await selectedWorkMode(page), '无码答题', '快速切换后甲学生模式串号')
   assert.equal(await page.getByLabel('作业重新答题次数').inputValue(), '3', '快速切换后甲学生重答次数串号')
   assert.match(await page.getByRole('button', { name: '可选课程执行', exact: true }).getAttribute('class'), /bg-\[#4F46E5\]/, '快速切换后甲学生课程范围串号')
 
   await page.locator('.student-pill[data-student="1"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[1].username)
+  await waitForStudentNo(page, renderer, 1, accounts[1].username)
   assert.equal(await selectedWorkMode(page), '答题', '切换到乙学生后显示了甲学生的模式')
   assert.equal(await page.getByLabel('作业重新答题次数').inputValue(), '5', '切换到乙学生后显示了甲学生的重答次数')
   await page.locator('.student-pill[data-student="0"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[0].username)
+  await waitForStudentNo(page, renderer, 0, accounts[0].username)
 
   const started = await first.invoke((id) => window.kaida.startStudent(id), first.ids[0])
   assert.equal(started.ok, true, started.error || '无码学生启动失败')
@@ -294,12 +308,12 @@ try {
   assert.ok(Object.values(rejected).every((result) => result.ok === false), '运行中仍有 IPC 允许修改学生配置')
 
   await page.locator('.student-pill[data-student="1"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[1].username)
+  await waitForStudentNo(page, renderer, 1, accounts[1].username)
   const runningAfterSwitch = await renderer('window.kaida.snapshot()')
   assert.equal(runningAfterSwitch.running, true, '普通页面切换误停了后台任务')
   assert.equal(runningAfterSwitch.students.find((student) => student.local_id === first.ids[0])?.configLocked, true, '切换学生后甲学生运行锁丢失')
   await page.locator('.student-pill[data-student="0"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[0].username)
+  await waitForStudentNo(page, renderer, 0, accounts[0].username)
 
   await page.locator('#tool-stop').evaluate((button) => {
     button.click()
@@ -365,7 +379,7 @@ try {
   const synced = await renderer('window.kaida.snapshot()')
   assert.deepEqual(
     synced.students.map((student) => [student.name, student.studentNo]).sort(),
-    accounts.map((account) => [account.name, account.username]).sort(),
+    accounts.map((account) => [account.name, maskAccount(account.username)]).sort(),
     '全量同步改写了学生身份或账号',
   )
 
@@ -432,6 +446,9 @@ try {
     workMode: 'noqr',
     displayMode: 'visual',
     courseScope: 'selected',
+    awaitingCourseSelection: false,
+    selectedCourseKeys: ['course-a'],
+    selectedCourseNames: ['甲课程'],
     answerRoundLimit: 3,
     headline: '甲学生进行中',
     action: '甲学生作答第七题',
@@ -454,6 +471,9 @@ try {
     workMode: 'answer',
     displayMode: 'headless',
     courseScope: 'all',
+    awaitingCourseSelection: false,
+    selectedCourseKeys: ['course-b'],
+    selectedCourseNames: ['乙课程'],
     answerRoundLimit: 5,
     headline: '乙学生进行中',
     action: '乙学生提取第十题',
@@ -474,19 +494,25 @@ try {
   isolatedSecond.groups = isolatedSecond.courses[0].groups
   await pushSnapshot(first, isolated)
   await page.locator('.student-pill[data-student="0"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[0].username)
+  await waitForStudentNo(page, renderer, 0, accounts[0].username)
   await page.getByText('甲学生进行中', { exact: true }).waitFor()
   assert.equal(await page.locator('#status-title').innerText(), '甲学生进行中')
   assert.equal(await page.locator('#stat-repo').innerText(), '7')
   assert.equal(await page.locator('#stat-ai').innerText(), '2')
   await page.getByText('甲课程', { exact: true }).first().waitFor()
   await page.getByText('甲作业', { exact: true }).waitFor()
+  await page.waitForFunction(
+    () => !document.querySelector('#tool-log')?.disabled,
+    null,
+    { timeout: 3_000 },
+  )
   await page.locator('#tool-log').click()
   await page.getByRole('heading', { name: '课程运行日志' }).waitFor()
   assert.match(await page.getByRole('heading', { name: '课程运行日志' }).locator('xpath=ancestor::section[1]').innerText(), /甲学生日志/)
 
+  await page.getByRole('button', { name: '关闭课程日志' }).click()
   await page.locator('.student-pill[data-student="1"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[1].username)
+  await waitForStudentNo(page, renderer, 1, accounts[1].username)
   await pushSnapshot(first, isolated)
   await page.getByText('乙学生进行中', { exact: true }).waitFor({ timeout: 5_000 })
   await page.getByRole('heading', { name: '课程运行日志' }).waitFor({ state: 'hidden' })
@@ -497,6 +523,11 @@ try {
   assert.equal(await page.locator('#stat-ai').innerText(), '4')
   await page.getByText('乙课程', { exact: true }).first().waitFor()
   await page.getByText('乙作业', { exact: true }).waitFor()
+  await page.waitForFunction(
+    () => !document.querySelector('#tool-log')?.disabled,
+    null,
+    { timeout: 3_000 },
+  )
   await page.locator('#tool-log').click()
   await page.getByRole('heading', { name: '课程运行日志' }).waitFor()
   const secondLogText = await page.getByRole('heading', { name: '课程运行日志' }).locator('xpath=ancestor::section[1]').innerText()
@@ -505,7 +536,7 @@ try {
   await page.getByRole('button', { name: '关闭课程日志' }).click()
   await pushSnapshot(first, actualBeforeEmpty)
   await page.locator('.student-pill[data-student="0"]').click()
-  await page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[0].username)
+  await waitForStudentNo(page, renderer, 0, accounts[0].username)
 
   const failed = structuredClone(actualBeforeEmpty)
   const failedStudent = failed.students.find((student) => student.local_id === first.ids[0])
@@ -597,7 +628,7 @@ try {
     student.displayMode === 'visual' && student.courseScope === 'selected' && student.answerRoundLimit === 3), '重载后学生配置丢失')
   assert.deepEqual(
     persisted.students.map((student) => [student.name, student.studentNo]).sort(),
-    accounts.map((account) => [account.name, account.username]).sort(),
+    accounts.map((account) => [account.name, maskAccount(account.username)]).sort(),
     '重载后学生身份串号',
   )
   assert.deepEqual(await second.page.locator('#work-mode-switcher button').allTextContents(), ['答题', '提取题库', '无码答题'])
@@ -605,7 +636,7 @@ try {
   assert.equal(await second.page.getByLabel('作业重新答题次数').inputValue(), '3')
   assert.match(await second.page.locator('.mode-visual-btn').getAttribute('class'), /bg-\[#4F46E5\]/)
   await second.page.locator('.student-pill[data-student="1"]').click()
-  await second.page.waitForFunction((studentNo) => document.querySelector('#student-id')?.textContent === studentNo, accounts[1].username)
+  await waitForStudentNo(second.page, second.renderer, 1, accounts[1].username)
   assert.equal(await selectedWorkMode(second.page), '无码答题', '重启后切换学生模式串号')
   assert.equal(await second.page.getByLabel('作业重新答题次数').inputValue(), '3', '重启后切换学生配置串号')
 

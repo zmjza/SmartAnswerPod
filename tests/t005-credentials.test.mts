@@ -98,6 +98,18 @@ test('T005-CRED-03 rejects missing, unresolved, ambiguous, and unknown credentia
       && !error.message.includes(conflictPassword),
   )
 
+  const crossSection = fixtureGoalText().replace(
+    `账号：${NORMAL_ONE_USER}\n密码：${NORMAL_ONE_PASSWORD}`,
+    `账号：${ENGLISH_USER}\n密码：${ENGLISH_PASSWORD}`,
+  )
+  assert.throws(
+    () => parseT005Credentials(crossSection),
+    (error) => error instanceof T005CredentialError
+      && error.code === 'account_cross_section_duplicate'
+      && !error.message.includes(ENGLISH_USER)
+      && !error.message.includes(ENGLISH_PASSWORD),
+  )
+
   const credentials = parseT005Credentials(fixtureGoalText())
   assert.throws(
     () => selectT005Account(credentials, 'NOQR-99'),

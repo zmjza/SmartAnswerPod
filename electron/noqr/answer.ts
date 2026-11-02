@@ -2,6 +2,12 @@ import type { Page } from 'patchright'
 import type { ReadOnlyBankClient } from './bank-readonly.ts'
 import type { NoqrAiClient } from './ai-client.ts'
 import {
+  NOQR_ANSWER_BOOT_HARD_WAIT_MS,
+  NOQR_ANSWER_PAGE_ADVANCE_HARD_WAIT_MS,
+  NOQR_MUTATION_RESPONSE_HARD_WAIT_MS,
+  withNoqrHardDeadline,
+} from './limits.ts'
+import {
   buildNoqrQuestionIdentity,
   readNoqrQuestionGroup,
   resolveNoqrAnswers,
@@ -13,6 +19,7 @@ import { NOQR_SEL } from './selectors.ts'
 import {
   NoqrMutationObserver,
   type NoqrMutationKind,
+  type NoqrMutationRequest,
   type NoqrMutationResult,
 } from './network.ts'
 import { evaluateNoqrSaveEvidence, isNoqrRequestAccepted } from './save.ts'
@@ -45,12 +52,13 @@ export type NoqrSaveAndAdvanceResult = {
   uncertain: boolean
   state: string
   homeWorkUniqueFlag: string
+  requestStartedAt?: number
 }
 
 type QuestionScope = ReturnType<Page['locator']>
 
 function unitScope(page: Page, group: NoqrQuestionGroup, unitOrdinal: number): QuestionScope {
-  const root = page.locator(NOQR_SEL.questionInfo).first()
+  const root = page.locator(`${NOQR_SEL.questionInfo}:visible`).first()
   if (group.kind === 'picker') {
     return root.locator(NOQR_SEL.questionOptions)
   }
@@ -116,7 +124,7 @@ async function selectPickerValues(
   answers: NoqrResolvedAnswer[],
   stopRequested: () => boolean,
 ): Promise<void> {
-  const rows = page.locator(NOQR_SEL.questionInfo).first()
+  const rows = page.locator(`${NOQR_SEL.questionInfo}:visible`).first()
     .locator(NOQR_SEL.questionOptions)
     .locator('.van-cell.van-cell--clickable.van-field[role="button"]')
   if (await rows.count() !== group.units.length) throw new Error('词汇匹配槽位数量变化，已停止当前作业')
@@ -301,7 +309,7 @@ export async function answerNoqrGroup(opts: {
 }
 
 async function questionSignature(page: Page): Promise<string> {
-  return page.locator('.content-area').first().evaluate((root) => {
+  return page.locator('.content-area:visible').first().evaluate((root) => {
     const text = ((root instanceof HTMLElement ? root.innerText : root.textContent) || '')
       .replace(/\s+/g, ' ')
       .trim()
@@ -330,6 +338,20 @@ async function lastQuestionNotice(page: Page): Promise<boolean> {
 
 function expectedUnitSelections(answers: NoqrResolvedAnswer[]): Map<number, string> {
   return new Map(answers.map((answer) => [answer.ordinal, answer.selectionValues.map(String).join(',')]))
+}
+
+function requestIdentityMismatch(
+  answer: Record<string, unknown> | null | undefined,
+  unit: NoqrQuestionGroup['units'][number],
+): string {
+  if (!answer) return '保存请求缺少当前题目身份'
+  if (unit.bigQuestionId && String(answer.bigQuestionId || '') !== unit.bigQuestionId) {
+    return '保存请求 bigQuestionId 与当前题目不一致'
+  }
+  if (unit.questionId && String(answer.questionId || '') !== unit.questionId) {
+    return '保存请求 questionId 与当前题目不一致'
+  }
+  return ''
 }
 
 export function selectionMismatchCode(expected: string, actual: string): string {
@@ -383,7 +405,7 @@ export function noqrSaveRequestKinds(group: NoqrQuestionGroup): NoqrMutationKind
     : ['submit_one']
 }
 
-function requestMatchesAnswer(result: NoqrMutationResult, group: NoqrQuestionGroup, answers: NoqrResolvedAnswer[], workId: string): {
+function requestMatchesAnswer(result: Pick<NoqrMutationResult | NoqrMutationRequest, 'body'>, group: NoqrQuestionGroup, answers: NoqrResolvedAnswer[], workId: string): {
   ok: boolean
   reason?: string
   homeWorkUniqueFlag: string
@@ -401,6 +423,14 @@ function requestMatchesAnswer(result: NoqrMutationResult, group: NoqrQuestionGro
       const answer = actual[unit.ordinal - 1] as Record<string, unknown> | null
       const expectedSelected = expected.get(unit.ordinal) || ''
       const actualSelected = String(answer?.answerSelected || '')
+      const identityMismatch = requestIdentityMismatch(answer, unit)
+      if (identityMismatch) {
+        return {
+          ok: false,
+          reason: identityMismatch,
+          homeWorkUniqueFlag: flag,
+        }
+      }
       const mismatch = selectionMismatchCode(expectedSelected, actualSelected)
       if (!answer || mismatch) {
         return {
@@ -417,6 +447,17 @@ function requestMatchesAnswer(result: NoqrMutationResult, group: NoqrQuestionGro
     : result.body
   const actualSelected = String(answer.answerSelected || '')
   const expectedAll = answers.flatMap((item) => item.selectionValues).map(String).join(',')
+  const singleUnit = group.units[0]
+  if (singleUnit) {
+    const identityMismatch = requestIdentityMismatch(answer, singleUnit)
+    if (identityMismatch) {
+      return {
+        ok: false,
+        reason: identityMismatch,
+        homeWorkUniqueFlag: flag,
+      }
+    }
+  }
   const mismatch = selectionMismatchCode(expectedAll, actualSelected)
   if (mismatch) {
     return {
@@ -431,7 +472,7 @@ function requestMatchesAnswer(result: NoqrMutationResult, group: NoqrQuestionGro
   return { ok: true, homeWorkUniqueFlag: flag }
 }
 
-export async function saveNoqrAnswerAndAdvance(opts: {
+async function saveNoqrAnswerAndAdvanceInner(opts: {
   page: Page
   observer: NoqrMutationObserver
   workId: string
@@ -440,6 +481,12 @@ export async function saveNoqrAnswerAndAdvance(opts: {
   stopRequested: () => boolean
   onWaiting?: (state: string, elapsedMs: number) => void
   onClickAttempt?: (attempt: number) => void
+  noRequestRetryBudgetMs?: number
+  pageChangeRequestWaitMs?: number
+  requestMatchWindowMs?: number
+  pageAdvanceBudgetMs?: number
+  requestHardDeadlineMs?: number
+  pageAdvanceHardDeadlineMs?: number
 }): Promise<NoqrSaveAndAdvanceResult> {
   if (opts.stopRequested()) throw new Error('任务已停止')
   const beforeSignature = await questionSignature(opts.page)
@@ -447,29 +494,97 @@ export async function saveNoqrAnswerAndAdvance(opts: {
   const next = opts.page.locator(NOQR_SEL.next).first()
   const network = new NoqrNetworkActivity(opts.page)
   const expectedKinds = noqrSaveRequestKinds(opts.group)
-  const findObservedRequest = () => opts.observer.findRequest({
+  const findExactRequest = () => opts.observer.findRequest({
     after: marker,
-    kinds: ['submit_one', 'submit_all'],
+    kinds: expectedKinds,
     workId: opts.workId,
-  }) || opts.observer.findRequestAfter({
+    matches: (request) =>
+      requestMatchesAnswer(request, opts.group, opts.answers, opts.workId).ok,
+  })
+  const findCandidateRequest = () => opts.observer.findRequestAfter({
     after: marker,
     kinds: ['submit_one', 'submit_all'],
   })
   const requestWaitStartedAt = Date.now()
+  const requestHardDeadlineMs = Math.max(
+    50,
+    Number(opts.requestHardDeadlineMs) || NOQR_MUTATION_RESPONSE_HARD_WAIT_MS,
+  )
   let clickAttempts = 1
-  let idlePolls = 0
-  let finalPositionObservedAt = 0
+  let noRequestSince = 0
+  const noRequestRetryBudgetMs = Math.max(50, Number(opts.noRequestRetryBudgetMs) || 120_000)
+  const pageChangeRequestWaitMs = Math.max(
+    50,
+    Number(opts.pageChangeRequestWaitMs) || 15_000,
+  )
+  const requestMatchWindowMs = Math.max(50, Number(opts.requestMatchWindowMs) || 2_000)
+  let pageChangedSince = 0
+  let candidateSince = 0
   let request: ReturnType<NoqrMutationObserver['findRequest']> = null
   try {
     if (opts.stopRequested()) throw new Error('任务已停止')
-    await next.click()
+    if (Date.now() - requestWaitStartedAt >= requestHardDeadlineMs) {
+      return {
+        saved: false,
+        advanced: false,
+        lastQuestion: false,
+        uncertain: true,
+        state: 'submitted_uncertain',
+        homeWorkUniqueFlag: '',
+      }
+    }
+    await next.evaluate((node) => {
+      if (!(node instanceof HTMLElement)) throw new Error('下一题按钮不可点击')
+      setTimeout(() => node.click(), 0)
+    })
     opts.onClickAttempt?.(clickAttempts)
-    request = findObservedRequest()
+    request = findExactRequest()
     while (!request && !opts.stopRequested()) {
+      if (Date.now() - requestWaitStartedAt >= requestHardDeadlineMs) {
+        return {
+          saved: false,
+          advanced: false,
+          lastQuestion: false,
+          uncertain: true,
+          state: 'submitted_uncertain',
+          homeWorkUniqueFlag: '',
+        }
+      }
       opts.onWaiting?.('等待保存请求', Date.now() - requestWaitStartedAt)
+      request = findExactRequest()
+      if (request) break
+      const candidate = findCandidateRequest()
+      if (candidate) {
+        candidateSince ||= Date.now()
+        if (Date.now() - candidateSince >= requestMatchWindowMs) {
+          opts.onWaiting?.(
+            '等待匹配当前答案的保存请求',
+            Date.now() - requestWaitStartedAt,
+          )
+        }
+      }
       const loading = await opts.page.locator(NOQR_SEL.loadingToast).first().isVisible().catch(() => false)
       const signature = await questionSignature(opts.page).catch(() => '')
       if (signature && signature !== beforeSignature) {
+        pageChangedSince ||= Date.now()
+      }
+      if (candidateSince && Date.now() - candidateSince >= noRequestRetryBudgetMs) {
+        return {
+          saved: false,
+          advanced: false,
+          lastQuestion: false,
+          uncertain: true,
+          state: 'submitted_uncertain',
+          homeWorkUniqueFlag: '',
+        }
+      }
+      if (
+        pageChangedSince &&
+        !candidateSince &&
+        !loading &&
+        !network.isBusinessActive() &&
+        Date.now() - pageChangedSince >= pageChangeRequestWaitMs
+      ) {
         return {
           saved: false,
           advanced: false,
@@ -479,8 +594,17 @@ export async function saveNoqrAnswerAndAdvance(opts: {
           homeWorkUniqueFlag: '',
         }
       }
-      idlePolls = network.isActive() || loading ? 0 : idlePolls + 1
-      if (idlePolls >= 20) {
+      if (network.isBusinessActive() || loading) {
+        noRequestSince = 0
+      } else {
+        noRequestSince ||= Date.now()
+      }
+      if (
+        !candidateSince &&
+        !pageChangedSince &&
+        noRequestSince &&
+        Date.now() - noRequestSince >= noRequestRetryBudgetMs
+      ) {
         if (clickAttempts >= 3 || !(await next.isVisible().catch(() => false))) {
           return {
             saved: false,
@@ -493,13 +617,27 @@ export async function saveNoqrAnswerAndAdvance(opts: {
         }
         if (opts.stopRequested()) throw new Error('任务已停止')
         opts.onWaiting?.(`未观察到保存请求，重新点击 ${clickAttempts + 1}/3`, Date.now() - requestWaitStartedAt)
-        await next.click()
+        try {
+          await next.evaluate((node) => {
+            if (!(node instanceof HTMLElement)) throw new Error('下一题按钮不可点击')
+            setTimeout(() => node.click(), 0)
+          })
+        } catch {
+          return {
+            saved: false,
+            advanced: false,
+            lastQuestion: false,
+            uncertain: true,
+            state: 'submitted_uncertain',
+            homeWorkUniqueFlag: '',
+          }
+        }
         clickAttempts++
         opts.onClickAttempt?.(clickAttempts)
-        idlePolls = 0
+        noRequestSince = 0
       }
       await sleepNoqr(opts.page, 100)
-      request = findObservedRequest()
+      request = findExactRequest()
     }
   } finally {
     network.dispose()
@@ -510,7 +648,7 @@ export async function saveNoqrAnswerAndAdvance(opts: {
       advanced: false,
       lastQuestion: false,
       uncertain: true,
-      state: 'submitted_uncertain',
+      state: pageChangedSince ? 'unconfirmed_page_change' : 'submitted_uncertain',
       homeWorkUniqueFlag: '',
     }
   }
@@ -528,6 +666,7 @@ export async function saveNoqrAnswerAndAdvance(opts: {
   const result = await opts.observer.waitForResult(request, {
     stopRequested: opts.stopRequested,
     onWaiting: (elapsed) => opts.onWaiting?.('等待保存响应', elapsed),
+    hardDeadlineMs: NOQR_MUTATION_RESPONSE_HARD_WAIT_MS,
   })
   if (result.requestError || !Number.isInteger(Number(result.httpStatus))) {
     return {
@@ -546,38 +685,62 @@ export async function saveNoqrAnswerAndAdvance(opts: {
     throw new Error(reason || '答案保存失败')
   }
 
+  const pageAdvanceBudgetMs = Math.max(
+    50,
+    Number(opts.pageAdvanceBudgetMs) || 120_000,
+  )
+  const pageAdvanceHardDeadlineMs = Math.max(
+    pageAdvanceBudgetMs,
+    Number(opts.pageAdvanceHardDeadlineMs) || NOQR_ANSWER_PAGE_ADVANCE_HARD_WAIT_MS,
+  )
+  const advanceNetwork = new NoqrNetworkActivity(opts.page)
   let advanced = false
   let lastQuestion = false
+  let lastAdvanceProgressAt = Date.now()
   const finalQuestionPosition = Number(opts.group.position) || 0
   const finalQuestionTotal = Number(opts.group.total) || 0
   const finalQuestionByPosition = finalQuestionTotal > 0 &&
     finalQuestionPosition > 0 &&
     finalQuestionPosition >= finalQuestionTotal
-  while (true) {
-    lastQuestion = await lastQuestionNotice(opts.page)
-    if (lastQuestion) {
-      advanced = true
-      break
-    }
-    const signature = await questionSignature(opts.page).catch(() => beforeSignature)
-    if (signature && signature !== beforeSignature) {
-      advanced = true
-      break
-    }
-    // The counter is scoped to the current big question, not the whole paper.
-    // Give the page a bounded post-response window to reveal the next section
-    // before treating an unchanged question as the true paper end.
-    if (finalQuestionByPosition) {
-      finalPositionObservedAt ||= Date.now()
-      if (Date.now() - finalPositionObservedAt >= 2_000) {
+  try {
+    while (true) {
+      lastQuestion = await lastQuestionNotice(opts.page)
+      if (lastQuestion) {
+        advanced = true
+        break
+      }
+      const analysisVisible = finalQuestionByPosition &&
+        await opts.page.locator('.analysis:visible').first().isVisible().catch(() => false)
+      if (analysisVisible) {
+        // The site uses an analysis panel as the visible end marker when the
+        // final-question toast is absent. A local counter alone is not enough.
         advanced = true
         lastQuestion = true
         break
       }
+      const signature = await questionSignature(opts.page).catch(() => beforeSignature)
+      if (signature && signature !== beforeSignature) {
+        advanced = true
+        break
+      }
+      if (Date.now() - startedAt >= pageAdvanceHardDeadlineMs) {
+        break
+      }
+      const loading = await opts.page.locator(NOQR_SEL.loadingToast).first().isVisible().catch(() => false)
+      const networkActive = advanceNetwork.isBusinessActive()
+      if (loading || networkActive) {
+        lastAdvanceProgressAt = Date.now()
+      } else if (Date.now() - lastAdvanceProgressAt >= pageAdvanceBudgetMs) {
+        // L2 succeeded, but the page never exposed L3. Keep the saved answer
+        // and stop instead of guessing that a local counter means paper end.
+        break
+      }
+      if (opts.stopRequested()) break
+      opts.onWaiting?.('等待页面推进', Date.now() - startedAt)
+      await sleepNoqr(opts.page, 100)
     }
-    if (opts.stopRequested()) break
-    opts.onWaiting?.('等待页面推进', Date.now() - startedAt)
-    await sleepNoqr(opts.page, 100)
+  } finally {
+    advanceNetwork.dispose()
   }
   const evidence = evaluateNoqrSaveEvidence({
     requestObserved: true,
@@ -594,7 +757,37 @@ export async function saveNoqrAnswerAndAdvance(opts: {
     uncertain: evidence.state === 'submitted_uncertain',
     state: evidence.state,
     homeWorkUniqueFlag: match.homeWorkUniqueFlag,
+    requestStartedAt: request.startedAt,
   }
+}
+
+export function saveNoqrAnswerAndAdvance(
+  opts: Parameters<typeof saveNoqrAnswerAndAdvanceInner>[0],
+): Promise<NoqrSaveAndAdvanceResult> {
+  const hardDeadlineMs = Math.max(
+    50,
+    Number(opts.requestHardDeadlineMs) || NOQR_MUTATION_RESPONSE_HARD_WAIT_MS,
+  )
+  let hardStopped = false
+  const wrappedOpts = {
+    ...opts,
+    stopRequested: () => hardStopped || opts.stopRequested(),
+  }
+  return withNoqrHardDeadline(
+    saveNoqrAnswerAndAdvanceInner(wrappedOpts),
+    hardDeadlineMs,
+    () => {
+      hardStopped = true
+      return {
+        saved: false,
+        advanced: false,
+        lastQuestion: false,
+        uncertain: true,
+        state: 'submitted_uncertain',
+        homeWorkUniqueFlag: '',
+      }
+    },
+  )
 }
 
 export async function waitForNoqrAnswerReady(opts: {
@@ -606,26 +799,60 @@ export async function waitForNoqrAnswerReady(opts: {
   onWaiting?: (elapsedMs: number) => void
   blankSettleMs?: number
   skeletonBudgetMs?: number
+  startupHardDeadlineMs?: number
 }): Promise<void> {
   const network = opts.network || new NoqrNetworkActivity(opts.page)
   const startedAt = Date.now()
-  const blankSettleMs = Math.max(50, Number(opts.blankSettleMs) || 500)
-  const skeletonBudgetMs = Math.max(50, Number(opts.skeletonBudgetMs) || 1_000)
+  const blankSettleMs = Math.max(50, Number(opts.blankSettleMs) || 120_000)
+  const skeletonBudgetMs = Math.max(50, Number(opts.skeletonBudgetMs) || 120_000)
+  const startupHardDeadlineMs = Math.max(
+    50,
+    Number(opts.startupHardDeadlineMs) || NOQR_ANSWER_BOOT_HARD_WAIT_MS,
+  )
   let reentries = 0
   let emptySince = 0
   let skeletonSince = 0
+  const hasPersistedAnswerProgress = async (): Promise<boolean> =>
+    opts.page.evaluate((selectors) => {
+      const answeredCard = document.querySelector(selectors.answerCardAnswered)
+      if (answeredCard) return true
+      const selectedOption = document.querySelector(
+        '.option-item[aria-checked="true"], .option-item.checked, .e-a.checked',
+      )
+      if (selectedOption) return true
+      return [...document.querySelectorAll('input[name="answer"], textarea[name="answer"]')]
+        .some((node) => {
+          if (!(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)) return false
+          return node.value.trim().length > 0
+        })
+    }, NOQR_SEL).catch(() => true)
+  const guardBeforeReenter = async (): Promise<void> => {
+    if (await hasPersistedAnswerProgress()) {
+      throw new NoqrSessionError(
+        'answer_interrupted',
+        '答题启动页检测到已有作答进度，已保留页面且禁止自动返回重进',
+      )
+    }
+  }
   try {
     for (;;) {
       if (opts.stopRequested()) throw new Error('任务已停止')
-      const ready = await opts.page.locator(NOQR_SEL.questionInfo).first().isVisible().catch(() => false)
+      const ready = await opts.page.locator(`${NOQR_SEL.questionInfo}:visible`).first().isVisible().catch(() => false)
       if (ready) return
+      if (Date.now() - startedAt >= startupHardDeadlineMs) {
+        throw new NoqrSessionError(
+          'answer_interrupted',
+          '答题启动页长时间未就绪，已保留当前页面并停止当前作业',
+        )
+      }
       const skeleton = await opts.page.locator('.skeleton-area.van-skeleton').first().isVisible().catch(() => false)
       if (skeleton) {
         emptySince = 0
-        if (network.isActive()) skeletonSince = 0
+        if (network.isBusinessActive()) skeletonSince = 0
         else skeletonSince ||= Date.now()
         if (skeletonSince && Date.now() - skeletonSince >= skeletonBudgetMs) {
           if (reentries >= (opts.maxReentries ?? 3)) throw new Error('答题启动页连续空白，已停止当前作业')
+          await guardBeforeReenter()
           reentries++
           skeletonSince = 0
           await opts.reenter()
@@ -638,12 +865,13 @@ export async function waitForNoqrAnswerReady(opts: {
           throw new NoqrSessionError('auth_blocked', '页面要求人工认证，已暂停当前作业')
         }
         if (/加载失败|请求失败|发生错误|系统异常/.test(text)) throw new Error('答题页显示明确错误')
-        if (network.isActive()) {
+        if (network.isBusinessActive()) {
           emptySince = 0
         } else {
           emptySince ||= Date.now()
           if (Date.now() - emptySince >= blankSettleMs) {
             if (reentries >= (opts.maxReentries ?? 3)) throw new Error('答题启动页连续空白，已停止当前作业')
+            await guardBeforeReenter()
             reentries++
             emptySince = 0
             await opts.reenter()

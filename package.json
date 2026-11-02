@@ -1,6 +1,6 @@
 {
   "name": "kaida-auto-quiz",
-  "version": "2.6",
+  "version": "2.7",
   "private": true,
   "description": "开大智达舱",
   "author": "kaida",
@@ -19,6 +19,10 @@
     "test:e2e:settings": "node --experimental-strip-types tests/e2e-settings.mjs",
     "test:e2e:run-lock": "node --experimental-strip-types tests/e2e-run-lock.mjs",
     "test:e2e:workbench": "node --experimental-strip-types tests/e2e-workbench.mjs",
+    "test:t005": "node --experimental-strip-types --test tests/t005-*.test.mts",
+    "test:t005:survey": "node --experimental-strip-types tests/t005-account-survey.mjs",
+    "test:t005:e3": "node --experimental-strip-types tests/t005-e3-flow.mjs",
+    "test:t005:ui": "node --experimental-strip-types tests/t005-ui.mjs",
     "postinstall": "playwright install chromium && patchright install chromium"
   },
   "dependencies": {

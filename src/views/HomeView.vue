@@ -461,7 +461,7 @@ function statusLabel(status: string) {
     waiting_grade: '等待批阅', reviewing: '校对中', extracting: '提取中', extracting_done: '提取完成', pending_writeback: '待回写', done_100: '已满分',
     skip_weight0: '权重 0% 跳过', skip_non_objective: '非客观题跳过', skip_out_of_window: '不在时间窗',
     skip_attempts_exhausted: '次数用尽', skip_full_score: '已满分跳过', skip_no_history: '无历史链接跳过',
-    not_startable: '暂不可开始', date_unknown: '时间不可确认', submit_failed: '作业失败',
+    not_startable: '暂不可开始', date_unknown: '时间不可确认', submit_failed: '作业失败', page_interrupted: '页面异常，待处理', score_unavailable: '分数待确认',
     answer_page_interrupted: '答题页异常，已保留页面', submitted_uncertain: '提交结果不确定',
     skip_bank_miss: '听力题库缺项',
     not_full_next_time: '下次继续', spin_stopped: '已停止空转', todo: '待作答', '检测中': '检测中',

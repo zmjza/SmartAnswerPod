@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
 
+throw new Error('当前项目已禁用 GitHub Release/Tag/OTA/安装包上传；请使用 npm run package 生成本地构建')
+
 const repo = 'zmjza/SmartAnswerPod'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
