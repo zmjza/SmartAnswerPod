@@ -26,7 +26,7 @@ declare global {
       listAccounts: () => Promise<{ local_id: string; name: string; account: string }[]>
       addAccount: (row: unknown) => Promise<{ ok: boolean; error?: string }>
       updateAccount: (id: string, row: unknown) => Promise<{ ok: boolean; error?: string }>
-      removeAccount: (id: string) => Promise<{ ok: boolean }>
+      removeAccount: (id: string) => Promise<{ ok: boolean; error?: string }>
       removeAllAccounts: (ids: string[]) => Promise<{ ok: boolean; removed: number; error?: string }>
      importExcel: () => Promise<{ ok: boolean; error?: string; count?: number }>
       parsePastedAccounts: (text: string) => Promise<{ ok: boolean; rows: { name: string; username: string; password: string }[]; errors: { line: number; text: string; reason: string }[]; skippedHeaders: number }>

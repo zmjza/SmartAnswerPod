@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Page } from 'patchright'
 import { maxAttemptsThisRun } from '../core/attempts.ts'
 import { NoqrBlankRecoveryGate } from './blank-recovery.ts'
+import { NOQR_ANSWER_BOOT_HARD_WAIT_MS } from './limits.ts'
 import type { NoqrHomework } from './types.ts'
 import { NOQR_PATH, NOQR_SEL } from './selectors.ts'
 import {
@@ -56,6 +57,9 @@ export type NoqrHomeworkOpenOptions = {
   refreshBudget?: number
   onWaiting?: (waiting: number) => void
   blankGraceMs?: number
+  blankMaxActiveWaitMs?: number
+  blankMaxHeartbeatWaitMs?: number
+  answerNavigationHardDeadlineMs?: number
 }
 
 export type NoqrWorkCardSnapshot = {
@@ -313,8 +317,12 @@ export async function openNoqrHomework(
   const network = new NoqrNetworkActivity(page)
   const recovery = new NoqrBlankRecoveryGate({
     graceMs: opts.blankGraceMs,
+    maxActiveWaitMs: opts.blankMaxActiveWaitMs,
+    maxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
     refreshBudget: opts.refreshBudget ?? 3,
   })
+  let answerNavigationRetries = 0
+  let answerNavigationQuietSince = 0
   try {
     // The work-card click may start the slow answer/document request
     // synchronously, so network tracking must be installed first.
@@ -351,6 +359,37 @@ export async function openNoqrHomework(
       ) {
         throw new NoqrSessionError('answer_interrupted', '打开作答记录时误入答题页，已保留页面且不刷新')
       }
+      if (action === 'start') {
+        const active = network.isBusinessActive()
+        if (active) {
+          answerNavigationQuietSince = 0
+          if (Date.now() - startedAt >= (
+            Number(opts.answerNavigationHardDeadlineMs) || NOQR_ANSWER_BOOT_HARD_WAIT_MS
+          )) {
+            throw new NoqrSessionError(
+              'blank_page',
+              '开始作答后页面始终未完成导航，已安全停止且未刷新当前页面',
+            )
+          }
+        } else {
+          answerNavigationQuietSince ||= Date.now()
+          if (Date.now() - answerNavigationQuietSince >= Math.max(50, opts.blankGraceMs ?? 60_000)) {
+            if (answerNavigationRetries < 1) {
+              answerNavigationRetries++
+              await clickAction()
+              answerNavigationQuietSince = 0
+              continue
+            }
+            throw new NoqrSessionError(
+              'blank_page',
+              '开始作答入口持续无响应，已安全停止且未刷新当前页面',
+            )
+          }
+        }
+        opts.onWaiting?.(Date.now() - startedAt)
+        await sleepNoqr(page, 150, opts.signal)
+        continue
+      }
       const decision = recovery.observe({
         now: Date.now(),
         activityVersion: network.businessActivityVersion,
@@ -367,7 +406,7 @@ export async function openNoqrHomework(
       if (decision.action === 'stop') {
         throw new NoqrSessionError(
           'blank_page',
-          action === 'start' ? '开始作答入口持续无响应' : '作答记录入口持续无响应',
+          action === 'record' ? '作答记录入口持续无响应' : '开始作答入口持续无响应',
         )
       }
       opts.onWaiting?.(Date.now() - startedAt)

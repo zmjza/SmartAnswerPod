@@ -9,7 +9,7 @@ import { ExtractWritebackSaveError, getExtractWriteback, getSettings, getWriteba
 import { emitProgress, onProgress } from './progress'
 import { hasQr } from './page-tools'
 import { PATH, SEL, isAnswerPath } from './core/selectors'
-import { ACCOUNT_ZH, type AccountState, type SlotState } from './core/states'
+import { ACCOUNT_ZH, slotCountsInToolbar, type AccountState, type SlotState } from './core/states'
 import { resetAsked } from './ai'
 import os from 'node:os'
 import { pressureOf, formatMb, recommendConcurrency } from './core/machine'
@@ -97,6 +97,7 @@ const stopControllers = new Map<string, AbortController>()
 let runConcurrency: ReturnType<typeof concurrencySnapshot> | null = null
 let runAccountIds = new Set<string>()
 const activeRuns = new Map<string, Promise<void>>()
+const temporaryContextLocks = new Map<string, Promise<void>>()
 let stoppingAll = false
 let selectionStartRequested = false
 const WRITEBACK_RETRY_MS = 3000
@@ -139,7 +140,13 @@ onProgress((event) => {
 
 function viewOf(a: LocalAccount): StudentView {
   const cur = views.get(a.local_id)
-  if (cur) return cur
+  if (cur) {
+    if (slots.has(a.local_id)) {
+      cur.slot = slots.get(a.local_id)
+      cur.queued = cur.slot === 'queued'
+    }
+    return cur
+  }
   const v: StudentView = {
     local_id: a.local_id,
     name: a.name,
@@ -292,11 +299,15 @@ export function snapshot() {
 }
 
 export function isRunning() {
-  return stoppingAll || activeRuns.size > 0
+  return stoppingAll ||
+    activeRuns.size > 0 ||
+    [...views.keys()].some((local_id) => slots.get(local_id) === 'closing')
 }
 
 export function isStudentLocked(local_id: string) {
-  return activeRuns.has(local_id) || isHeld(local_id)
+  return activeRuns.has(local_id) ||
+    isHeld(local_id) ||
+    slotCountsInToolbar(slots.get(local_id))
 }
 
 export function canApplyAllSettings() {
@@ -574,20 +585,39 @@ function previewHrefOf(local_id: string, courseName: string, homeworkName: strin
 }
 
 async function withStudentContext<T>(local_id: string, run: (context: BrowserContext) => Promise<T>): Promise<T> {
-  let context = getContext(local_id)
-  let temporary = false
-  if (!context) {
-    const account = listAccounts().find((item) => item.local_id === local_id)
-    if (!account) throw new Error('学生账号不存在')
+  const account = listAccounts().find((item) => item.local_id === local_id)
+  if (!account) throw new Error('学生账号不存在')
+
+  const previous = temporaryContextLocks.get(local_id) || Promise.resolve()
+  let finishCurrent!: () => void
+  const currentLock = new Promise<void>((resolveLock) => {
+    finishCurrent = resolveLock
+  })
+  const chain = previous.then(() => currentLock)
+  temporaryContextLocks.set(local_id, chain)
+  await previous
+  try {
+    const existing = getContext(local_id)
+    if (existing) return await run(existing)
+    if (activeRuns.has(local_id)) throw new Error('该学生正在运行，浏览器尚未就绪')
+
+    let context: BrowserContext
+    let temporary = false
     const acquired = await acquire(local_id, account.display_mode === 'visual')
-    if (!acquired.ok || !acquired.context) throw new Error('当前没有可用浏览器名额')
+    if (!acquired.ok || !acquired.context) {
+      if (acquired.queued) await release(local_id)
+      throw new Error('当前没有可用浏览器名额')
+    }
     context = acquired.context
     temporary = true
-  }
-  try {
-    return await run(context)
+    try {
+      return await run(context)
+    } finally {
+      if (temporary) await release(local_id)
+    }
   } finally {
-    if (temporary) await release(local_id)
+    finishCurrent()
+    if (temporaryContextLocks.get(local_id) === chain) temporaryContextLocks.delete(local_id)
   }
 }
 
@@ -668,9 +698,20 @@ export async function stopStudent(local_id: string) {
   const v = views.get(local_id)
   if (v) {
     v.awaitingCourseSelection = false
-    setState(v, 'stopped', '已停止', 'released')
+    setState(v, 'stopped', '正在停止')
   }
-  await release(local_id)
+  const released = await release(local_id)
+  if (v) {
+    const slot = slots.get(local_id)
+    setState(
+      v,
+      'stopped',
+      released || slot === 'released'
+        ? '已停止'
+        : '浏览器进程未确认退出，保留关闭占位',
+      slot,
+    )
+  }
   await activeRuns.get(local_id)
 }
 
@@ -690,6 +731,9 @@ function stopAware<T>(local_id: string, task: Promise<T>): Promise<T> {
 
 export async function deleteStudentRuntime(local_id: string) {
   await stopStudent(local_id)
+  if (slotCountsInToolbar(slots.get(local_id)) || activeRuns.has(local_id)) {
+    throw new Error('浏览器关闭尚未确认，暂不能删除该学生运行状态')
+  }
 }
 
 async function runOne(a: LocalAccount) {
@@ -1642,6 +1686,11 @@ function scheduleStudent(a: LocalAccount) {
     setState(v, 'stopped', '本学生已停止 · ' + reason, 'released')
   }).finally(async () => {
     await release(a.local_id)
+    const view = views.get(a.local_id)
+    if (view) {
+      const slot = slots.get(a.local_id)
+      if (view.slot !== slot) setState(view, view.account, view.action, slot)
+    }
     activeRuns.delete(a.local_id)
     runAccountIds.delete(a.local_id)
     stopControllers.delete(a.local_id)
@@ -1682,7 +1731,20 @@ export function enqueueNewStudents(ids: string[]) {
 export async function stopAllStudents() {
   stoppingAll = true
   try {
-    await Promise.all([...activeRuns.keys()].map((id) => stopStudent(id)))
+    const closingOnly = [...views.entries()]
+      .filter(([id]) => !activeRuns.has(id) && slots.get(id) === 'closing')
+      .map(([id]) => id)
+    await Promise.all([
+      ...[...activeRuns.keys()].map((id) => stopStudent(id)),
+      ...closingOnly.map(async (id) => {
+        await release(id)
+        const view = views.get(id)
+        if (view) {
+          const slot = slots.get(id)
+          setState(view, 'stopped', slot === 'released' ? '已停止' : '浏览器进程未确认退出，保留关闭占位', slot)
+        }
+      }),
+    ])
     await Promise.all([...activeRuns.values()])
   } finally {
     runConcurrency = null

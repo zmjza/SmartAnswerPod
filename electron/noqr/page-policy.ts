@@ -1,7 +1,12 @@
 import type { Page } from 'patchright'
 import { upsertHomework } from '../core/live-view.ts'
 import { NOQR_PATH } from './selectors.ts'
-import { classifyNoqrPage, isNoqrAnswerPath, NoqrSessionError } from './session.ts'
+import {
+  classifyNoqrPage,
+  isNoqrAnswerPath,
+  NoqrSessionError,
+  type NoqrPageSurface,
+} from './session.ts'
 import type { NoqrCourse, NoqrHomework, NoqrPageKind, NoqrPhase } from './types.ts'
 import { sanitizeNoqrLogText, type NoqrStudentView } from './view.ts'
 
@@ -61,10 +66,24 @@ export function noqrFailurePolicy(error: unknown): NoqrFailurePolicy {
   return { status: 'submit_failed', phase: 'unsupported', preservePage: false }
 }
 
-export async function detectNoqrAnswerPageInterruption(page: Page): Promise<NoqrSessionError | null> {
+export async function detectNoqrAnswerPageInterruption(
+  page: Page,
+  opts: { settleMs?: number } = {},
+): Promise<NoqrSessionError | null> {
   if (!isNoqrAnswerPath(page.url())) return null
-  const surface = await classifyNoqrPage(page)
-  if (!['answer_boot', 'blank', 'unknown', 'error'].includes(surface)) return null
+  const abnormal = (surface: NoqrPageSurface) =>
+    ['answer_boot', 'blank', 'unknown', 'error'].includes(surface)
+  const first = await classifyNoqrPage(page)
+  if (!abnormal(first)) return null
+  // A save/navigation transition can briefly expose an unclassified document.
+  // Only preserve the page after the same abnormal surface survives a short
+  // settle window, so ordinary answer/AI errors remain isolated homework
+  // failures and can release the account slot.
+  await new Promise((resolve) =>
+    setTimeout(resolve, Math.max(0, Math.trunc(Number(opts.settleMs ?? 500)))))
+  if (!isNoqrAnswerPath(page.url())) return null
+  const second = await classifyNoqrPage(page)
+  if (!abnormal(second)) return null
   return new NoqrSessionError('answer_interrupted', '已作答答题页异常中断，保留当前页面并等待人工处理')
 }
 
@@ -72,8 +91,14 @@ export function noqrAnswerProgressInterruption(input: {
   url: string
   hasAnswerProgress: boolean
   submitConfirmed: boolean
+  pageInterrupted: boolean
 }): NoqrSessionError | null {
-  if (!input.hasAnswerProgress || input.submitConfirmed || !isNoqrAnswerPath(input.url)) return null
+  if (
+    !input.pageInterrupted ||
+    !input.hasAnswerProgress ||
+    input.submitConfirmed ||
+    !isNoqrAnswerPath(input.url)
+  ) return null
   return new NoqrSessionError('answer_interrupted', '已作答答题页出现异常，保留当前页面并等待人工处理')
 }
 
@@ -92,6 +117,13 @@ export function assertNoqrRecordPageCanReturn(url: string, surface: NoqrPageKind
 export function shouldRestoreNoqrRecordPage(currentPath: string, stopRequested: boolean): boolean {
   if (stopRequested) return false
   return currentPath.replace(/\/+$/, '') !== NOQR_PATH.courseWork
+}
+
+export function shouldStopNoqrCourseAfterHomeworkFailure(url: string): boolean {
+  // A normal homework error must not send an answer page with saved progress
+  // into the non-answer recovery path. Stop this course and let the task close
+  // the context so queued accounts can continue.
+  return isNoqrAnswerPath(url)
 }
 
 export function applyNoqrFailureToView(

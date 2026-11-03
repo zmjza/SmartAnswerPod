@@ -280,10 +280,17 @@ ipcMain.handle('kaida:accounts:update', (_e, id: string, row: { name?: string; p
   return { ok: true }
 })
 ipcMain.handle('kaida:accounts:remove', async (_e, id: string) => {
-  await deleteStudentRuntime(id)
-  removeAccount(id)
-  pushSnap()
-  return { ok: true }
+  try {
+    await deleteStudentRuntime(id)
+    removeAccount(id)
+    pushSnap()
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : '删除学生失败',
+    }
+  }
 })
 ipcMain.handle('kaida:accounts:removeAll', async (_e, confirmedIds: string[]) => {
   const ids = listAccounts().map((a) => a.local_id)
@@ -293,6 +300,9 @@ ipcMain.handle('kaida:accounts:removeAll', async (_e, confirmedIds: string[]) =>
   await stopAllStudents()
   const current = listAccounts().map((a) => a.local_id)
   if (current.length !== ids.length || current.some((id) => !ids.includes(id))) return { ok: false, removed: 0, error: '学生账号已变化，请重新确认' }
+  if (ids.some((id) => isStudentLocked(id))) {
+    return { ok: false, removed: 0, error: '仍有浏览器关闭尚未确认，请稍后重试全部删除' }
+  }
   let removed = 0
   for (const id of ids) {
     try { removeAccount(id); removed++ } catch { break }

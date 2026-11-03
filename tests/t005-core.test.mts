@@ -7,6 +7,7 @@ import {
   assertNoqrRecordPageCanReturn,
   decideNoqrRecovery,
   noqrAnswerProgressInterruption,
+  shouldStopNoqrCourseAfterHomeworkFailure,
   noqrFailurePolicy,
   terminalNoqrPhase,
 } from '../electron/noqr/page-policy.ts'
@@ -226,29 +227,50 @@ test('T005-C03c 答题页异常与结果不确定会更新真实学生视图并�
   assert.equal(view.courses[0]?.groups[0]?.rows[0]?.status, 'submitted_uncertain')
 })
 
-test('T005-C03d 已产生答题进度的答题页出现任意异常都必须保留页面', () => {
+test('T005-C03d 只有确认页面异常的已作答答题页才保留，普通业务错误不得占用槽位', () => {
   const answerUrl = 'https://coursework.shou.org.cn/course_work_detail/index.html?workId=fixture&workType=onlineWork'
+  assert.equal(noqrAnswerProgressInterruption({
+    url: answerUrl,
+    hasAnswerProgress: true,
+    submitConfirmed: false,
+    pageInterrupted: false,
+  }), null)
   const interrupted = noqrAnswerProgressInterruption({
     url: answerUrl,
     hasAnswerProgress: true,
     submitConfirmed: false,
+    pageInterrupted: true,
   })
   assert.equal(interrupted?.code, 'answer_interrupted')
   assert.equal(noqrAnswerProgressInterruption({
     url: answerUrl,
     hasAnswerProgress: false,
     submitConfirmed: false,
+    pageInterrupted: true,
   }), null)
   assert.equal(noqrAnswerProgressInterruption({
     url: 'https://coursework.shou.org.cn/course_work/index.html',
     hasAnswerProgress: true,
     submitConfirmed: false,
+    pageInterrupted: true,
   }), null)
   assert.equal(noqrAnswerProgressInterruption({
     url: answerUrl,
     hasAnswerProgress: true,
     submitConfirmed: true,
   }), null)
+  assert.equal(
+    shouldStopNoqrCourseAfterHomeworkFailure(
+      'https://coursework.shou.org.cn/course_work_detail/index.html?workId=fixture&workType=onlineWork',
+    ),
+    true,
+  )
+  assert.equal(
+    shouldStopNoqrCourseAfterHomeworkFailure(
+      'https://coursework.shou.org.cn/course_work/index.html?courseId=fixture',
+    ),
+    false,
+  )
 })
 
 test('T005-C03e 作答记录恢复遇到答题页时必须零返回并保留页面', () => {

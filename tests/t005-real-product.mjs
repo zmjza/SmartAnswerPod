@@ -25,6 +25,7 @@ export const SUPPORTED_TEST_PHASES = Object.freeze([
   'courses',
   'answer',
   'score',
+  'score-concurrent',
   'stop',
   'concurrency',
 ])
@@ -90,7 +91,7 @@ const ACTIVE_BROWSER_PHASES = new Set([
   'waiting_score',
   'retry_wait',
 ])
-const CAPACITY_HOLDING_SLOTS = new Set(['launching', 'occupied', 'occupying_verify'])
+const CAPACITY_HOLDING_SLOTS = new Set(['launching', 'occupied', 'occupying_verify', 'closing'])
 
 export function recordDisplayEvidence(evidence, alias, student) {
   if (!(evidence instanceof Map) || !alias || student?.slot !== 'occupied') return false
@@ -128,7 +129,7 @@ function normalizeEnum(value, allowed, fallback, code) {
 }
 
 function normalizeAccountParallel(value, phase) {
-  if (phase !== 'concurrency') return 1
+  if (phase !== 'concurrency' && phase !== 'score-concurrent') return 1
   if (value === undefined || value === null || String(value).trim() === '') return 2
   const configured = Number(value)
   if (!Number.isFinite(configured)) return 2
@@ -161,13 +162,14 @@ function normalizeAliasList(value, phase, credentials, minimumAliases = 1) {
     ? requested
     : credentials.accounts.slice(0, minimumAliases).map((account) => account.alias)
 
-  if (phase === 'concurrency' && aliases.length < minimumAliases) {
+  const allowsMultipleAccounts = phase === 'concurrency' || phase === 'score-concurrent'
+  if (allowsMultipleAccounts && aliases.length < minimumAliases) {
     fail(
       'concurrency_aliases_missing',
       `Concurrency phase requires at least ${minimumAliases} distinct account aliases`,
     )
   }
-  if (phase !== 'concurrency' && aliases.length > 1) {
+  if (!allowsMultipleAccounts && aliases.length > 1) {
     fail('invalid_alias_list', 'Only the concurrency phase accepts multiple aliases')
   }
   if (new Set(aliases).size !== aliases.length) {
@@ -220,7 +222,7 @@ export function normalizeHarnessConfig(env = process.env, credentials) {
     env.KAIDA_TEST_ALIAS,
     phase,
     credentials,
-    phase === 'concurrency' ? accountParallel + 1 : 1,
+    phase === 'concurrency' || phase === 'score-concurrent' ? accountParallel + 1 : 1,
   )
   const bankSource = normalizeEnum(
     env.KAIDA_T005_BANK_SOURCE,
@@ -233,6 +235,7 @@ export function normalizeHarnessConfig(env = process.env, credentials) {
     ? Math.max(30_000, configuredMaxRuntime)
     : Number.POSITIVE_INFINITY
   const answerRoundLimit = Math.min(10, Math.max(1, Number(env.KAIDA_ANSWER_ROUND_LIMIT) || 10))
+  const courseCount = Math.min(8, Math.max(1, Number(env.KAIDA_T005_COURSE_COUNT) || 1))
   const explicitScoreStopRound = normalizeStopAfterScoreRound(env.KAIDA_T005_STOP_AFTER_SCORE_ROUND)
 
   return {
@@ -246,6 +249,7 @@ export function normalizeHarnessConfig(env = process.env, credentials) {
     accounts,
     accountParallel,
     courseParallel: Math.min(8, Math.max(1, Number(env.KAIDA_T005_COURSE_PARALLEL) || 2)),
+    courseCount,
     answerRoundLimit,
     logEnabled: normalizeBoolean(env.KAIDA_T005_LOG_ENABLED, true, 'invalid_log_enabled'),
     forceRetry: normalizeBoolean(env.KAIDA_T005_FORCE_RETRY, false, 'invalid_force_retry'),
@@ -468,6 +472,32 @@ export function chooseNoqrTestCourse(courses, opts) {
       (course?.groups || []).some((group) => (group.rows || []).length > 0)) ||
     (Array.isArray(courses) ? courses[0] : null) ||
     null
+}
+
+export function chooseNoqrTestCourses(courses, opts) {
+  const requestedCount = Math.min(
+    8,
+    Math.max(1, Math.floor(Number(opts?.courseCount) || 1)),
+  )
+  if (requestedCount === 1) {
+    const selected = chooseNoqrTestCourse(courses, opts)
+    return selected ? [selected] : []
+  }
+  const allCourses = Array.isArray(courses) ? [...courses] : []
+  const candidates = allCourses
+    .filter((course) => noqrTestCourseTodoCount(course) > 0)
+    .filter((course) => !opts?.courseMatch || String(course?.name || '').includes(opts.courseMatch))
+    .sort((left, right) => opts?.courseStrategy === 'max-todo'
+      ? noqrTestCourseTodoCount(right) - noqrTestCourseTodoCount(left) ||
+        noqrTestCourseRowCount(right) - noqrTestCourseRowCount(left)
+      : noqrTestCourseTodoCount(left) - noqrTestCourseTodoCount(right) ||
+        noqrTestCourseRowCount(left) - noqrTestCourseRowCount(right))
+  const start = opts?.courseIndex > 0 ? Math.max(0, Number(opts.courseIndex) - 1) : 0
+  const selected = candidates.slice(start, start + requestedCount)
+  if (selected.length >= requestedCount || !opts?.courseMatch || !opts?.forceRetry) return selected
+  return allCourses
+    .filter((course) => String(course?.name || '').includes(opts.courseMatch))
+    .slice(0, requestedCount)
 }
 
 function safeToken(value) {
@@ -760,21 +790,25 @@ export function noqrPacingViolationCount(entries, minimumMsPerQuestion = 1_500) 
       seen.add(entry.questionFingerprint)
       distinct.push(entry)
     }
+    let previousInterval = null
+    let shortAfterSlowUsed = false
     for (let index = 1; index < distinct.length; index++) {
       const interval = safeCount(distinct[index].monitorOffsetMs) -
         safeCount(distinct[index - 1].monitorOffsetMs)
       // A single short gap can follow a slow lookup/response from the prior
       // question, even though the next question still receives its own pacing
       // wait. Reject only a sub-500ms burst or two consecutive fast gaps.
-      if (interval < minimum / 2) {
+      const previousWasSlow = previousInterval !== null && previousInterval >= minimum * 2
+      if (interval < minimum / 2 && (!previousWasSlow || shortAfterSlowUsed)) {
         violations++
-        continue
       }
+      shortAfterSlowUsed = interval < minimum / 2
       if (index >= 2) {
         const window = safeCount(distinct[index].monitorOffsetMs) -
           safeCount(distinct[index - 2].monitorOffsetMs)
         if (window < minimum * 2) violations++
       }
+      previousInterval = interval
     }
   }
   return violations
@@ -1265,6 +1299,8 @@ export function preflightSummary(config, credentials) {
     aiKeySkPrefix: selected.aiKeySkPrefix,
     displayMode: config.displayMode,
     courseScope: config.courseScope,
+    courseParallel: config.courseParallel,
+    courseCount: config.courseCount,
     courseMatchSet: Boolean(config.courseMatch),
     testPhase: config.phase,
     answerRoundLimit: config.answerRoundLimit,
@@ -1331,10 +1367,15 @@ export async function installPassiveNetworkMonitor(app) {
       installed: true,
       monitoringStartedAt: Date.now(),
       browserContexts: 0,
+      activeBrowserContexts: 0,
+      maxActiveBrowserContexts: 0,
       browserExecutable,
       answerPageRequests: 0,
       activeAnswerPages: 0,
       maxActiveAnswerPages: 0,
+      coursePageRequests: 0,
+      activeCoursePages: 0,
+      maxActiveCoursePages: 0,
       answerWorkTypes: [],
       unsupportedAnswerWorkTypeCount: 0,
       loginSubmissionRequests: 0,
@@ -1376,6 +1417,7 @@ export async function installPassiveNetworkMonitor(app) {
     }
     globalThis[key] = state
     const activeAnswerPages = new Set()
+    const activeCoursePages = new Set()
     const trackedPages = new WeakSet()
     const pageSequences = new WeakMap()
     const pageSaveRequestSequences = new WeakMap()
@@ -1403,15 +1445,26 @@ export async function installPassiveNetworkMonitor(app) {
       state.activeAnswerPages = activeAnswerPages.size
       state.maxActiveAnswerPages = Math.max(state.maxActiveAnswerPages, state.activeAnswerPages)
     }
+    const setCoursePageActive = (page, active) => {
+      if (active) activeCoursePages.add(page)
+      else activeCoursePages.delete(page)
+      state.activeCoursePages = activeCoursePages.size
+      state.maxActiveCoursePages = Math.max(state.maxActiveCoursePages, state.activeCoursePages)
+    }
     const trackPage = (page) => {
-      page.on('close', () => setAnswerPageActive(page, false))
+      page.on('close', () => {
+        setAnswerPageActive(page, false)
+        setCoursePageActive(page, false)
+      })
       page.on('framenavigated', (frame) => {
         if (frame !== page.mainFrame()) return
         try {
           const pathname = new URL(frame.url()).pathname.replace(/\/+$/, '')
           setAnswerPageActive(page, pathname === '/course_work_detail/index.html')
+          setCoursePageActive(page, pathname === '/course_work/index.html')
         } catch {
           setAnswerPageActive(page, false)
+          setCoursePageActive(page, false)
         }
       })
     }
@@ -1425,14 +1478,30 @@ export async function installPassiveNetworkMonitor(app) {
     chromium.launchPersistentContext = async function (...args) {
       const context = await original.apply(this, args)
       state.browserContexts++
+      state.activeBrowserContexts++
+      state.maxActiveBrowserContexts = Math.max(
+        state.maxActiveBrowserContexts,
+        state.activeBrowserContexts,
+      )
       const contextSequence = ++state.mutationContextSequence
       const contextPageState = { nextPageSequence: 0 }
+      context.on('close', () => {
+        state.activeBrowserContexts = Math.max(0, state.activeBrowserContexts - 1)
+      })
       for (const page of context.pages()) registerPage(page, contextPageState)
       context.on('page', (page) => registerPage(page, contextPageState))
       context.on('request', (request) => {
         if (loginSubmission(request)) state.loginSubmissionRequests++
         try {
           const url = new URL(request.url())
+          if (url.pathname.replace(/\/+$/, '') === '/course_work/index.html') {
+            state.coursePageRequests++
+            try {
+              setCoursePageActive(request.frame().page(), true)
+            } catch {
+              // Requests without a page are still counted, but cannot affect live page peaks.
+            }
+          }
           const kind = mutationKind(url)
           if (kind) {
             state.mutationRequests[kind]++
@@ -1602,13 +1671,26 @@ export async function readPassiveNetworkSummary(app) {
       submit_all: readLedger('submit_all'),
       finish: readLedger('finish'),
     }
+    const activeBrowserContexts = Number(state?.activeBrowserContexts) || 0
+    const activeCoursePages = Number(state?.activeCoursePages) || 0
     return {
       browserContexts: Number(state?.browserContexts) || 0,
+      activeBrowserContexts,
+      maxActiveBrowserContexts: Math.max(
+        activeBrowserContexts,
+        Number(state?.maxActiveBrowserContexts) || 0,
+      ),
       browserExecutable: state?.browserExecutable === 'system' || state?.browserExecutable === 'bundled'
         ? state.browserExecutable
         : 'missing',
       answerPageRequests: Number(state?.answerPageRequests) || 0,
       maxActiveAnswerPages: Number(state?.maxActiveAnswerPages) || 0,
+      coursePageRequests: Number(state?.coursePageRequests) || 0,
+      activeCoursePages,
+      maxActiveCoursePages: Math.max(
+        activeCoursePages,
+        Number(state?.maxActiveCoursePages) || 0,
+      ),
       answerWorkTypes: Array.isArray(state?.answerWorkTypes)
         ? state.answerWorkTypes.filter((value) => allowedWorkTypes.has(value))
         : [],
@@ -1692,16 +1774,32 @@ async function selectStudentInUi(product, alias) {
   const page = product.page
   const direct = page.locator('#student-switcher .student-pill').filter({ hasText: alias }).first()
   if (await direct.isVisible().catch(() => false)) {
-    await direct.click()
+    await direct.click({ force: true })
   } else {
     const more = page.locator('#student-more button').first()
     if (!(await more.count())) fail('student_switch_ui_missing', 'Student switcher is unavailable')
-    await more.click()
+    await more.click({ force: true })
     const option = page.locator('#student-more .source-popover button').filter({ hasText: alias }).first()
-    await waitForLocatorEnabled(option, page)
-    await option.click()
+    try {
+      await waitForLocatorEnabled(option, page, 10_000)
+      await option.click({ force: true })
+    } catch {
+      const clicked = await page.evaluate((target) => {
+        const buttons = [...document.querySelectorAll('#student-more .source-popover button')]
+        const match = buttons.find((button) =>
+          (button.textContent || '').replace(/\s+/g, ' ').includes(target))
+        if (!match) return false
+        match.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        return true
+      }, alias)
+      if (!clicked) fail('student_switch_target_missing', 'Requested student was not present in the switcher')
+    }
   }
-  await page.locator('#student-name').filter({ hasText: alias }).waitFor({ state: 'visible', timeout: 30_000 })
+  await page.locator('#student-name').filter({ hasText: alias }).waitFor({ state: 'visible', timeout: 10_000 })
+  const selectedId = await page.locator('#student-name').getAttribute('data-student-id')
+  if (selectedId !== product.ids[alias]) {
+    fail('student_switch_mismatch', 'Student switcher selected a different account')
+  }
 }
 
 async function findCourseCardIndexes(product, courseName) {
@@ -1919,7 +2017,12 @@ async function launchIsolatedProduct(config, credentials, bank) {
 }
 
 async function readSnapshot(product) {
-  return rendererCall(product, 'globalThis.kaida.snapshot()')
+  return withHarnessTimeout(
+    rendererCall(product, 'globalThis.kaida.snapshot()'),
+    15_000,
+    'harness_snapshot_timeout',
+    'Product snapshot collection did not complete',
+  )
 }
 
 function studentForAlias(snapshot, alias) {
@@ -1953,8 +2056,126 @@ export function inspectConcurrencySnapshot(snapshot, aliases, accountParallel) {
       heldCount <= limit,
     allReleased: requestedAliases.length > 0 &&
       present.length === requestedAliases.length &&
+      queuedCount === 0 &&
       releasedCount === requestedAliases.length,
   }
+}
+
+export function createConcurrencyObservation(accountParallel) {
+  return {
+    accountParallel: normalizeAccountParallel(accountParallel, 'concurrency'),
+    queuedObserved: false,
+    queuedAliases: [],
+    promotedQueueAliases: [],
+    queueFlowObserved: false,
+    maxHeld: 0,
+    maxBrowsers: 0,
+  }
+}
+
+export function recordConcurrencyObservation(observation, snapshot, aliases, accountParallel) {
+  const limit = normalizeAccountParallel(accountParallel, 'concurrency')
+  const state = inspectConcurrencySnapshot(snapshot, aliases, limit)
+  if (!observation || typeof observation !== 'object') return state
+  observation.accountParallel = limit
+  observation.queuedObserved = observation.queuedObserved === true || state.queueObserved
+  const queuedAliases = new Set(
+    Array.isArray(observation.queuedAliases) ? observation.queuedAliases : [],
+  )
+  const promotedQueueAliases = new Set(
+    Array.isArray(observation.promotedQueueAliases) ? observation.promotedQueueAliases : [],
+  )
+  for (const alias of Array.isArray(aliases) ? aliases : []) {
+    const student = studentForAlias(snapshot, alias)
+    if (student?.slot === 'queued' || student?.queued === true) queuedAliases.add(alias)
+    if (
+      queuedAliases.has(alias) &&
+      ['launching', 'occupied', 'occupying_verify'].includes(student?.slot) &&
+      (LOGIN_SUCCESS_PHASES.has(student?.phase) || student?.account === 'logged_in')
+    ) {
+      promotedQueueAliases.add(alias)
+    }
+  }
+  observation.queuedAliases = [...queuedAliases]
+  observation.promotedQueueAliases = [...promotedQueueAliases]
+  observation.queueFlowObserved = promotedQueueAliases.size > 0
+  observation.maxHeld = Math.max(Math.trunc(safeCount(observation.maxHeld)), state.heldCount)
+  observation.maxBrowsers = Math.max(
+    Math.trunc(safeCount(observation.maxBrowsers)),
+    state.browserCount,
+  )
+  return state
+}
+
+export function summarizeConcurrencyObservation(observation, finalState, network) {
+  const accountParallel = normalizeAccountParallel(observation?.accountParallel, 'concurrency')
+  const maxHeld = Math.trunc(safeCount(observation?.maxHeld))
+  const maxBrowsers = Math.trunc(safeCount(observation?.maxBrowsers))
+  const activeBrowserContexts = Math.trunc(safeCount(network?.activeBrowserContexts))
+  const maxActiveBrowserContexts = Math.max(
+    activeBrowserContexts,
+    Math.trunc(safeCount(network?.maxActiveBrowserContexts)),
+  )
+  return {
+    accountParallel,
+    queuedObserved: observation?.queuedObserved === true,
+    queueFlowObserved: observation?.queueFlowObserved === true,
+    maxHeld,
+    maxBrowsers,
+    finalBrowsers: Math.trunc(safeCount(finalState?.browserCount)),
+    finalQueued: Math.trunc(safeCount(finalState?.queuedCount)),
+    allReleased: finalState?.allReleased === true,
+    activeBrowserContexts,
+    maxActiveBrowserContexts,
+    peakWithinLimit: maxHeld <= accountParallel &&
+      maxBrowsers <= accountParallel &&
+      maxActiveBrowserContexts <= accountParallel,
+    peakObserved: maxHeld === accountParallel &&
+      maxBrowsers === accountParallel &&
+      maxActiveBrowserContexts === accountParallel,
+  }
+}
+
+export function noqrConcurrencyEvidenceFailure(evidence, accountParallel) {
+  const limit = normalizeAccountParallel(accountParallel, 'concurrency')
+  const maxHeld = Math.trunc(safeCount(evidence?.maxHeld))
+  const maxBrowsers = Math.trunc(safeCount(evidence?.maxBrowsers))
+  const maxActiveBrowserContexts = Math.trunc(safeCount(evidence?.maxActiveBrowserContexts))
+  const activeBrowserContexts = Math.trunc(safeCount(evidence?.activeBrowserContexts))
+  const finalBrowsers = Math.trunc(safeCount(evidence?.finalBrowsers))
+  const finalQueued = Math.trunc(safeCount(evidence?.finalQueued))
+  if (evidence?.allReleased !== true) return 'concurrency_stop_not_released'
+  if (finalQueued !== 0) return 'concurrency_queue_not_empty'
+  if (evidence?.queuedObserved !== true) return 'concurrency_queue_not_observed'
+  if (evidence?.queueFlowObserved !== true) return 'concurrency_queue_flow_not_observed'
+  if (maxHeld > limit) return 'account_parallel_exceeded'
+  if (maxHeld !== limit) return 'concurrency_held_peak_mismatch'
+  if (maxBrowsers > limit) return 'concurrency_browser_count_mismatch'
+  if (maxBrowsers !== limit) return 'concurrency_browser_peak_not_observed'
+  if (maxActiveBrowserContexts > limit) return 'active_browser_contexts_exceeded'
+  if (maxActiveBrowserContexts !== limit) return 'active_browser_contexts_not_observed'
+  if (finalBrowsers !== 0 || activeBrowserContexts !== 0) {
+    return 'concurrency_browsers_not_released'
+  }
+  return null
+}
+
+export function noqrCourseConcurrencyFailure(network, expectedParallel, extraBasePages = 1) {
+  const expectedWorkers = Math.min(8, Math.max(1, Math.trunc(Number(expectedParallel) || 1)))
+  const expectedActivePages = expectedWorkers + Math.max(0, Math.trunc(Number(extraBasePages) || 0))
+  const maxActiveCoursePages = Math.trunc(safeCount(network?.maxActiveCoursePages))
+  if (maxActiveCoursePages > expectedActivePages) return 'course_parallel_exceeded'
+  if (maxActiveCoursePages !== expectedActivePages) return 'course_parallel_peak_not_observed'
+  return null
+}
+
+export function scoreConcurrentCourseBasePages(accountParallel, courseParallel, courseCount) {
+  const accounts = Math.max(1, Math.trunc(Number(accountParallel) || 1))
+  const expectedWorkers = Math.min(
+    Math.max(1, Math.trunc(Number(courseParallel) || 1)),
+    Math.max(1, Math.trunc(Number(courseCount) || 1)),
+  )
+  return Math.max(0, expectedWorkers * (accounts - 1)) + accounts
 }
 
 function snapshotDiagnostics(config, snapshot) {
@@ -1975,6 +2196,24 @@ function logEvent(event) {
   console.log(JSON.stringify(event))
 }
 
+function logHarnessStage(stage, details = {}) {
+  logEvent({ event: 'harness_stage', stage, ...details })
+}
+
+async function withHarnessTimeout(promise, timeoutMs, code, message) {
+  let timer
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => fail(code, message), timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function startViaPrimaryAction(product) {
   await clickPrimaryAction(product)
 }
@@ -1991,7 +2230,29 @@ async function stopViaUi(product, accounts) {
   const selector = accounts.length === 1 ? '#tool-stop' : '#btn-stop-all'
   const button = product.page.locator(selector)
   await waitForLocatorEnabled(button, product.page)
-  await button.click()
+  const action = await button.getAttribute('data-action')
+  const expectedAction = accounts.length === 1 ? 'stop-current' : 'stop-all'
+  if (action !== expectedAction) {
+    fail('stop_action_mismatch', 'Product stop control did not expose the expected test identity')
+  }
+  if (accounts.length === 1) {
+    const targetId = await button.getAttribute('data-student-id')
+    if (targetId !== product.ids[accounts[0].alias]) {
+      fail('stop_target_mismatch', 'Stop-current control was bound to a different account')
+    }
+  }
+  await button.scrollIntoViewIfNeeded()
+  try {
+    await button.click()
+  } catch {
+    const clicked = await button.evaluate((node) => {
+      if (!(node instanceof HTMLElement)) return false
+      node.click()
+      return true
+    })
+    if (!clicked) fail('stop_control_click_failed', 'Product stop control could not be activated')
+  }
+  return { selector, action }
 }
 
 async function pollProduct(product, config, check, opts = {}) {
@@ -2075,17 +2336,25 @@ async function waitForCourses(product, config) {
   }))
 }
 
-async function waitForSelectionGate(product, config) {
-  return pollProduct(product, config, (snapshot) => config.accounts.every((account) =>
-    Boolean(studentForAlias(snapshot, account.alias)?.awaitingCourseSelection)))
+async function waitForSelectionGate(product, config, aliases = null, pollOpts = {}) {
+  const allowed = Array.isArray(aliases) ? new Set(aliases) : null
+  const accounts = allowed
+    ? config.accounts.filter((account) => allowed.has(account.alias))
+    : config.accounts
+  return pollProduct(product, config, (snapshot) => accounts.every((account) =>
+    Boolean(studentForAlias(snapshot, account.alias)?.awaitingCourseSelection)), pollOpts)
 }
 
-async function selectFirstCourses(product, config) {
+async function selectFirstCourses(product, config, aliases = null) {
+  const allowed = Array.isArray(aliases) ? new Set(aliases) : null
+  const accounts = allowed
+    ? config.accounts.filter((account) => allowed.has(account.alias))
+    : config.accounts
   const selectionDeadline = Date.now() + 120_000
   let snapshot = await readSnapshot(product)
   let plans = []
   for (;;) {
-    plans = config.accounts.map((account) => {
+    plans = accounts.map((account) => {
       const student = studentForAlias(snapshot, account.alias)
       const courses = student?.courses || []
       const candidates = courses
@@ -2101,20 +2370,24 @@ async function selectFirstCourses(product, config) {
         student,
         courses,
         candidates,
-        course: chooseNoqrTestCourse(courses, config),
+        selectedCourses: chooseNoqrTestCourses(courses, config),
       }
     })
-    if (plans.every((plan) => plan.course) || Date.now() >= selectionDeadline) break
+    if (
+      plans.every((plan) => plan.selectedCourses.length >= config.courseCount) ||
+      Date.now() >= selectionDeadline
+    ) break
     await new Promise((resolveWait) => setTimeout(resolveWait, 500))
     snapshot = await readSnapshot(product)
   }
   const targets = []
-  for (const { account, student, courses, candidates, course } of plans) {
+  for (const { account, student, courses, candidates, selectedCourses } of plans) {
     logEvent({
       phase: 'course_candidates',
       alias: account.alias,
       strategy: config.courseStrategy,
       courseMatchSet: Boolean(config.courseMatch),
+      requestedCourseCount: config.courseCount,
       courses: courses.map((row) => ({
         name: String(row?.name || '').slice(0, 80),
         todoCount: noqrTestCourseTodoCount(row),
@@ -2126,15 +2399,25 @@ async function selectFirstCourses(product, config) {
         rowCount: noqrTestCourseRowCount(row),
       })),
     })
-    if (config.courseMatch && !course) {
+    if (config.courseMatch && !selectedCourses.length) {
       fail('course_match_not_found', 'No course matched the requested test-only selector')
     }
-    if (!course?.key || !course?.name) fail('course_selection_failed', 'No selectable course appeared in the product')
-    const courseIndex = (student?.courses || []).indexOf(course)
-    const occurrence = (student?.courses || [])
-      .slice(0, courseIndex + 1)
-      .filter((candidate) => candidate.name === course.name).length
-    targets.push({ alias: account.alias, key: course.key, name: course.name, occurrence })
+    if (selectedCourses.length < config.courseCount) {
+      fail(
+        'course_count_not_available',
+        'The requested number of selectable courses was not available',
+      )
+    }
+    for (const course of selectedCourses) {
+      if (!course?.key || !course?.name) {
+        fail('course_selection_failed', 'No selectable course appeared in the product')
+      }
+      const courseIndex = (student?.courses || []).indexOf(course)
+      const occurrence = (student?.courses || [])
+        .slice(0, courseIndex + 1)
+        .filter((candidate) => candidate.name === course.name).length
+      targets.push({ alias: account.alias, key: course.key, name: course.name, occurrence })
+    }
   }
 
   for (const target of targets) {
@@ -2160,9 +2443,9 @@ async function startSelectedCourses(product) {
   await clickPrimaryAction(product)
 }
 
-async function prepareSelectedCourses(product, config) {
-  await waitForSelectionGate(product, config)
-  await selectFirstCourses(product, config)
+async function prepareSelectedCourses(product, config, aliases = null) {
+  await waitForSelectionGate(product, config, aliases)
+  await selectFirstCourses(product, config, aliases)
   await startSelectedCourses(product)
 }
 
@@ -2272,12 +2555,72 @@ function assertNormalHomeworkSlotEvidence(config, summaries) {
   )
 }
 
+async function finalizeConcurrencyEvidence(product, observation, finalState, config) {
+  logHarnessStage('concurrency_finalize_start', {
+    accountParallel: config.accountParallel,
+    browserCount: finalState?.browserCount,
+    queuedCount: finalState?.queuedCount,
+    allReleased: finalState?.allReleased,
+  })
+  const network = await withHarnessTimeout(
+    readPassiveNetworkSummary(product.app),
+    30_000,
+    'harness_network_summary_timeout',
+    'Passive network evidence collection did not complete',
+  )
+  product.finalNetworkSummary = network
+  const evidence = summarizeConcurrencyObservation(observation, finalState, network)
+  const failure = noqrConcurrencyEvidenceFailure(evidence, config.accountParallel)
+  logHarnessStage('concurrency_finalize_done', {
+    accountParallel: config.accountParallel,
+    maxHeld: evidence.maxHeld,
+    maxBrowsers: evidence.maxBrowsers,
+    maxActiveBrowserContexts: evidence.maxActiveBrowserContexts,
+    activeBrowserContexts: evidence.activeBrowserContexts,
+    failure: failure || null,
+  })
+  if (!failure) return evidence
+  const messages = {
+    account_parallel_exceeded: 'Concurrent account slots exceeded the configured account parallel limit',
+    concurrency_stop_not_released: 'Concurrent phase did not release every account slot',
+    concurrency_queue_not_observed: 'Concurrent phase did not observe a queued account',
+    concurrency_queue_flow_not_observed: 'Queued account never advanced into a real browser slot',
+    concurrency_held_peak_mismatch: 'Concurrent phase did not reach the configured held-account peak',
+    concurrency_browser_count_mismatch: 'Concurrent browser peak exceeded the configured account parallel limit',
+    active_browser_contexts_exceeded: 'Active browser context peak exceeded the configured account parallel limit',
+    concurrency_browsers_not_released: 'Concurrent phase left a browser or browser context active',
+  }
+  fail(failure, messages[failure] || 'Concurrent resource evidence failed its gate', evidence)
+}
+
 async function runConfiguredPhase(product, config) {
   if (config.phase === 'concurrency' && config.accounts.length <= config.accountParallel) {
     fail(
       'concurrency_queue_not_observable',
       'Concurrency phase requires more account aliases than the configured account parallel limit',
     )
+  }
+  const concurrencyAliases = config.accounts.map((account) => account.alias)
+  const concurrencyObservation =
+    config.phase === 'concurrency' || config.phase === 'score-concurrent'
+      ? createConcurrencyObservation(config.accountParallel)
+      : null
+  const observeConcurrentSnapshot = (snapshot) => {
+    if (!concurrencyObservation) return null
+    const state = recordConcurrencyObservation(
+      concurrencyObservation,
+      snapshot,
+      concurrencyAliases,
+      config.accountParallel,
+    )
+    if (!state.withinLimit) {
+      fail(
+        'account_parallel_exceeded',
+        'Concurrent account slots exceeded the configured account parallel limit',
+        { limit: state.limit, heldCount: state.heldCount },
+      )
+    }
+    return state
   }
   await startViaPrimaryAction(product)
 
@@ -2323,53 +2666,169 @@ async function runConfiguredPhase(product, config) {
   }
 
   if (config.phase === 'concurrency') {
-    if (config.accountParallel !== 2) {
-      fail('concurrency_parallel_not_two', 'Concurrency acceptance requires accountParallel=2')
-    }
-    const aliases = config.accounts.map((account) => account.alias)
-    let queuedObserved = false
-    let maxHeld = 0
-    let maxBrowsers = 0
-    await pollProduct(product, config, (snapshot) => {
-      const state = inspectConcurrencySnapshot(snapshot, aliases, config.accountParallel)
-      queuedObserved ||= state.queueObserved
-      maxHeld = Math.max(maxHeld, state.heldCount)
-      maxBrowsers = Math.max(maxBrowsers, state.browserCount)
-      if (!state.withinLimit) {
-        fail(
-          'account_parallel_exceeded',
-          'Concurrent account slots exceeded the configured account parallel limit',
-          { limit: state.limit, heldCount: state.heldCount },
-        )
-      }
-      return state.ready
+    logHarnessStage('concurrency_wait_peak_start', {
+      accountParallel: config.accountParallel,
     })
+    const peak = await pollProduct(product, config, async (snapshot) => {
+      const state = observeConcurrentSnapshot(snapshot)
+      if (!state.ready) return false
+      const liveNetwork = await readPassiveNetworkSummary(product.app).catch(() => null)
+      return Number(liveNetwork?.activeBrowserContexts) >= config.accountParallel
+    })
+    logHarnessStage('concurrency_wait_peak_done', {
+      accountParallel: config.accountParallel,
+    })
+    const loggedInAliases = new Set()
+    const noteLoggedIn = (snapshot) => {
+      for (const account of config.accounts) {
+        const student = studentForAlias(snapshot, account.alias)
+        if (
+          student &&
+          (LOGIN_SUCCESS_PHASES.has(student.phase) || student.account === 'logged_in')
+        ) {
+          loggedInAliases.add(account.alias)
+        }
+      }
+    }
+    noteLoggedIn(peak.snapshot)
+    let visualLoginObserved = false
+    let queueFlowObserved = false
+    if (
+      process.env.KAIDA_T006_CONCURRENCY_LOGIN === '1' &&
+      config.accountParallel <= 2
+    ) {
+      logHarnessStage('concurrency_wait_login_start', {
+        accountParallel: config.accountParallel,
+        loginTarget: config.accountParallel,
+      })
+      await pollProduct(product, config, (snapshot) => {
+        observeConcurrentSnapshot(snapshot)
+        noteLoggedIn(snapshot)
+        return loggedInAliases.size >= config.accountParallel
+      }, { allowReleased: true })
+      logHarnessStage('concurrency_wait_login_done', {
+        accountParallel: config.accountParallel,
+      })
+    }
+    {
+      logHarnessStage('concurrency_queue_flow_start')
+      const peakQueuedAlias = config.accounts.find((account) =>
+        studentForAlias(peak.snapshot, account.alias)?.slot === 'queued')?.alias
+      if (!peakQueuedAlias) {
+        fail('queue_flow_fixture_missing', 'Queue peak did not contain a queued account')
+      }
+      const beforeStop = await readSnapshot(product)
+      const queuedAlias = config.accounts.find((account) =>
+        studentForAlias(beforeStop, account.alias)?.slot === 'queued')?.alias
+      const peakQueuedStudent = studentForAlias(beforeStop, peakQueuedAlias)
+      const promotedPeakAlias = Boolean(
+        peakQueuedStudent &&
+        peakQueuedStudent.slot !== 'queued' &&
+        peakQueuedStudent.slot !== 'released',
+      )
+      if (queuedAlias) {
+        const activeAlias = config.accounts.find((account) =>
+          studentForAlias(beforeStop, account.alias)?.slot === 'occupied')?.alias
+        if (!activeAlias) {
+          fail('queue_flow_fixture_missing', 'Queue flow requires one occupied account before the stop')
+        }
+        logHarnessStage('concurrency_queue_stop_selected', {
+          activeAlias,
+          queuedAlias,
+        })
+        await selectStudentInUi(product, activeAlias)
+        const stopControl = process.env.KAIDA_T006_QUEUE_STOP_MODE === 'ipc'
+          ? await stopAliases(product, [activeAlias]).then(() => ({
+            selector: 'renderer:kaida.stop',
+            action: 'stop-current',
+          }))
+          : await stopViaUi(
+            product,
+            config.accounts.filter((account) => account.alias === activeAlias),
+          )
+        logHarnessStage('concurrency_queue_stop_clicked', {
+          activeAlias,
+          queuedAlias,
+          selector: stopControl.selector,
+          action: stopControl.action,
+        })
+        await pollProduct(product, config, (snapshot) => {
+          observeConcurrentSnapshot(snapshot)
+          noteLoggedIn(snapshot)
+          const promoted = studentForAlias(snapshot, queuedAlias)
+          return Boolean(
+            promoted &&
+            ['launching', 'occupied', 'occupying_verify'].includes(promoted.slot) &&
+            (LOGIN_SUCCESS_PHASES.has(promoted.phase) || promoted.account === 'logged_in'),
+          )
+        }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
+        queueFlowObserved = true
+      } else if (promotedPeakAlias) {
+        logHarnessStage('concurrency_queue_promoted_naturally', {
+          queuedAlias: peakQueuedAlias,
+        })
+        await pollProduct(product, config, (snapshot) => {
+          observeConcurrentSnapshot(snapshot)
+          noteLoggedIn(snapshot)
+          const promoted = studentForAlias(snapshot, peakQueuedAlias)
+          return Boolean(
+            promoted &&
+            ['launching', 'occupied', 'occupying_verify'].includes(promoted.slot) &&
+            (LOGIN_SUCCESS_PHASES.has(promoted.phase) || promoted.account === 'logged_in'),
+          )
+        }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
+        queueFlowObserved = true
+      } else {
+        fail('queue_flow_fixture_missing', 'Queued account disappeared before automatic promotion')
+      }
+      if (queueFlowObserved) concurrencyObservation.queueFlowObserved = true
+      visualLoginObserved =
+        process.env.KAIDA_T006_CONCURRENCY_LOGIN === '1' &&
+        loggedInAliases.size >= Math.min(2, config.accountParallel)
+      logHarnessStage('concurrency_queue_flow_done')
+    }
+    logHarnessStage('concurrency_stop_all_start')
     const stopped = await stopAndWaitReleased(product, config)
-    const finalState = inspectConcurrencySnapshot(stopped.snapshot, aliases, config.accountParallel)
-    if (!finalState.allReleased) {
-      fail('concurrency_stop_not_released', 'Concurrency phase did not release every account slot after stop')
-    }
-    if (!queuedObserved || maxHeld !== 2) {
-      fail('concurrency_queue_not_observed', 'Concurrency phase did not observe two occupied and one queued account')
-    }
-    if (maxBrowsers !== 2) {
-      fail('concurrency_browser_count_mismatch', 'Concurrency phase did not hold exactly two live browsers')
-    }
-    if (finalState.browserCount !== 0) {
-      fail('concurrency_browsers_not_released', 'Concurrency phase left browsers alive after stop')
-    }
+    logHarnessStage('concurrency_stop_all_done', {
+      browserCount: stopped.snapshot?.machine?.browsers,
+    })
+    const finalState = inspectConcurrencySnapshot(
+      stopped.snapshot,
+      concurrencyAliases,
+      config.accountParallel,
+    )
+    const concurrencyEvidence = await finalizeConcurrencyEvidence(
+      product,
+      concurrencyObservation,
+      finalState,
+      config,
+    )
+    logHarnessStage('concurrency_phase_done')
     return {
       concurrentAccounts: config.accounts.length,
-      accountParallel: config.accountParallel,
-      queuedObserved,
-      maxHeld,
-      maxBrowsers,
-      finalBrowsers: finalState.browserCount,
-      allReleased: finalState.allReleased,
+      ...concurrencyEvidence,
+      visualLoginObserved,
+      queueFlowObserved,
     }
   }
 
-  if (config.courseScope === 'selected') await prepareSelectedCourses(product, config)
+  if (config.courseScope === 'selected') {
+    const initialSelectionAliases = config.phase === 'score-concurrent' &&
+      config.accounts.length > config.accountParallel
+      ? config.accounts.slice(0, config.accountParallel).map((account) => account.alias)
+      : null
+    if (initialSelectionAliases) {
+      logHarnessStage('score_concurrent_initial_batch_selection_start', {
+        aliases: initialSelectionAliases,
+      })
+    }
+    await prepareSelectedCourses(product, config, initialSelectionAliases)
+    if (initialSelectionAliases) {
+      logHarnessStage('score_concurrent_initial_batch_selection_done', {
+        aliases: initialSelectionAliases,
+      })
+    }
+  }
 
   if (config.phase === 'answer') {
     const progress = await pollProduct(product, config, (snapshot) => config.accounts.every((account) => {
@@ -2378,6 +2837,137 @@ async function runConfiguredPhase(product, config) {
     }))
     await stopAndWaitReleased(product, config)
     return { answerProgressObserved: true, elapsedMs: progress.elapsedMs }
+  }
+
+  if (config.phase === 'score-concurrent') {
+    const peak = await pollProduct(product, config, async (snapshot) => {
+      const state = observeConcurrentSnapshot(snapshot)
+      if (!state.ready) return false
+      const liveNetwork = await readPassiveNetworkSummary(product.app).catch(() => null)
+      return Number(liveNetwork?.activeBrowserContexts) >= config.accountParallel
+    })
+    const queuedAlias = config.accounts.find((account) =>
+      studentForAlias(peak.snapshot, account.alias)?.slot === 'queued')?.alias
+    if (!queuedAlias) {
+      fail('score_concurrent_queue_missing', 'Concurrent scoring did not expose a queued account')
+    }
+    const scoreHistory = new Map()
+    const scoredAliases = new Set()
+    const rememberScores = (snapshot) => {
+      for (const account of config.accounts) {
+        const student = studentForAlias(snapshot, account.alias)
+        for (const item of noqrScoreRoundEvidence(student)) {
+          const key = `${account.alias}:${item.homeworkIndex}:${item.attempt}`
+          scoredAliases.add(account.alias)
+          if (!scoreHistory.has(key)) scoreHistory.set(key, { ...item, alias: account.alias })
+        }
+      }
+    }
+    const firstScore = await pollProduct(product, config, (snapshot) => {
+      observeConcurrentSnapshot(snapshot)
+      rememberScores(snapshot)
+      return config.accounts.some((account) =>
+        studentForAlias(snapshot, account.alias)?.slot === 'occupied' &&
+        noqrScoreRoundEvidence(studentForAlias(snapshot, account.alias)).length > 0)
+    }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
+    const scoredAlias = config.accounts.find((account) => {
+      const student = studentForAlias(firstScore.snapshot, account.alias)
+      return student?.slot === 'occupied' && noqrScoreRoundEvidence(student).length > 0
+    })?.alias
+    if (!scoredAlias) fail('score_concurrent_scored_account_missing', 'No active account produced a score')
+    await selectStudentInUi(product, scoredAlias)
+    const stopControl = await stopViaUi(
+      product,
+      config.accounts.filter((account) => account.alias === scoredAlias),
+    )
+    logHarnessStage('score_concurrent_batch_stop', {
+      scoredAlias,
+      queuedAlias,
+      selector: stopControl.selector,
+      action: stopControl.action,
+    })
+    await pollProduct(product, config, (snapshot) => {
+      observeConcurrentSnapshot(snapshot)
+      rememberScores(snapshot)
+      const promoted = studentForAlias(snapshot, queuedAlias)
+      return Boolean(
+        promoted &&
+        ['launching', 'occupied', 'occupying_verify'].includes(promoted.slot) &&
+        (LOGIN_SUCCESS_PHASES.has(promoted.phase) || promoted.account === 'logged_in'),
+      )
+    }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
+    if (config.courseScope === 'selected') {
+      logHarnessStage('score_concurrent_batch_selection_start', { queuedAlias })
+      await waitForSelectionGate(
+        product,
+        config,
+        [queuedAlias],
+        { allowReleased: true, allowExplicitStop: true, allowTerminal: true },
+      )
+      await selectFirstCourses(product, config, [queuedAlias])
+      await startSelectedCourses(product)
+      logHarnessStage('score_concurrent_batch_selection_done', { queuedAlias })
+    }
+    concurrencyObservation.queueFlowObserved = true
+    const secondScored = await pollProduct(product, config, (snapshot) => {
+      observeConcurrentSnapshot(snapshot)
+      rememberScores(snapshot)
+      return config.accounts.some((account) =>
+        account.alias !== queuedAlias &&
+        studentForAlias(snapshot, account.alias)?.slot === 'occupied' &&
+        noqrScoreRoundEvidence(studentForAlias(snapshot, account.alias)).length > 0)
+    }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
+    const secondScoredAlias = config.accounts.find((account) =>
+      account.alias !== queuedAlias &&
+      studentForAlias(secondScored.snapshot, account.alias)?.slot === 'occupied' &&
+      noqrScoreRoundEvidence(studentForAlias(secondScored.snapshot, account.alias)).length > 0,
+    )?.alias
+    if (secondScoredAlias) {
+      await selectStudentInUi(product, secondScoredAlias)
+      const secondStop = await stopViaUi(
+        product,
+        config.accounts.filter((account) => account.alias === secondScoredAlias),
+      )
+      logHarnessStage('score_concurrent_second_batch_stop', {
+        secondScoredAlias,
+        selector: secondStop.selector,
+        action: secondStop.action,
+      })
+    }
+    await pollProduct(product, config, (snapshot) => {
+      observeConcurrentSnapshot(snapshot)
+      rememberScores(snapshot)
+      return config.accounts.every((account) =>
+        scoredAliases.has(account.alias) ||
+        ['stopped', 'not_full', 'round_ended'].includes(studentForAlias(snapshot, account.alias)?.phase),
+      )
+    }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
+    const stopped = await stopAndWaitReleased(product, config)
+    const scoreFinalState = inspectConcurrencySnapshot(
+      stopped.snapshot,
+      concurrencyAliases,
+      config.accountParallel,
+    )
+    const concurrencyEvidence = await finalizeConcurrencyEvidence(
+      product,
+      concurrencyObservation,
+      scoreFinalState,
+      config,
+    )
+    rememberScores(stopped.snapshot)
+    const summaries = config.accounts.map((account) =>
+      summarizeStudentForLog(account.alias, studentForAlias(stopped.snapshot, account.alias)))
+    assertEnglishHomeworkSlotEvidence(config, summaries)
+    assertNormalHomeworkSlotEvidence(config, summaries)
+    return {
+      scoreObserved: true,
+      scoreRoundHistory: [...scoreHistory.values()],
+      summaries,
+      ...(concurrencyEvidence || {}),
+      batchFlowObserved: true,
+      batchStopAlias: scoredAlias,
+      batchPromotedAlias: queuedAlias,
+    }
   }
 
   if (config.stopAfterScoreRound) {
@@ -2400,6 +2990,7 @@ async function runConfiguredPhase(product, config) {
       }
     }
     const scored = await pollProduct(product, config, (snapshot) => {
+      observeConcurrentSnapshot(snapshot)
       rememberScoreRounds(snapshot)
       const history = [...scoreRoundHistory.values()]
       const targetReached = noqrScoreHistoryReached(
@@ -2422,6 +3013,21 @@ async function runConfiguredPhase(product, config) {
       return terminalAfterFirstScore ? { kind: 'terminal_after_first_score' } : false
     }, { allowTerminal: true })
     const stopped = await stopAndWaitReleased(product, config)
+    const scoreFinalState = concurrencyObservation
+      ? inspectConcurrencySnapshot(
+        stopped.snapshot,
+        concurrencyAliases,
+        config.accountParallel,
+      )
+      : null
+    const concurrencyEvidence = concurrencyObservation
+      ? await finalizeConcurrencyEvidence(
+        product,
+        concurrencyObservation,
+        scoreFinalState,
+        config,
+      )
+      : null
     rememberScoreRounds(stopped.snapshot)
     const summaries = config.accounts.map((account) =>
       summarizeStudentForLog(account.alias, studentForAlias(stopped.snapshot, account.alias)))
@@ -2449,13 +3055,30 @@ async function runConfiguredPhase(product, config) {
       reanswerObserved: retryObserved,
       scoreRoundHistory: history,
       summaries,
+      ...(concurrencyEvidence || {}),
     }
   }
 
-  const finished = await pollProduct(product, config, (snapshot) =>
-    snapshot.running === false &&
-    config.accounts.every((account) => studentForAlias(snapshot, account.alias)?.slot === 'released'),
-  { allowReleased: true, allowTerminal: true })
+  const finished = await pollProduct(product, config, (snapshot) => {
+    observeConcurrentSnapshot(snapshot)
+    return snapshot.running === false &&
+      config.accounts.every((account) => studentForAlias(snapshot, account.alias)?.slot === 'released')
+  }, { allowReleased: true, allowTerminal: true })
+  const scoreFinalState = concurrencyObservation
+    ? inspectConcurrencySnapshot(
+      finished.snapshot,
+      concurrencyAliases,
+      config.accountParallel,
+    )
+    : null
+  const concurrencyEvidence = concurrencyObservation
+    ? await finalizeConcurrencyEvidence(
+      product,
+      concurrencyObservation,
+      scoreFinalState,
+      config,
+    )
+    : null
   const summaries = config.accounts.map((account) =>
     summarizeStudentForLog(account.alias, studentForAlias(finished.snapshot, account.alias)))
   if (!summaries.every((summary) => summary.scoredHomeworkCount > 0)) {
@@ -2477,14 +3100,64 @@ async function runConfiguredPhase(product, config) {
   assertEnglishHomeworkSlotEvidence(config, summaries)
   assertNormalHomeworkSlotEvidence(config, summaries)
   const timingUiObserved = await assertNoqrTimingUi(product, config)
-  return { scoreObserved: true, timingUiObserved, summaries }
+  return {
+    scoreObserved: true,
+    timingUiObserved,
+    summaries,
+    ...(concurrencyEvidence || {}),
+  }
 }
 
 async function closeProduct(product, aliases) {
   if (!product) return
-  await stopAliases(product, aliases)
-  await product.app.close().catch(() => {})
-  removeProfile(product.profileDir)
+  try {
+    try {
+      await withHarnessTimeout(
+        stopAliases(product, aliases),
+        15_000,
+        'harness_stop_aliases_timeout',
+        'Product stop commands did not complete',
+      )
+    } catch {
+      logHarnessStage('product_stop_aliases_timed_out')
+    }
+    try {
+      await withHarnessTimeout(
+        product.app.close(),
+        30_000,
+        'harness_app_close_timeout',
+        'Electron application did not close',
+      )
+    } catch {
+      logHarnessStage('product_close_forced')
+      const child = product.app.process()
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        // The bounded wait below is the source of truth.
+      }
+      await new Promise((resolveWait) => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolveWait()
+          return
+        }
+        const timer = setTimeout(resolveWait, 5_000)
+        child.once('exit', () => {
+          clearTimeout(timer)
+          resolveWait()
+        })
+      })
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          // Best-effort test-process cleanup only.
+        }
+      }
+    }
+  } finally {
+    removeProfile(product.profileDir)
+  }
 }
 
 async function runHarness(config, credentials) {
@@ -2504,9 +3177,13 @@ async function runHarness(config, credentials) {
       accountParallel: config.accountParallel,
       displayMode: config.displayMode,
       courseScope: config.courseScope,
+      courseParallel: config.courseParallel,
+      courseCount: config.courseCount,
       courseMatchSet: Boolean(config.courseMatch),
       testPhase: config.phase,
       answerRoundLimit: config.answerRoundLimit,
+      courseParallel: config.courseParallel,
+      courseCount: config.courseCount,
       forceRetry: config.forceRetry,
       stopAfterScoreRound: config.stopAfterScoreRound,
       logEnabled: config.logEnabled,
@@ -2516,14 +3193,27 @@ async function runHarness(config, credentials) {
 
     let outcome
     try {
+      logHarnessStage('configured_phase_start', { testPhase: config.phase })
       outcome = await runConfiguredPhase(product, config)
+      logHarnessStage('configured_phase_done', { testPhase: config.phase })
     } catch (error) {
-      const failureNetwork = await readPassiveNetworkSummary(product.app).catch(() => null)
+      logHarnessStage('failure_network_start', { testPhase: config.phase })
+      const failureNetwork = await withHarnessTimeout(
+        readPassiveNetworkSummary(product.app),
+        30_000,
+        'harness_failure_network_timeout',
+        'Failure evidence collection did not complete',
+      ).catch(() => null)
       if (failureNetwork) {
         logEvent({
           phase: 'failure_network',
           aliases: config.accounts.map((account) => account.alias),
           testPhase: config.phase,
+          activeBrowserContexts: failureNetwork.activeBrowserContexts,
+          maxActiveBrowserContexts: failureNetwork.maxActiveBrowserContexts,
+          coursePageRequests: failureNetwork.coursePageRequests,
+          activeCoursePages: failureNetwork.activeCoursePages,
+          maxActiveCoursePages: failureNetwork.maxActiveCoursePages,
           answerPageRequests: failureNetwork.answerPageRequests,
           mutationRequests: failureNetwork.mutationRequests,
           mutationAccepted: failureNetwork.mutationAccepted,
@@ -2533,11 +3223,23 @@ async function runHarness(config, credentials) {
           mutationMaxDurationMs: failureNetwork.mutationMaxDurationMs,
         })
       }
+      logHarnessStage('failure_network_done', {
+        testPhase: config.phase,
+        collected: Boolean(failureNetwork),
+      })
       throw error
     }
     const bankStats = bank.stats()
     await new Promise((resolveWait) => setTimeout(resolveWait, 250))
-    const network = await readPassiveNetworkSummary(product.app)
+    logHarnessStage('network_summary_start', { testPhase: config.phase })
+    const network = product.finalNetworkSummary || await withHarnessTimeout(
+      readPassiveNetworkSummary(product.app),
+      30_000,
+      'harness_network_summary_timeout',
+      'Final passive network evidence collection did not complete',
+    )
+    product.finalNetworkSummary = network
+    logHarnessStage('network_summary_done', { testPhase: config.phase })
     const saveRequests = network.mutationRequests.submit_one + network.mutationRequests.submit_all
     const saveAccepted = network.mutationAccepted.submit_one + network.mutationAccepted.submit_all
     const saveRequestLedger = [
@@ -2562,28 +3264,83 @@ async function runHarness(config, credentials) {
         },
       )
     }
-    if ((config.phase === 'answer' || config.phase === 'score') && network.answerPageRequests === 0) {
+    if ((config.phase === 'answer' || config.phase === 'score' || config.phase === 'score-concurrent') && network.answerPageRequests === 0) {
       fail('answer_page_not_observed', 'Answer phase did not reach a real answer page')
     }
-    if ((config.phase === 'answer' || config.phase === 'score') && bankStats.GET === 0) {
+    if ((config.phase === 'answer' || config.phase === 'score' || config.phase === 'score-concurrent') && bankStats.GET === 0) {
       fail('bank_get_missing', 'Answer phase did not issue the required read-only bank GET')
     }
-    if (config.phase === 'concurrency') {
+    if (config.phase === 'concurrency' || config.phase === 'score-concurrent') {
+      const resourceEvidence = {
+        accountParallel: config.accountParallel,
+        queuedObserved: outcome.queuedObserved,
+        maxHeld: outcome.maxHeld,
+        maxBrowsers: outcome.maxBrowsers,
+        finalBrowsers: outcome.finalBrowsers,
+        finalQueued: outcome.finalQueued,
+        allReleased: outcome.allReleased,
+        queueFlowObserved: outcome.queueFlowObserved,
+        activeBrowserContexts: network.activeBrowserContexts,
+        maxActiveBrowserContexts: Math.max(
+          Math.trunc(safeCount(outcome.maxActiveBrowserContexts)),
+          Math.trunc(safeCount(network.maxActiveBrowserContexts)),
+        ),
+        peakObserved: outcome.peakObserved === true,
+      }
+      const concurrencyFailure = noqrConcurrencyEvidenceFailure(
+        resourceEvidence,
+        config.accountParallel,
+      )
+      if (concurrencyFailure) {
+        fail(
+          concurrencyFailure,
+          'Concurrent resource evidence failed its final network gate',
+          resourceEvidence,
+        )
+      }
       if (
-        config.accountParallel !== 2 ||
-        outcome.maxBrowsers !== 2 ||
-        network.browserContexts < 2 ||
-        network.browserContexts > config.accounts.length
+        config.phase === 'concurrency' &&
+        (network.browserContexts < config.accountParallel ||
+          network.browserContexts > config.accounts.length)
       ) {
-        fail('concurrency_browser_evidence_mismatch', 'Concurrency phase browser evidence does not match accountParallel=2', {
+        fail('concurrency_browser_evidence_mismatch', 'Concurrency browser context evidence is out of range', {
           accountParallel: config.accountParallel,
-          maxBrowsers: outcome.maxBrowsers,
           browserContexts: network.browserContexts,
           accountCount: config.accounts.length,
         })
       }
-      if (outcome.finalBrowsers !== 0) {
-        fail('concurrency_browser_release_missing', 'Concurrency phase did not release both browser contexts')
+    }
+    if (['courses', 'answer', 'score', 'score-concurrent'].includes(config.phase)) {
+      const expectedCourseParallel = Math.min(config.courseParallel, config.courseCount)
+      const courseBasePages = config.phase === 'score-concurrent'
+        ? scoreConcurrentCourseBasePages(
+          config.accountParallel,
+          expectedCourseParallel,
+          config.courseCount,
+        )
+        : config.phase === 'courses'
+          ? 0
+          : 1
+      const courseConcurrencyFailure = noqrCourseConcurrencyFailure(
+        network,
+        expectedCourseParallel,
+        courseBasePages,
+      )
+      if (courseConcurrencyFailure) {
+        fail(
+          courseConcurrencyFailure,
+          'Course-page concurrency evidence did not match the configured production wiring',
+          {
+            courseParallel: config.courseParallel,
+            courseCount: config.courseCount,
+            accountParallel: config.accountParallel,
+            expectedCourseParallel,
+            expectedActiveCoursePages: expectedCourseParallel + courseBasePages,
+            coursePageRequests: network.coursePageRequests,
+            activeCoursePages: network.activeCoursePages,
+            maxActiveCoursePages: network.maxActiveCoursePages,
+          },
+        )
       }
     }
     if (config.phase !== 'login') {
@@ -2645,7 +3402,7 @@ async function runHarness(config, credentials) {
         )
       }
     }
-    if (config.phase === 'score') {
+    if (config.phase === 'score' || config.phase === 'score-concurrent') {
       const scoreNetworkFailure = noqrScoreNetworkFailure(
         network,
         siteGeneratedFinalDuplicate,
@@ -2701,8 +3458,13 @@ async function runHarness(config, credentials) {
       bank: bankStats,
       answerPageRequests: network.answerPageRequests,
       maxActiveAnswerPages: network.maxActiveAnswerPages,
+      coursePageRequests: network.coursePageRequests,
+      activeCoursePages: network.activeCoursePages,
+      maxActiveCoursePages: network.maxActiveCoursePages,
       answerWorkTypes: network.answerWorkTypes,
       browserContexts: network.browserContexts,
+      activeBrowserContexts: network.activeBrowserContexts,
+      maxActiveBrowserContexts: network.maxActiveBrowserContexts,
       browserExecutable: network.browserExecutable,
       loginSubmissionRequests: network.loginSubmissionRequests,
       loginSubmissionResponses: network.loginSubmissionResponses,
@@ -2722,10 +3484,13 @@ async function runHarness(config, credentials) {
       logEnabled: config.logEnabled,
       outcome,
     })
+    logHarnessStage('complete_log_written', { testPhase: config.phase })
     return { ok: true, ...outcome }
   } finally {
     try {
+      logHarnessStage('product_close_start')
       await closeProduct(product, config.accounts.map((account) => account.alias))
+      logHarnessStage('product_close_done')
     } finally {
       if (bank) await bank.close().catch(() => {})
     }
@@ -2761,11 +3526,15 @@ if (IS_MAIN) {
     const code = error instanceof T005HarnessError || error instanceof T005CredentialError
       ? error.code
       : 'harness_failed'
+    const safeFailureCode = error instanceof Error
+      ? safeDiagnosticCode(error.message)
+      : 'operation_failed'
     const diagnostics = error instanceof T005HarnessError ? error.details : undefined
     console.error(JSON.stringify({
       ok: false,
       phase: 'real_product',
       code,
+      ...(code === 'harness_failed' ? { safeFailureCode } : {}),
       ...(diagnostics ? { diagnostics } : {}),
     }))
     process.exitCode = 1

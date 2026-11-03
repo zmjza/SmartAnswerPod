@@ -559,6 +559,103 @@ test('T-D2b 释放后才把排队号提升，验证中不补位', () => {
   assert.equal(p.promoteQueued(), null)
 })
 
+test('T006-Q01a 关闭中的浏览器仍占用名额，关闭完成后才补位', () => {
+  const p = new SlotPool(2)
+  assert.equal(p.request('a'), 'launching')
+  p.occupy('a')
+  assert.equal(p.request('b'), 'launching')
+  p.occupy('b')
+  assert.equal(p.request('c'), 'queued')
+  p.closing('a')
+  assert.equal(p.toolbarCount(), 2)
+  assert.equal(p.promoteQueued(), null)
+  assert.equal(p.get('c'), 'queued')
+  assert.equal(p.release('a'), true)
+  assert.equal(p.promoteQueued(), 'c')
+  assert.equal(p.release('a'), false)
+})
+
+test('T006-Q01b 队列按本次实际入队顺序补位，不受旧 Map 顺序污染', () => {
+  const p = new SlotPool(2)
+  assert.equal(p.request('x'), 'launching')
+  p.occupy('x')
+  assert.equal(p.request('y'), 'launching')
+  p.occupy('y')
+  assert.equal(p.request('old'), 'queued')
+  p.release('x')
+  assert.equal(p.promoteQueued(), 'old')
+  p.occupy('old')
+  p.release('y')
+  assert.equal(p.request('new'), 'launching')
+  p.occupy('new')
+  p.release('old')
+  p.release('new')
+  p.setLimit(1)
+  assert.equal(p.request('holder'), 'launching')
+  p.occupy('holder')
+  assert.equal(p.request('new'), 'queued')
+  assert.equal(p.request('old'), 'queued')
+  p.release('holder')
+  assert.equal(p.promoteQueued(), 'new')
+})
+
+test('T006-Q01c 直接 acquire 竞争时也必须由最早排队票号先启动', () => {
+  const p = new SlotPool(1)
+  assert.equal(p.request('active'), 'launching')
+  p.occupy('active')
+  assert.equal(p.request('first'), 'queued')
+  assert.equal(p.request('second'), 'queued')
+  p.release('active')
+  assert.equal(p.promoteQueued(), 'first')
+
+  const p2 = new SlotPool(1)
+  assert.equal(p2.request('active'), 'launching')
+  p2.occupy('active')
+  assert.equal(p2.request('first'), 'queued')
+  assert.equal(p2.request('second'), 'queued')
+  p2.setLimit(2)
+  // A racing acquire loop may wake every queued student. The non-head ticket
+  // must remain queued even though capacity is now available.
+  assert.equal(p2.request('second'), 'queued')
+  assert.equal(p2.request('first'), 'launching')
+})
+
+test('T006-Q11 账号并发 2/3/4/5/6/8 均不超限且排队可补位', () => {
+  for (const limit of [2, 3, 4, 5, 6, 8]) {
+    const p = new SlotPool(limit)
+    for (let index = 0; index < limit; index++) {
+      assert.equal(p.request(`active-${limit}-${index}`), 'launching')
+      p.occupy(`active-${limit}-${index}`)
+    }
+    assert.equal(p.request(`queued-${limit}`), 'queued')
+    assert.equal(p.toolbarCount(), limit)
+    assert.equal(p.promoteQueued(), null)
+    p.release(`active-${limit}-0`)
+    assert.equal(p.promoteQueued(), `queued-${limit}`)
+    assert.equal(p.toolbarCount(), limit)
+  }
+})
+
+test('T006-Q12 课程并发 2/3/4/5/6/8 均按配置执行且不超限', async () => {
+  for (const limit of [2, 3, 4, 5, 6, 8]) {
+    let active = 0
+    let peak = 0
+    const results = await mapWithConcurrency(
+      Array.from({ length: 12 }, (_, index) => index),
+      limit,
+      async (index) => {
+        active++
+        peak = Math.max(peak, active)
+        await new Promise((resolve) => setTimeout(resolve, 2))
+        active--
+        return index
+      },
+    )
+    assert.equal(peak, limit)
+    assert.deepEqual(results, Array.from({ length: 12 }, (_, index) => index))
+  }
+})
+
 test('T-K1 提交点 ok 不点 cancel', () => {
   assert.equal(SUBMIT.ok, '.xcConfirm a.sgBtn.ok')
   assert.equal(SUBMIT.cancel, '.xcConfirm a.sgBtn.cancel')

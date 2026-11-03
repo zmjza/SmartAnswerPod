@@ -41,7 +41,7 @@ const filteredAccounts = computed(() => accounts.value.filter((a) => {
 }))
 const runningCount = computed(() => accounts.value.filter((a) => {
   const slot = liveById.value.get(a.local_id)?.slot
-  return slot === 'launching' || slot === 'occupied' || slot === 'occupying_verify'
+  return slot === 'launching' || slot === 'occupied' || slot === 'occupying_verify' || slot === 'closing'
 }).length)
 const queuedCount = computed(() => accounts.value.filter((a) => liveById.value.get(a.local_id)?.queued).length)
 
@@ -118,8 +118,15 @@ async function confirmPaste() {
 }
 async function remove(i: number) {
   const id = filteredAccounts.value[i]?.local_id
-  if (id) await window.kaida?.removeAccount(id)
-  await reload()
+  if (!id) return
+  try {
+    const result = await window.kaida?.removeAccount(id)
+    if (!result?.ok) formatError.value = result?.error || '删除学生失败'
+  } catch (error) {
+    formatError.value = error instanceof Error ? error.message : '删除学生失败'
+  } finally {
+    await reload()
+  }
 }
 function openDeleteAll() {
   deleteAllIds.value = accounts.value.map((a) => a.local_id)

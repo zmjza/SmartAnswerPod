@@ -28,6 +28,8 @@ export type NoqrLoginOptions = {
   onWaiting?: (elapsedMs: number) => void
   loginIdleBudgetMs?: number
   blankGraceMs?: number
+  blankMaxActiveWaitMs?: number
+  blankMaxHeartbeatWaitMs?: number
 }
 
 export type NoqrLoginResult = {
@@ -63,6 +65,7 @@ const LOGIN_ERROR_PATTERN = /登录失败|账号或密码错误|用户名或密�
 const PAGE_ERROR_PATTERN = /加载失败|读取失败|请求失败|发生错误|系统异常|服务异常/
 const LOGIN_REQUEST_PATTERN = /(?:login|log-in|signin|sign-in|auth|session|token)/i
 const VOLATILE_QUERY_PARAM = /^(?:_?t|ts|timestamp|time|cache|cachebust|_dc|rnd|random|nonce)$/i
+const NOQR_LONG_REQUEST_BUSINESS_MS = 1_500
 
 type NoqrSessionStorageSnapshot = {
   origin: string
@@ -206,7 +209,32 @@ export async function reloadNoqrPage(
   }
   page.setDefaultNavigationTimeout(0)
   await awaitNoqrNavigation(
-    page.reload({ waitUntil: 'domcontentloaded', timeout: 0 }),
+    page.reload({ waitUntil: 'commit', timeout: 0 }),
+    opts.signal,
+    opts.stopRequested,
+  )
+}
+
+async function restartNoqrNavigation(
+  page: Page,
+  url: string,
+  opts: { signal?: AbortSignal; stopRequested?: () => boolean } = {},
+): Promise<void> {
+  // A pending page.goto() can make page.reload() abort and leave Chromium on
+  // about:blank. Cancel that navigation first, then issue a fresh navigation
+  // to the same supported non-answer entry.
+  try {
+    await awaitNoqrNavigation(
+      page.goto('about:blank', { waitUntil: 'commit', timeout: 0 }),
+      opts.signal,
+      opts.stopRequested,
+    )
+  } catch (error) {
+    throwIfNoqrStopped(opts.signal)
+    if (opts.stopRequested?.()) throw error
+  }
+  await awaitNoqrNavigation(
+    page.goto(url, { waitUntil: 'commit', timeout: 0 }),
     opts.signal,
     opts.stopRequested,
   )
@@ -224,11 +252,13 @@ export function isLikelyNoqrLoginRequest(request: Request): boolean {
 export class NoqrNetworkActivity {
   private readonly active = new Set<Request>()
   private readonly businessActive = new Set<Request>()
+  private readonly nonBusinessStartedAt = new Map<Request, number>()
   private readonly requestSeries = new Map<string, { count: number; lastStartedAt: number }>()
   private activityVersionValue = 0
   private businessActivityVersionValue = 0
   private readonly page: Page
   private readonly origin: string
+  private readonly longRequestPromotionMs: number
   private readonly onRequest = (request: Request) => {
     if (this.tracked(request)) {
       this.activityVersionValue++
@@ -236,21 +266,30 @@ export class NoqrNetworkActivity {
       if (this.isBusinessActivity(request)) {
         this.businessActivityVersionValue++
         this.businessActive.add(request)
+      } else {
+        this.nonBusinessStartedAt.set(request, Date.now())
       }
     }
   }
   private readonly onFinished = (request: Request) => {
     if (this.active.delete(request)) this.activityVersionValue++
     if (this.businessActive.delete(request)) this.businessActivityVersionValue++
+    this.nonBusinessStartedAt.delete(request)
   }
   private readonly onFailed = (request: Request) => {
     if (this.active.delete(request)) this.activityVersionValue++
     if (this.businessActive.delete(request)) this.businessActivityVersionValue++
+    this.nonBusinessStartedAt.delete(request)
   }
 
-  constructor(page: Page, origin = NOQR_ORIGIN) {
+  constructor(
+    page: Page,
+    origin = NOQR_ORIGIN,
+    longRequestPromotionMs = NOQR_LONG_REQUEST_BUSINESS_MS,
+  ) {
     this.page = page
     this.origin = origin
+    this.longRequestPromotionMs = Math.max(0, Number(longRequestPromotionMs) || 0)
     page.on('request', this.onRequest)
     page.on('requestfinished', this.onFinished)
     page.on('requestfailed', this.onFailed)
@@ -305,6 +344,7 @@ export class NoqrNetworkActivity {
   }
 
   get businessActivityVersion(): number {
+    this.promoteLongRunningRequests()
     return this.businessActivityVersionValue
   }
 
@@ -313,6 +353,7 @@ export class NoqrNetworkActivity {
   }
 
   isBusinessActive(): boolean {
+    this.promoteLongRunningRequests()
     return this.businessActive.size > 0
   }
 
@@ -322,7 +363,18 @@ export class NoqrNetworkActivity {
     this.page.off('requestfailed', this.onFailed)
     this.active.clear()
     this.businessActive.clear()
+    this.nonBusinessStartedAt.clear()
     this.requestSeries.clear()
+  }
+
+  private promoteLongRunningRequests(now = Date.now()) {
+    for (const [request, startedAt] of this.nonBusinessStartedAt) {
+      if (now - startedAt < this.longRequestPromotionMs) continue
+      this.nonBusinessStartedAt.delete(request)
+      if (!this.active.has(request) || this.businessActive.has(request)) continue
+      this.businessActive.add(request)
+      this.businessActivityVersionValue++
+    }
   }
 }
 
@@ -422,12 +474,16 @@ async function waitForSurface(
     signal?: AbortSignal
     onWaiting?: (elapsedMs: number) => void
     blankGraceMs?: number
+    blankMaxActiveWaitMs?: number
+    blankMaxHeartbeatWaitMs?: number
   } = {},
 ): Promise<NoqrPageSurface> {
   const startedAt = Date.now()
   const network = new NoqrNetworkActivity(page)
   const recovery = new NoqrBlankRecoveryGate({
     graceMs: opts.blankGraceMs,
+    maxActiveWaitMs: opts.blankMaxActiveWaitMs,
+    maxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
     refreshBudget: 3,
   })
   try {
@@ -447,8 +503,7 @@ async function waitForSurface(
       if (['course_work', 'record', 'answer', 'answer_boot', 'submit_success'].includes(surface)) {
         throw new NoqrSessionError('page_error', '登录入口意外进入非登录业务页面，已安全停止当前学生')
       }
-      const loginBlank = surface === 'unknown' && isNoqrLoginPath(page.url())
-      if (surface === 'blank' || surface === 'home_blank' || loginBlank) {
+      if (surface === 'blank' || surface === 'home_blank' || surface === 'unknown') {
         const decision = recovery.observe({
           now: Date.now(),
           activityVersion: network.businessActivityVersion,
@@ -477,10 +532,14 @@ async function reloadUntilLoginSurface(
   signal?: AbortSignal,
   budget = 3,
   blankGraceMs?: number,
+  blankMaxActiveWaitMs?: number,
+  blankMaxHeartbeatWaitMs?: number,
 ): Promise<NoqrPageSurface> {
   const network = new NoqrNetworkActivity(page)
   const recovery = new NoqrBlankRecoveryGate({
     graceMs: blankGraceMs,
+    maxActiveWaitMs: blankMaxActiveWaitMs,
+    maxHeartbeatWaitMs: blankMaxHeartbeatWaitMs,
     refreshBudget: budget,
   })
   try {
@@ -489,8 +548,7 @@ async function reloadUntilLoginSurface(
       const surface = await classifyNoqrPage(page)
       if (surface === 'login' || surface === 'home' || surface === 'auth_blocked' ||
           surface === 'login_failed' || surface === 'error') return surface
-      const loginBlank = surface === 'unknown' && isNoqrLoginPath(page.url())
-      const blank = surface === 'blank' || surface === 'home_blank' || loginBlank
+      const blank = surface === 'blank' || surface === 'home_blank' || surface === 'unknown'
       if (!blank) return surface
       const decision = recovery.observe({
         now: Date.now(),
@@ -516,6 +574,109 @@ async function reloadUntilLoginSurface(
   }
 }
 
+/**
+ * Start the login/home navigation without blindly waiting forever for a
+ * document response. The page is still allowed to finish a genuinely slow
+ * response; only a quiet blank document is eligible for the existing bounded
+ * recovery path.
+ */
+export async function navigateNoqrPage(
+  page: Page,
+  url: string,
+  opts: {
+    origin?: string
+    signal?: AbortSignal
+    blankGraceMs?: number
+    blankMaxActiveWaitMs?: number
+    blankMaxHeartbeatWaitMs?: number
+    onWaiting?: (elapsedMs: number) => void
+  } = {},
+): Promise<void> {
+  page.setDefaultNavigationTimeout(0)
+  const network = new NoqrNetworkActivity(page, opts.origin)
+  const recovery = new NoqrBlankRecoveryGate({
+    graceMs: opts.blankGraceMs,
+    maxActiveWaitMs: opts.blankMaxActiveWaitMs,
+    maxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
+    refreshBudget: 3,
+  })
+  const startedAt = Date.now()
+  let settled = false
+  let navigationError: unknown
+  let recoverAfterNavigationError = false
+  const navigation = page.goto(url, {
+    waitUntil: 'commit',
+    timeout: 0,
+  }).then(() => {
+    settled = true
+  }).catch((error: unknown) => {
+    settled = true
+    navigationError = error
+  })
+  try {
+    const classifyNavigationPage = async (): Promise<NoqrPageSurface> => {
+      // Playwright can keep page.evaluate() pending while the first document
+      // is still waiting for commit. Treat the initial about:blank document as
+      // a blank observation so the recovery gate can still run.
+      if (!settled && page.url() === 'about:blank') return 'blank'
+      return classifyNoqrPage(page)
+    }
+    for (;;) {
+      throwIfNoqrStopped(opts.signal)
+      if (settled && !recoverAfterNavigationError) {
+        if (navigationError) {
+          const surface = await classifyNavigationPage()
+          if (!['blank', 'home_blank', 'unknown'].includes(surface)) throw navigationError
+          recoverAfterNavigationError = true
+        }
+      }
+      const surface = await classifyNavigationPage()
+      if (['login', 'home', 'auth_blocked', 'login_failed', 'error', 'course_work', 'record', 'answer', 'answer_boot', 'submit_success'].includes(surface)) {
+        return
+      }
+      const blank = surface === 'blank' || surface === 'home_blank' || surface === 'unknown'
+      if (blank) {
+        const decision = recovery.observe({
+          now: Date.now(),
+          activityVersion: network.businessActivityVersion,
+          empty: true,
+          active: network.isBusinessActive(),
+          stopRequested: opts.signal?.aborted,
+        })
+        if (decision.action === 'refresh') {
+          await restartNoqrNavigation(page, url, {
+            signal: opts.signal,
+            stopRequested: () => opts.signal?.aborted === true,
+          })
+          // The original commit wait may reject after this controlled restart.
+          // It belongs to the navigation we intentionally cancelled.
+          recoverAfterNavigationError = true
+          navigationError = undefined
+          settled = true
+          continue
+        }
+        if (decision.action === 'stop') {
+          throw new NoqrSessionError('blank_page', '登录入口持续无响应，已安全停止当前学生')
+        }
+      } else {
+        recovery.observe({
+          now: Date.now(),
+          activityVersion: network.businessActivityVersion,
+          empty: false,
+          active: network.isBusinessActive(),
+        })
+      }
+      opts.onWaiting?.(Date.now() - startedAt)
+      await sleepNoqr(page, 150, opts.signal)
+    }
+  } finally {
+    network.dispose()
+    // The page may be reloaded while the original commit wait is pending.
+    // Consume that late rejection so it cannot become an unhandled rejection.
+    void navigation
+  }
+}
+
 export async function ensureNoqrSession(page: Page, opts: NoqrLoginOptions): Promise<NoqrLoginResult> {
   if (!opts.username || !opts.password) {
     throw new NoqrSessionError('credentials_missing', '账号或密码为空，未提交登录')
@@ -530,39 +691,43 @@ export async function ensureNoqrSession(page: Page, opts: NoqrLoginOptions): Pro
   const hasSessionSnapshot = await primeNoqrSessionStorage(page, accountKey)
   const loginState = loginSubmissionFor(page, accountKey)
   const canReuseAuthenticatedSession = hasSessionSnapshot || loginState.entry?.authenticated === true
-  await awaitNoqrNavigation(
-    // Every internal page enters through the one supported login URL. A
-    // primed session may let that page redirect immediately, but direct home
-    // navigation is forbidden by the real-site contract.
-    page.goto(NOQR_LOGIN_URL, {
-      waitUntil: 'domcontentloaded',
-      timeout: 0,
-    }),
-    opts.signal,
-  )
+  // Every internal page enters through the one supported login URL. A primed
+  // session may let that page redirect immediately, but direct home navigation
+  // is forbidden by the real-site contract.
+  await navigateNoqrPage(page, NOQR_LOGIN_URL, {
+    signal: opts.signal,
+    blankGraceMs: opts.blankGraceMs,
+    blankMaxActiveWaitMs: opts.blankMaxActiveWaitMs,
+    blankMaxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
+    onWaiting: opts.onWaiting,
+  })
   let surface = await reloadUntilLoginSurface(
     page,
     opts.signal,
     3,
     opts.blankGraceMs,
+    opts.blankMaxActiveWaitMs,
+    opts.blankMaxHeartbeatWaitMs,
   )
   if (surface === 'login' && canReuseAuthenticatedSession) {
     // A new tab still enters through the only supported login URL. The real
     // school does not always redirect an already-authenticated tab from that
     // surface, so continue exactly once from the login document. Credentials
     // are never filled or submitted again.
-    await awaitNoqrNavigation(
-      page.goto(NOQR_ORIGIN + NOQR_PATH.home, {
-        waitUntil: 'domcontentloaded',
-        timeout: 0,
-      }),
-      opts.signal,
-    )
+    await navigateNoqrPage(page, NOQR_ORIGIN + NOQR_PATH.home, {
+      signal: opts.signal,
+      blankGraceMs: opts.blankGraceMs,
+      blankMaxActiveWaitMs: opts.blankMaxActiveWaitMs,
+      blankMaxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
+      onWaiting: opts.onWaiting,
+    })
     surface = await reloadUntilLoginSurface(
       page,
       opts.signal,
       3,
       opts.blankGraceMs,
+      opts.blankMaxActiveWaitMs,
+      opts.blankMaxHeartbeatWaitMs,
     )
     if (surface === 'login') {
       throw new NoqrSessionError(
@@ -591,6 +756,8 @@ export async function ensureNoqrSession(page: Page, opts: NoqrLoginOptions): Pro
       signal: opts.signal,
       onWaiting: opts.onWaiting,
       blankGraceMs: opts.blankGraceMs,
+      blankMaxActiveWaitMs: opts.blankMaxActiveWaitMs,
+      blankMaxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
     })
   }
   if (surface === 'home') {
@@ -607,6 +774,12 @@ export async function ensureNoqrSession(page: Page, opts: NoqrLoginOptions): Pro
     if (response.status() >= 400) lastFailedStatus = response.status()
   }
   const network = new NoqrNetworkActivity(page)
+  const loginRecovery = new NoqrBlankRecoveryGate({
+    graceMs: opts.blankGraceMs,
+    maxActiveWaitMs: opts.blankMaxActiveWaitMs,
+    maxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
+    refreshBudget: 3,
+  })
   page.on('response', responseListener)
   try {
     opts.onPhase?.('login_page')
@@ -649,6 +822,9 @@ export async function ensureNoqrSession(page: Page, opts: NoqrLoginOptions): Pro
             refreshBudget: 3,
             onWaiting: opts.onWaiting,
             blankGraceMs: opts.blankGraceMs,
+            blankMaxActiveWaitMs: opts.blankMaxActiveWaitMs,
+            blankMaxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
+            network,
           })
           await captureNoqrSessionStorage(page, accountKey)
           markNoqrAuthenticated(page, accountKey)
@@ -679,6 +855,25 @@ export async function ensureNoqrSession(page: Page, opts: NoqrLoginOptions): Pro
         if (surface === 'error') {
           throw new NoqrSessionError('page_error', '登录中页面显示明确错误')
         }
+        if (['course_work', 'record', 'answer', 'answer_boot', 'submit_success'].includes(surface)) {
+          throw new NoqrSessionError('page_error', '登录提交后意外进入非首页业务页面，已停止且不刷新答题页')
+        }
+        if (surface === 'blank' || surface === 'home_blank' || surface === 'unknown') {
+          const decision = loginRecovery.observe({
+            now: Date.now(),
+            activityVersion: network.businessActivityVersion,
+            empty: true,
+            active: network.isBusinessActive(),
+            stopRequested: opts.signal?.aborted,
+          })
+          if (decision.action === 'refresh') {
+            await reloadNoqrPage(page, { signal: opts.signal })
+            continue
+          }
+          if (decision.action === 'stop') {
+            throw new NoqrSessionError('blank_page', '登录提交后页面持续空白或未识别，已安全停止当前学生')
+          }
+        }
         opts.onWaiting?.(Date.now() - startedAt)
         await sleepNoqr(page, 200, opts.signal)
     }
@@ -695,12 +890,18 @@ export async function ensureNoqrHomeReady(
     refreshBudget?: number
     onWaiting?: (elapsed: number) => void
     blankGraceMs?: number
+    blankMaxActiveWaitMs?: number
+    blankMaxHeartbeatWaitMs?: number
+    network?: NoqrNetworkActivity
   } = {},
 ): Promise<void> {
   page.setDefaultNavigationTimeout(0)
-  const network = new NoqrNetworkActivity(page)
+  const ownNetwork = opts.network ? null : new NoqrNetworkActivity(page)
+  const network = opts.network || ownNetwork!
   const recovery = new NoqrBlankRecoveryGate({
     graceMs: opts.blankGraceMs,
+    maxActiveWaitMs: opts.blankMaxActiveWaitMs,
+    maxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
     refreshBudget: opts.refreshBudget ?? 3,
   })
   try {
@@ -749,6 +950,6 @@ export async function ensureNoqrHomeReady(
       await sleepNoqr(page, 150, opts.signal)
     }
   } finally {
-    network.dispose()
+    ownNetwork?.dispose()
   }
 }

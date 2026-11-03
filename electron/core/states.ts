@@ -1,4 +1,4 @@
-export const SLOT = ['queued', 'launching', 'occupied', 'occupying_verify', 'released'] as const
+export const SLOT = ['queued', 'launching', 'occupied', 'occupying_verify', 'closing', 'released'] as const
 export type SlotState = (typeof SLOT)[number]
 
 export const ACCOUNT = [
@@ -95,5 +95,5 @@ export function isKnownQuestion(v: string): v is QuestionState {
 }
 
 export function slotCountsInToolbar(s: SlotState): boolean {
-  return s === 'launching' || s === 'occupied' || s === 'occupying_verify'
+  return s === 'launching' || s === 'occupied' || s === 'occupying_verify' || s === 'closing'
 }

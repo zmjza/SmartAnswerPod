@@ -25,7 +25,7 @@ export type LiveStudent = {
   selectedCourseKeys?: string[]
   awaitingCourseSelection: boolean
   answerRoundLimit: number
-  slot: 'queued' | 'launching' | 'occupied' | 'occupying_verify' | 'released'
+  slot: 'queued' | 'launching' | 'occupied' | 'occupying_verify' | 'closing' | 'released'
   account: string
   action: string
   headline: string

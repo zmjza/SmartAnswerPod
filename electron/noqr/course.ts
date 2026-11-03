@@ -19,6 +19,9 @@ export type NoqrCourseWorkOptions = {
   refreshBudget?: number
   onWaiting?: (waiting: number) => void
   blankGraceMs?: number
+  blankMaxActiveWaitMs?: number
+  blankMaxHeartbeatWaitMs?: number
+  network?: NoqrNetworkActivity
 }
 
 export type NoqrCourseWorkReady = 'ready' | 'empty'
@@ -51,9 +54,12 @@ export async function waitForNoqrCourseWorkReady(
   opts: NoqrCourseWorkOptions = {},
 ): Promise<NoqrCourseWorkReady> {
   const startedAt = Date.now()
-  const network = new NoqrNetworkActivity(page)
+  const ownNetwork = opts.network ? null : new NoqrNetworkActivity(page)
+  const network = opts.network || ownNetwork!
   const recovery = new NoqrBlankRecoveryGate({
     graceMs: opts.blankGraceMs,
+    maxActiveWaitMs: opts.blankMaxActiveWaitMs,
+    maxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
     refreshBudget: opts.refreshBudget ?? 3,
   })
   let progressVersion = 0
@@ -103,6 +109,12 @@ export async function waitForNoqrCourseWorkReady(
         continue
       }
       if (decision.action === 'stop') {
+        if (network.isBusinessActive() || state.skeleton) {
+          throw new NoqrSessionError(
+            'blank_page',
+            '形考作业页持续处于活动请求或骨架加载，未确认无作业，已安全停止当前学生',
+          )
+        }
         // The school can legitimately leave a course work page without cards
         // after repeated refreshes. Treat that isolated course as having no
         // visible homework instead of failing the whole account.
@@ -112,7 +124,7 @@ export async function waitForNoqrCourseWorkReady(
       await sleepNoqr(page, 150, opts.signal)
     }
   } finally {
-    network.dispose()
+    ownNetwork?.dispose()
   }
 }
 
@@ -141,7 +153,7 @@ export async function openNoqrCourseWork(page: Page, opts: NoqrCourseWorkOptions
     for (;;) {
       throwIfNoqrStopped(opts.signal)
       if (normalizedPath(page.url()) === NOQR_PATH.courseWork) {
-        await waitForNoqrCourseWorkReady(page, opts)
+        await waitForNoqrCourseWorkReady(page, { ...opts, network })
         return
       }
       const surface = await classifyNoqrPage(page)
@@ -161,7 +173,7 @@ export async function openNoqrCourseWork(page: Page, opts: NoqrCourseWorkOptions
       })
       if (decision.action === 'refresh') {
         await reloadNoqrPage(page, { signal: opts.signal })
-        await ensureNoqrHomeReady(page, opts)
+        await ensureNoqrHomeReady(page, { ...opts, network })
         await entry.click()
         continue
       }
@@ -227,6 +239,7 @@ async function openCourseMenu(
           signal,
           blankGraceMs,
           refreshBudget,
+          network,
         })
         continue
       }
@@ -263,6 +276,7 @@ async function openCourseMenu(
           signal,
           blankGraceMs,
           refreshBudget,
+          network,
         })
         await trigger.click()
         continue
@@ -429,6 +443,7 @@ export async function switchNoqrCourse(
       refreshBudget: opts.refreshBudget,
       onWaiting: opts.onWaiting,
       blankGraceMs: opts.blankGraceMs,
+      network,
     })
     const order = await readCourseOrderFromMenu(page, opts)
     if (order === course.order) return true
@@ -467,7 +482,7 @@ export async function switchNoqrCourse(
       const identityReady = !beforeCourseId || !currentCourseId || identityChanged
       const workChanged = currentWork !== beforeWork
       if (title === course.name && !loading && workChanged) {
-        await waitForNoqrCourseWorkReady(page, opts)
+        await waitForNoqrCourseWorkReady(page, { ...opts, network })
         return
       }
       const sameCardTarget = title === course.name &&
@@ -485,7 +500,7 @@ export async function switchNoqrCourse(
         sameCardTargetSince ||= Date.now()
         const sameCardConfirmedFor = Date.now() - sameCardTargetSince
         if (sameCardConfirmedFor >= COURSE_SWITCH_SAME_CARD_CONFIRM_MS) {
-          await waitForNoqrCourseWorkReady(page, opts)
+          await waitForNoqrCourseWorkReady(page, { ...opts, network })
           return
         }
         opts.onWaiting?.(sameCardConfirmedFor)
@@ -516,7 +531,7 @@ export async function switchNoqrCourse(
         lastProgress = ''
         progressVersion++
         if (await rebaseAndRetryAfterReload()) {
-          await waitForNoqrCourseWorkReady(page, opts)
+          await waitForNoqrCourseWorkReady(page, { ...opts, network })
           return
         }
         continue
@@ -524,7 +539,7 @@ export async function switchNoqrCourse(
       if (decision.action === 'stop') {
         const order = await readCourseOrderFromMenu(page, opts)
         if (title === course.name && order === course.order && workChanged) {
-          await waitForNoqrCourseWorkReady(page, opts)
+          await waitForNoqrCourseWorkReady(page, { ...opts, network })
           return
         }
         throw new NoqrSessionError(

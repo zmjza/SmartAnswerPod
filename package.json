@@ -1,6 +1,6 @@
 {
   "name": "kaida-auto-quiz",
-  "version": "2.7",
+  "version": "2.8",
   "private": true,
   "description": "开大智达舱",
   "author": "kaida",
@@ -20,6 +20,7 @@
     "test:e2e:run-lock": "node --experimental-strip-types tests/e2e-run-lock.mjs",
     "test:e2e:workbench": "node --experimental-strip-types tests/e2e-workbench.mjs",
     "test:t005": "node --experimental-strip-types --test tests/t005-*.test.mts",
+    "test:t006": "node --experimental-strip-types tests/t006-scheduler.test.mts && node --experimental-strip-types tests/t006-pool.test.mts",
     "test:t005:survey": "node --experimental-strip-types tests/t005-account-survey.mjs",
     "test:t005:e3": "node --experimental-strip-types tests/t005-e3-flow.mjs",
     "test:t005:ui": "node --experimental-strip-types tests/t005-ui.mjs",

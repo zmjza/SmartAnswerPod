@@ -2,8 +2,12 @@
 // In-flight business requests still block recovery, so a known slow response
 // is never cancelled by this threshold.
 export const NOQR_BLANK_GRACE_MS = 60_000
-export const NOQR_BLANK_MAX_HEARTBEAT_WAIT_MS = 300_000
-export const NOQR_BLANK_MAX_ACTIVE_WAIT_MS = 300_000
+// Non-answer recovery rule: 60s quiet -> refresh; repeated short activity or
+// a stalled business request gets a bounded 90s/120s ceiling. Answer pages do
+// not use this as a refresh policy; their separate 240s limits only allow a
+// safe stop and never reload an in-progress page.
+export const NOQR_BLANK_MAX_HEARTBEAT_WAIT_MS = 90_000
+export const NOQR_BLANK_MAX_ACTIVE_WAIT_MS = 120_000
 export const NOQR_BLANK_REFRESH_BUDGET = 3
 
 export type NoqrBlankRecoveryAction = 'ready' | 'wait' | 'refresh' | 'stop'

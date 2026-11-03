@@ -159,6 +159,8 @@ try {
   const settingsVersion = page.locator('[data-settings-version]')
   await settingsVersion.waitFor()
   assert.equal((await settingsVersion.innerText()).trim(), `v${packageVersion}`, '设置页版本徽记未使用应用实际版本')
+  const courseCap = page.locator('[data-course-cap]')
+  assert.equal((await courseCap.innerText()).trim(), 'Max 8', '设置页课程并发上限仍与保存上限不一致')
   assert.equal(await page.getByText('v0.1.7 开发版', { exact: true }).count(), 0, '设置页仍显示硬编码旧版本')
   await page.getByRole('button', { name: '工作台', exact: true }).click()
 
@@ -714,6 +716,7 @@ try {
     interruptedAndUncertainLabels: true,
     narrowWindowOverflow: false,
     settingsVersionDynamic: true,
+    settingsCourseCap: true,
   }))
 } finally {
   if (first) await first.app.close().catch(() => {})

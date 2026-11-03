@@ -24,7 +24,10 @@ export type NoqrInPlaceRecoveryOptions = {
   course?: NoqrCourse
   refreshBudget?: number
   blankGraceMs?: number
+  blankMaxActiveWaitMs?: number
+  blankMaxHeartbeatWaitMs?: number
   onWaiting?: (elapsedMs: number) => void
+  network?: NoqrNetworkActivity
 }
 
 function normalizedPath(urlText: string): string {
@@ -59,7 +62,8 @@ export async function recoverNoqrCourseWorkWithoutLogin(
 ): Promise<void> {
   const startedAt = Date.now()
   const refreshBudget = Math.max(0, Math.trunc(opts.refreshBudget ?? 3))
-  const network = new NoqrNetworkActivity(page)
+  const ownNetwork = opts.network ? null : new NoqrNetworkActivity(page)
+  const network = opts.network || ownNetwork!
   const recovery = new NoqrBlankRecoveryGate({
     graceMs: opts.blankGraceMs,
     refreshBudget,
@@ -93,7 +97,10 @@ export async function recoverNoqrCourseWorkWithoutLogin(
           signal: opts.signal,
           refreshBudget,
           blankGraceMs: opts.blankGraceMs,
+          blankMaxActiveWaitMs: opts.blankMaxActiveWaitMs,
+          blankMaxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
           onWaiting: opts.onWaiting,
+          network,
         })
         break
       }
@@ -104,7 +111,10 @@ export async function recoverNoqrCourseWorkWithoutLogin(
           signal: opts.signal,
           refreshBudget,
           blankGraceMs: opts.blankGraceMs,
+          blankMaxActiveWaitMs: opts.blankMaxActiveWaitMs,
+          blankMaxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
           onWaiting: opts.onWaiting,
+          network,
         })
         break
       }
@@ -114,13 +124,17 @@ export async function recoverNoqrCourseWorkWithoutLogin(
           signal: opts.signal,
           refreshBudget,
           blankGraceMs: opts.blankGraceMs,
+          blankMaxActiveWaitMs: opts.blankMaxActiveWaitMs,
+          blankMaxHeartbeatWaitMs: opts.blankMaxHeartbeatWaitMs,
           onWaiting: opts.onWaiting,
+          network,
         })
         await openNoqrCourseWork(page, {
           signal: opts.signal,
           refreshBudget,
           blankGraceMs: opts.blankGraceMs,
           onWaiting: opts.onWaiting,
+          network,
         })
         break
       }
@@ -147,7 +161,7 @@ export async function recoverNoqrCourseWorkWithoutLogin(
       await sleepNoqr(page, 150, opts.signal)
     }
   } finally {
-    network.dispose()
+    ownNetwork?.dispose()
   }
 
   if (!opts.course) return

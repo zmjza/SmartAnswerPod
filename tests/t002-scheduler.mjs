@@ -9,7 +9,7 @@ const modules = {
   "./store": "export class ExtractWritebackSaveError extends Error {} export const listAccounts = () => globalThis.__t002.accounts; export const getSettings = () => ({ account_parallel: 2, course_parallel: 1 }); export const patchAccount = (id, patch) => { const a = globalThis.__t002.accounts.find(x => x.local_id === id); Object.assign(a, patch) }; export const getWriteback = () => []; export const getExtractWriteback = () => []; export const saveWriteback = () => {}; export const saveExtractWriteback = () => {}",
   "./pool": [
     "const f = () => globalThis.__t002;",
-    "export const slots = { setLimit(n) { f().limit = n } };",
+    "export const slots = { setLimit(n) { f().limit = n }, get(id) { return f().occupied.has(id) ? 'occupied' : 'released' }, has(id) { return f().occupied.has(id) } };",
     "export const isHeld = id => f().occupied.has(id);",
     "export const acquire = async id => { if (f().occupied.size >= f().limit) return { ok: false, queued: true }; const gate=f().acquireGates.get(id); if (gate) { f().acquiring.add(id); await gate; f().acquireGates.delete(id); f().acquiring.delete(id) } f().occupied.add(id); return { ok: true, context: { pages: () => [{}] } } };",
     "export const release = async id => { f().occupied.delete(id) };",

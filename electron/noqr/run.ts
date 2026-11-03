@@ -1,5 +1,5 @@
 import type { BrowserContext, Page } from 'patchright'
-import { acquire, browserWindowVisible, getContext, isHeld, release, slots } from '../pool.ts'
+import { acquire, browserWindowVisible, getContext, isHeld, onPoolRelease, release, slots } from '../pool.ts'
 import { getSettings, listAccounts, patchAccount, type LocalAccount } from '../store.ts'
 import { mapWithConcurrency } from '../core/concurrency.ts'
 import { courseOutcome, recordQuestion, upsertHomework } from '../core/live-view.ts'
@@ -41,9 +41,9 @@ import {
   applyNoqrFailureToView,
   assertNoqrRecordPageCanReturn,
   detectNoqrAnswerPageInterruption,
-  noqrAnswerProgressInterruption,
   noqrFailurePolicy,
   shouldRestoreNoqrRecordPage,
+  shouldStopNoqrCourseAfterHomeworkFailure,
   terminalNoqrPhase,
 } from './page-policy.ts'
 import { newNoqrHistoryCache } from './score-cache.ts'
@@ -106,12 +106,19 @@ const views = new Map<string, NoqrStudentView>()
 const activeRuns = new Map<string, Promise<void>>()
 const stopFlags = new Set<string>()
 const stopControllers = new Map<string, AbortController>()
+const queuedWaiters = new Map<string, () => void>()
 const selectionWaiters = new Map<string, () => void>()
 const historyCache = newNoqrHistoryCache()
 const changeListeners = new Set<() => void>()
 let stoppingAll = false
-let selectionStartRequested = false
+const selectionStartTokens = new Set<string>()
 let detailLogsEnabled = true
+onPoolRelease((event) => {
+  if (event.reason === 'context_closed') {
+    stopControllers.get(event.localId)?.abort()
+  }
+  for (const wake of [...queuedWaiters.values()]) wake()
+})
 
 const PHASE_ZH: Record<NoqrPhase, string> = {
   idle: '空闲',
@@ -228,8 +235,11 @@ function viewOf(account: LocalAccount): NoqrStudentView {
     views.set(account.local_id, view)
   }
   syncConfig(view, account)
+  view.slot = slots.get(account.local_id)
   view.browserWindowVisible = browserWindowVisible(account.local_id)
-  view.configLocked = activeRuns.has(account.local_id) || isHeld(account.local_id)
+  view.configLocked = activeRuns.has(account.local_id) ||
+    isHeld(account.local_id) ||
+    noqrSlotHoldsCapacity(view.slot)
   return view
 }
 
@@ -242,11 +252,22 @@ export function snapshot() {
 }
 
 export function isRunning() {
-  return stoppingAll || activeRuns.size > 0
+  return stoppingAll ||
+    activeRuns.size > 0 ||
+    [...views.values()].some((view) => noqrSlotHoldsCapacity(view.slot))
 }
 
 export function isStudentLocked(local_id: string) {
-  return activeRuns.has(local_id) || isHeld(local_id)
+  return activeRuns.has(local_id) ||
+    isHeld(local_id) ||
+    noqrSlotHoldsCapacity(slots.get(local_id))
+}
+
+function noqrSlotHoldsCapacity(slot: string): boolean {
+  return slot === 'launching' ||
+    slot === 'occupied' ||
+    slot === 'occupying_verify' ||
+    slot === 'closing'
 }
 
 function assertNotStopped(signal: AbortSignal) {
@@ -324,6 +345,7 @@ function selectedCourses(view: NoqrStudentView, courses: NoqrCourse[]): NoqrCour
 
 async function waitForCourseSelection(view: NoqrStudentView, signal: AbortSignal): Promise<void> {
   if (view.courseScope !== 'selected') return
+  selectionStartTokens.delete(view.local_id)
   view.awaitingCourseSelection = true
   view.selectedCourseNames = []
   view.selectedCourseKeys = []
@@ -366,11 +388,18 @@ export function setNoqrSelectedCourses(local_id: string, keys: string[]) {
 
 export function startNoqrSelectedCourseExecution() {
   const waiting = [...views.values()].filter((view) => view.awaitingCourseSelection)
-  if (selectionStartRequested || !waiting.length) {
+  if (!waiting.length) {
     return { ok: false, error: '当前没有等待开始的无码课程选择' }
+  }
+  const notStarted = waiting.filter((view) => !selectionStartTokens.has(view.local_id))
+  if (!notStarted.length) {
+    return { ok: false, error: '本轮课程选择已开始，请等待当前学生执行' }
   }
   const pendingSelected = [...views.values()].filter((view) =>
     activeRuns.has(view.local_id) &&
+    view.slot !== 'queued' &&
+    view.slot !== 'released' &&
+    !selectionStartTokens.has(view.local_id) &&
     view.courseScope === 'selected' &&
     !view.awaitingCourseSelection).length
   if (pendingSelected > 0) {
@@ -378,8 +407,10 @@ export function startNoqrSelectedCourseExecution() {
   }
   const empty = waiting.find((view) => !view.selectedCourseKeys.length)
   if (empty) return { ok: false, error: `${empty.name} 尚未选择课程` }
-  selectionStartRequested = true
-  for (const view of waiting) selectionWaiters.get(view.local_id)?.()
+  for (const view of notStarted) {
+    selectionStartTokens.add(view.local_id)
+    selectionWaiters.get(view.local_id)?.()
+  }
   return { ok: true }
 }
 
@@ -1012,12 +1043,6 @@ async function processHomework(opts: {
         if (!uncertain) {
           const interruption = await detectNoqrAnswerPageInterruption(page).catch(() => null)
           if (interruption) throw interruption
-          const progressInterruption = noqrAnswerProgressInterruption({
-            url: page.url(),
-            hasAnswerProgress: savedKeys.size > 0 || savedLogicalKeys.size > 0,
-            submitConfirmed,
-          })
-          if (progressInterruption) throw progressInterruption
         }
       }
       throw error
@@ -1109,6 +1134,9 @@ async function processCourse(opts: {
         }
         markHomework(view, course, homework, 'submit_failed')
         addLog(view, 'unsupported', `${homework.name} 已隔离 · ${message}`, course.name, homework.name, course.key)
+        if (shouldStopNoqrCourseAfterHomeworkFailure(page.url())) {
+          break
+        }
         resetPage = true
       }
       resetPage ||= shouldResetNoqrCoursePage(page.url(), false)
@@ -1263,16 +1291,46 @@ async function scheduleStudent(account: LocalAccount): Promise<void> {
   const view = viewOf(account)
   view.slot = 'queued'
   addLog(view, 'queued', '等待浏览器名额')
+  const waitForQueueSignal = async () => {
+    if (controller.signal.aborted) return
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        controller.signal.removeEventListener('abort', abort)
+        if (queuedWaiters.get(account.local_id) === finish) queuedWaiters.delete(account.local_id)
+        resolve()
+      }
+      const abort = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        controller.signal.removeEventListener('abort', abort)
+        if (queuedWaiters.get(account.local_id) === finish) queuedWaiters.delete(account.local_id)
+        reject(new NoqrSessionError('stopped', '任务已停止'))
+      }
+      const timer = setTimeout(finish, 400)
+      queuedWaiters.set(account.local_id, finish)
+      controller.signal.addEventListener('abort', abort, { once: true })
+    })
+  }
   const task = (async () => {
+    selectionStartTokens.delete(account.local_id)
     let acquired = await acquire(account.local_id, account.display_mode === 'visual')
     while (!acquired.ok && !controller.signal.aborted) {
       if (acquired.error) throw new Error(acquired.error)
       view.slot = 'queued'
       addLog(view, 'queued', '等待浏览器名额')
-      await new Promise((resolve) => setTimeout(resolve, 400))
+      await waitForQueueSignal()
       acquired = await acquire(account.local_id, account.display_mode === 'visual')
     }
     if (!acquired.ok || !acquired.context) return
+    if (controller.signal.aborted) {
+      await release(account.local_id)
+      return
+    }
     view.slot = 'occupied'
     await runOne({
       localId: account.local_id,
@@ -1290,7 +1348,8 @@ async function scheduleStudent(account: LocalAccount): Promise<void> {
       addLog(view, phase, phase === 'unsupported' ? `运行结束 · ${message}` : message)
     }
   }).finally(async () => {
-    await release(account.local_id)
+    view.slot = 'closing'
+    const released = await release(account.local_id)
     view.awaitingCourseSelection = false
     view.queued = false
     if (controller.signal.aborted && view.phase !== 'completed') {
@@ -1299,10 +1358,12 @@ async function scheduleStudent(account: LocalAccount): Promise<void> {
     activeRuns.delete(account.local_id)
     stopControllers.delete(account.local_id)
     stopFlags.delete(account.local_id)
-    view.configLocked = false
-    view.slot = 'released'
-    if (!activeRuns.size) {
-      selectionStartRequested = false
+    selectionStartTokens.delete(account.local_id)
+    view.slot = slots.get(account.local_id)
+    view.configLocked = noqrSlotHoldsCapacity(view.slot)
+    view.queued = false
+    if (!released && view.slot === 'closing') {
+      addLog(view, 'stopped', '浏览器进程未确认退出，保留关闭占位')
     }
     notify()
   })
@@ -1352,13 +1413,23 @@ export async function stopNoqrStudent(local_id: string) {
   stopFlags.add(local_id)
   stopControllers.get(local_id)?.abort()
   const task = activeRuns.get(local_id)
-  if (task) await task
+  const slot = slots.get(local_id)
+  const releaseTask = slot === 'queued' || slot === 'launching'
+    ? release(local_id)
+    : Promise.resolve(true)
+  await Promise.all([task || Promise.resolve(), releaseTask])
 }
 
 export async function stopAllNoqr() {
   stoppingAll = true
   try {
-    await Promise.all([...activeRuns.keys()].map((id) => stopNoqrStudent(id)))
+    const closingOnly = [...views.entries()]
+      .filter(([id, view]) => !activeRuns.has(id) && view.slot === 'closing')
+      .map(([id]) => id)
+    await Promise.all([
+      ...[...activeRuns.keys()].map((id) => stopNoqrStudent(id)),
+      ...closingOnly.map((id) => release(id)),
+    ])
   } finally {
     stoppingAll = false
   }
@@ -1366,6 +1437,9 @@ export async function stopAllNoqr() {
 
 export async function deleteNoqrRuntime(local_id: string) {
   await stopNoqrStudent(local_id)
+  if (slots.get(local_id) === 'closing' || isStudentLocked(local_id)) {
+    throw new Error('浏览器关闭尚未确认，暂不能删除该学生运行状态')
+  }
   views.delete(local_id)
   historyCache.delete(local_id)
   notify()

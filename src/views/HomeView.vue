@@ -354,9 +354,19 @@ async function stopAll() {
   await window.kaida?.stopAllStudents()
   showToast('已停止全部学生任务')
 }
-function deleteStudent() {
-  if (currentId()) void window.kaida?.removeAccount(currentId())
-  showToast('已清除当前排队任务')
+async function deleteStudent() {
+  const id = currentId()
+  if (!id) return
+  try {
+    const result = await window.kaida?.removeAccount(id)
+    if (!result?.ok) {
+      showToast(result?.error || '删除当前学生失败')
+      return
+    }
+    showToast('已删除当前学生账号')
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '删除当前学生失败')
+  }
 }
 function toggleLog() {
   if (!canOpenCourseLog.value) return showToast('请先选择课程')
@@ -805,7 +815,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 </div>
 <!-- Student details & Parallel badges -->
 <div class="flex flex-col gap-2 px-1 text-[12px]" id="student-meta">
-<div class="flex items-center justify-between"><span class="text-slate-400">学员姓名</span><span class="flex items-center gap-1.5 font-semibold text-slate-900" id="student-name">{{ currentStudent.name }}<span v-if="currentStudent.verified && workMode !== 'noqr'" class="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700" aria-label="已授权">已授权</span></span></div>
+<div class="flex items-center justify-between"><span class="text-slate-400">学员姓名</span><span class="flex items-center gap-1.5 font-semibold text-slate-900" id="student-name" :data-student-id="currentStudent.local_id">{{ currentStudent.name }}<span v-if="currentStudent.verified && workMode !== 'noqr'" class="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700" aria-label="已授权">已授权</span></span></div>
 <div class="flex items-center justify-between"><span class="text-slate-400">学员学号</span><span class="font-mono text-slate-700 font-medium" id="student-id">{{ currentStudent.id }}</span></div>
 <div class="flex items-center justify-between"><span class="text-slate-400">登录账号</span><span class="font-mono text-slate-700 font-medium" id="student-account">{{ currentStudent.id }}</span></div>
 </div>
@@ -827,7 +837,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 </div>
 <!-- Quick Toolbar -->
 <div class="grid grid-cols-4 gap-1 pt-2 border-t border-slate-100">
-<button class="py-1.5 rounded-lg text-slate-600 hover:text-[#F59E0B] hover:bg-[#FEF3C7]/40 text-[11px] font-medium transition-all flex flex-col items-center gap-0.5 tactile-btn" id="tool-stop" @click="stopTask">
+<button class="py-1.5 rounded-lg text-slate-600 hover:text-[#F59E0B] hover:bg-[#FEF3C7]/40 text-[11px] font-medium transition-all flex flex-col items-center gap-0.5 tactile-btn" id="tool-stop" data-action="stop-current" :data-student-id="currentStudent.local_id" @click="stopTask">
 <span class="material-symbols-outlined text-[16px]">stop_circle</span>
 <span>停止</span>
 </button>
@@ -861,7 +871,7 @@ function homeworkSourceCount(rows: { source: '题库' | 'AI' | '空过' }[], sou
 </div>
 </div>
 <div class="flex items-center gap-2">
-<button class="h-11 px-5 rounded-full bg-slate-100 hover:bg-red-50 text-slate-700 hover:text-red-600 font-semibold text-[13px] flex items-center gap-2 shadow-sm transition-all duration-200 tactile-btn disabled:cursor-not-allowed disabled:opacity-50" id="btn-stop-all" @click="stopAll" :disabled="!snap?.running">
+<button class="h-11 px-5 rounded-full bg-slate-100 hover:bg-red-50 text-slate-700 hover:text-red-600 font-semibold text-[13px] flex items-center gap-2 shadow-sm transition-all duration-200 tactile-btn disabled:cursor-not-allowed disabled:opacity-50" id="btn-stop-all" data-action="stop-all" @click="stopAll" :disabled="!snap?.running">
 <span class="material-symbols-outlined text-[18px]">stop_circle</span><span>全部停止</span>
 </button>
 <button class="h-11 px-7 rounded-full bg-[#4F46E5] hover:bg-[#4338CA] text-white font-semibold text-[14px] flex items-center gap-2 shadow-card transition-all duration-200 tactile-btn disabled:cursor-not-allowed disabled:opacity-50" id="btn-primary-action" @click="primaryAction" :disabled="waitingForCourseSelection ? selectedCourseTotal === 0 : controlsLocked" title="快捷键 ⌘R / Ctrl+R">

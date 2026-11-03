@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   NOQR_BLANK_GRACE_MS,
+  NOQR_BLANK_MAX_ACTIVE_WAIT_MS,
   NOQR_BLANK_MAX_HEARTBEAT_WAIT_MS,
   NoqrBlankRecoveryGate,
 } from '../electron/noqr/blank-recovery.ts'
@@ -15,9 +16,10 @@ import {
   NOQR_SUBMIT_HARD_WAIT_MS,
 } from '../electron/noqr/limits.ts'
 
-test('T005-BLANK01 非答题空白默认等待 60 秒并允许测试注入短宽限', () => {
+test('T005-BLANK01 非答题空白默认等待 60 秒，重复活动 90 秒、活动请求 120 秒有界恢复', () => {
   assert.equal(NOQR_BLANK_GRACE_MS, 60_000)
-  assert.equal(NOQR_BLANK_MAX_HEARTBEAT_WAIT_MS, 300_000)
+  assert.equal(NOQR_BLANK_MAX_HEARTBEAT_WAIT_MS, 90_000)
+  assert.equal(NOQR_BLANK_MAX_ACTIVE_WAIT_MS, 120_000)
   const gate = new NoqrBlankRecoveryGate({ graceMs: 100, refreshBudget: 1 })
   assert.equal(gate.graceMs, 100)
   assert.equal(gate.refreshBudget, 1)

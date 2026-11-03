@@ -4,6 +4,7 @@ import { build } from 'esbuild'
 const fixture = {
   events: [], actions: [], portalWaiting: false, qrWaiting: false, qrOpen: true,
   homeworkClicks: 0, submitted: false, released: false, held: false, noAnswerPage: false,
+  slotState: 'released',
   accounts: [{ local_id: 'student-1', name: '测试学生', username: 'student-1', password: 'fake', display_mode: 'headless', work_mode: 'answer', course_scope: 'all', answer_round_limit: 1 }],
 }
 globalThis.__t002 = fixture
@@ -61,12 +62,12 @@ const modules = {
     "export class ExtractWritebackSaveError extends Error {}",
   ),
   "./pool": mock(
-    "export const slots = { setLimit() {}, occupy() {}, release() {}, occupyingVerify() {}, request() { return 'occupied' }, promoteQueued() {} }",
-    "export const acquire = async () => { globalThis.__t002.held = true; return { ok: true, context: globalThis.__t002Context } }",
-    "export const release = async () => { globalThis.__t002.released = true; globalThis.__t002.held = false }",
+    "export const slots = { setLimit() {}, occupy() { globalThis.__t002.slotState = 'occupied' }, release() { globalThis.__t002.slotState = 'released' }, occupyingVerify() { globalThis.__t002.slotState = 'occupying_verify' }, request() { globalThis.__t002.slotState = 'occupied'; return 'occupied' }, promoteQueued() {}, get() { return globalThis.__t002.slotState }, has() { return globalThis.__t002.slotState !== 'released' } }",
+    "export const acquire = async () => { globalThis.__t002.held = true; globalThis.__t002.slotState = 'occupied'; return { ok: true, context: globalThis.__t002Context } }",
+    "export const release = async () => { globalThis.__t002.released = true; globalThis.__t002.held = false; globalThis.__t002.slotState = 'released' }",
     "export const isHeld = () => globalThis.__t002.held",
-    "export const markVerify = () => {}",
-    "export const markOccupied = () => {}",
+    "export const markVerify = () => { globalThis.__t002.slotState = 'occupying_verify' }",
+    "export const markOccupied = () => { globalThis.__t002.slotState = 'occupied' }",
     "export const browserWindowVisible = () => false",
     "export const toolbarBrowserCount = () => 1",
     "export const averageBrowserMemoryBytes = () => 0",

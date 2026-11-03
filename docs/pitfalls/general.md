@@ -773,7 +773,7 @@
 
 - 现象：打开 `iam.shou.org.cn/ac/#/index?entityId=...`（没有 `lck`）再点登录，`authExecute` 返回 `code:500 操作失败!`。
 - 根因：`getAuthMethodsInit()` 没跑，登录链没有 context。
-- 正确做法：从 `https://learning.shou.org.cn/scenter` 进，让门户 302 到 IAM。此时 `lck` 前缀 `context_oaut`，长度 47。
+- 正确做法：从 `learning.shou.org.cn/...` 进，让门户 302 到 IAM。此时 `lck` 前缀 `context_oaut`，长度 47。
 - 验证方式：对比有无 `lck` 的 `authExecute` 响应码。
 - 禁止事项：不要把上号器里硬编码的 CAS `lck=context_CAS_...` 当产品入口，未登录会被踢回 `l.shou.org.cn`。
 - 相关文件或命令：electron/login.ts
@@ -804,7 +804,7 @@
 
 ## oauth-login 只收 {code} 仍会被网关 400
 
-- 现象：页面 `XMLHttpRequest` POST `/api/auth/oauth-login` body `{"code"}`（code 长度 32），HTTP 400，body 空包，不是业务 JSON。SPA 约定成功后 `localStorage.token` + `META_USER__`，并跳 `https://l.shou.org.cn/`。
+- 现象：页面 `XMLHttpRequest` POST `/api/auth/oauth-login` body `{"code"}`（code 长度 32），HTTP 400，body 空包，不是业务 JSON。SPA 约定成功后 `localStorage.token` + `META_USER__`，并跳 `l.shou.org.cn/...`。
 - 根因：网关空包。即使三种 WAF cookie 都在，XHR/fetch 仍是 native，POST 仍 400。在暂停的 IAM 导航里发 XHR 会和 route handler 死锁。
 - 正确做法：等文档在 `learning.shou.org.cn` 上再 POST；成功才写 token。当前 Playwright 会话里该接口仍 400，进不了 `#tab-courseList`。
 - 禁止事项：不要把 code 打进日志；不要盲目重放 POST（code 只能用一次，网关 400 时可能未消费，但业务 200 后禁止重放）。
@@ -814,7 +814,7 @@
 
 ## 登录后直跳学习站首页会 412/400
 
-- 现象：OAuth 回调后 302 到 `https://l.shou.org.cn/`，先 412 再 400，标题空，没有课程 Tab。
+- 现象：OAuth 回调后 302 到 `l.shou.org.cn/...`，先 412 再 400，标题空，没有课程 Tab。
 - 根因：学习站首页同样有挑战；没有门户 token 时不能当 scenter 替代入口。
 - 正确做法：仍以 `/scenter` 为目标。SPA 自己成功换票后才会去 `l.shou.org.cn/` 再带回 `xh` 查询串。
 - 验证方式：e2e 日志 `GET 412 l.shou.org.cn/`。
@@ -1602,3 +1602,25 @@
 - 相关文件或命令：`electron/noqr/blank-recovery.ts`、`tests/t005-blank-recovery.test.mts`。
 - 适用范围：T005 登录、课程、作业、记录等非答题页空白恢复。
 - 来源：2026-11-02 空白恢复独立审计与慢响应复测。
+
+## 排队补位不能只靠排队任务自己轮询
+
+- 现象：账号并发 2 时，前两个账号结束后，第三个账号长时间保持“排队中”；单独看槽位状态像是已经释放，但没有可靠证据证明排队任务会被唤醒。
+- 根因：`SlotPool.promoteQueued()` 只修改状态，真正的无码排队任务仍依赖自己的 400ms `acquire()` 轮询；释放、上下文关闭和异常 finally 没有统一的中央唤醒通知，选课闸门还会把 queued 账号算作正在扫描。
+- 正确做法：浏览器池明确释放/关闭/启动失败时发出一次释放事件，调度器事件唤醒排队账号；保留轮询只作兜底。选课启动按当前实际扫描的 occupied 学生判断，并按学生或批次隔离“已开始”状态。
+- 验证方式：`node tests/t006-scheduler.test.mts` 覆盖并发 2、单并发、3 账号 selected 和释放延迟；真实可视化日志 `/tmp/t006-real-visual-queue-flow.log` 观察到第三账号自动补位登录，最终 3/3 released。
+- 禁止事项：不得把 `promoteQueued()` 改状态当成启动；不得让排队账号阻塞当前批次选课；不得用降低并发或刷新页面掩盖队列死锁。
+- 相关文件或命令：`electron/pool.ts`、`electron/noqr/run.ts`、`tests/t006-scheduler.test.mts`。
+- 适用范围：无码答题多账号并发、浏览器池释放和选课闸门。
+- 来源：2026-11-03 用户真机报告、代码审计和真实可视化队列复测。
+
+## 登录 goto 不能绕过空白恢复观察
+
+- 现象：第二个可视化浏览器进入空白页后长时间没有恢复，第一个浏览器正常；页面没有到达登录/首页业务标记。
+- 根因：登录入口直接等待 `page.goto` 的 DOM 加载，首次文档请求失败或迟迟不返回时，执行流没有进入空白恢复 gate，无法按非答题页规则刷新。
+- 正确做法：首次导航使用 commit 级启动并把页面/请求活动置于同一观察循环；空白且无活动请求时走既有静默宽限和刷新预算，有活动请求继续等待，答题页仍禁止刷新。
+- 验证方式：`T006-NAV01` 首次登录文档失败后恢复通过；真实可视化双并发 R01 两个账号均完成登录，未出现长时间空白。
+- 禁止事项：不得给答题保存设置固定超时刷新；不得用页面 URL 代替登录业务标记；不得忽略第一文档失败直接重提账密。
+- 相关文件或命令：`electron/noqr/session.ts`、`tests/t005-page-io.test.mts`、`/tmp/t006-real-visual-login-queue.log`。
+- 适用范围：无码登录、首页导航和非答题空白恢复。
+- 来源：2026-11-03 用户报告、T006-NAV01 和真实可视化双并发复测。

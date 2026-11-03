@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -8,6 +9,8 @@ import {
   classifyNoqrPage,
   ensureNoqrHomeReady,
   ensureNoqrSession,
+  navigateNoqrPage,
+  NoqrNetworkActivity,
   NoqrSessionError,
   reloadNoqrPage,
 } from '../electron/noqr/session.ts'
@@ -24,6 +27,7 @@ import {
   readNoqrHomeworks,
   shouldResetNoqrCoursePage,
 } from '../electron/noqr/homework.ts'
+import { detectNoqrAnswerPageInterruption } from '../electron/noqr/page-policy.ts'
 
 const ROOT = new URL('./fixtures/t005-page-io/', import.meta.url)
 const ORIGIN = 'https://coursework.shou.org.cn'
@@ -71,9 +75,12 @@ async function withTimeout<T>(task: Promise<T>, message: string, ms = 8_000): Pr
 async function installFixtureRoutes(context: BrowserContext, options: {
   loginMode?: 'success' | 'slow' | 'failure' | 'blocked' | 'blank' | 'delayed-redirect' | 'unrelated-4xx' | 'no-form-failure' | 'session-storage' | 'session-storage-no-redirect'
   loginDocumentDelayMs?: number
+  loginDocumentDelayCount?: number
+  loginDocumentAbortCount?: number
   courseMode?: 'ready' | 'empty' | 'skeleton-once'
 } = {}) {
   let courseLoads = 0
+  let loginDocumentLoads = 0
   const optionsWithDefaults = {
     loginMode: options.loginMode || 'success',
     courseMode: options.courseMode || 'ready',
@@ -85,7 +92,14 @@ async function installFixtureRoutes(context: BrowserContext, options: {
     const signedIn = cookies.some((cookie) => cookie.name === 'fixture_session' && cookie.value === '1')
 
     if (pathname === '/login/index.html') {
-      if (options.loginDocumentDelayMs) await new Promise((resolve) => setTimeout(resolve, options.loginDocumentDelayMs))
+      loginDocumentLoads++
+      if (options.loginDocumentAbortCount && loginDocumentLoads <= options.loginDocumentAbortCount) {
+        await route.abort('failed')
+        return
+      }
+      if (options.loginDocumentDelayMs && loginDocumentLoads <= (options.loginDocumentDelayCount ?? Number.POSITIVE_INFINITY)) {
+        await new Promise((resolve) => setTimeout(resolve, options.loginDocumentDelayMs))
+      }
       if (signedIn) {
         await route.fulfill({
           status: 200,
@@ -345,6 +359,397 @@ test('T005-P04 登录页无活动空白按预算刷新，认证阻塞页立即�
   }
 })
 
+test('T006-NAV01 登录入口首次文档失败时仍能通过有界空白恢复继续登录', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  await installFixtureRoutes(context, { loginDocumentAbortCount: 1 })
+  const page = await newPage(context)
+  let loginDocuments = 0
+  context.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/login/index.html') loginDocuments++
+  })
+  try {
+    const result = await withTimeout(
+      ensureNoqrSession(page, {
+        username: 'fixture-user',
+        password: 'fixture-password',
+        blankGraceMs: 30,
+      }),
+      '首次登录文档失败后的恢复没有完成',
+      4_000,
+    )
+    assert.equal(result.reused, false)
+    assert.equal(await classifyNoqrPage(page), 'home')
+    assert.ok(loginDocuments >= 2, '首次登录文档失败后没有进行受控恢复')
+  } finally {
+    await context.close()
+    await browser.close()
+  }
+})
+
+test('T006-NAV02 登录入口文档延迟 commit 时不误杀慢响应', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  await installFixtureRoutes(context, { loginDocumentDelayMs: 500, loginDocumentDelayCount: 1 })
+  const page = await newPage(context)
+  let loginDocuments = 0
+  context.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/login/index.html') loginDocuments++
+  })
+  try {
+    const result = await withTimeout(
+      ensureNoqrSession(page, {
+        username: 'fixture-user',
+        password: 'fixture-password',
+        blankGraceMs: 20,
+        blankMaxActiveWaitMs: 80,
+      }),
+      '登录文档长期不 commit 时没有恢复',
+      4_000,
+    )
+    assert.equal(result.reused, false)
+    assert.equal(await classifyNoqrPage(page), 'home')
+    assert.ok(loginDocuments >= 1, '登录文档请求没有发生')
+  } finally {
+    await context.close()
+    await browser.close()
+  }
+})
+
+test('T006-NAV03 首次登录文档永久挂起时按注入的活动上限恢复', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  await installFixtureRoutes(context, {
+    loginDocumentDelayMs: 1_500,
+    loginDocumentDelayCount: 1,
+  })
+  const page = await newPage(context)
+  let loginDocuments = 0
+  context.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/login/index.html') loginDocuments++
+  })
+  try {
+    const result = await withTimeout(
+      ensureNoqrSession(page, {
+        username: 'fixture-user',
+        password: 'fixture-password',
+        blankGraceMs: 20,
+        blankMaxActiveWaitMs: 80,
+        blankMaxHeartbeatWaitMs: 80,
+      }),
+      '首次登录文档永久挂起时没有按活动上限恢复',
+      1_200,
+    )
+    assert.equal(result.reused, false)
+    assert.equal(await classifyNoqrPage(page), 'home')
+    assert.ok(loginDocuments >= 2, '悬挂的首次登录文档没有触发受控恢复')
+  } finally {
+    await context.close()
+    await browser.close()
+  }
+})
+
+test('T006-NAV04 非空未识别的登录中转页必须按预算收口', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  await context.route(`${ORIGIN}/**`, async (route) => {
+    if (new URL(route.request().url()).pathname === '/login/index.html') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: '<main>登录中转页加载中</main>',
+      })
+      return
+    }
+    await route.fulfill({ status: 404, body: 'not found' })
+  })
+  const page = await newPage(context)
+  try {
+    await assert.rejects(
+      withTimeout(ensureNoqrSession(page, {
+        username: 'fixture-user',
+        password: 'fixture-password',
+        blankGraceMs: 20,
+        blankMaxActiveWaitMs: 40,
+        blankMaxHeartbeatWaitMs: 40,
+      }), '非空未知中转页没有被安全收口', 1_200),
+      (error: unknown) => error instanceof NoqrSessionError &&
+        ['blank_page', 'page_error'].includes(error.code),
+    )
+  } finally {
+    await context.close()
+    await browser.close()
+  }
+})
+
+test('T006-NAV05 登录提交后进入空白页仍按 60/90/120 恢复预算安全停止', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  const page = await newPage(context)
+  let blankLoads = 0
+  await context.route(`${ORIGIN}/**`, async (route) => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === '/login/index.html') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: `<!doctype html><html><body>
+          <input name="用户名">
+          <input name="密码" type="password">
+          <button type="button">提交</button>
+          <script>
+            document.querySelector('button').addEventListener('click', async () => {
+              await fetch('/fixture-login', { method: 'POST', body: '{}' })
+              location.href = '/blank-after-login'
+            })
+          </script>
+        </body></html>`,
+      })
+      return
+    }
+    if (pathname === '/fixture-login') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{"success":true}' })
+      return
+    }
+    if (pathname === '/blank-after-login') {
+      blankLoads++
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><html><body></body></html>' })
+      return
+    }
+    await route.fulfill({ status: 404, body: 'not found' })
+  })
+  try {
+    await assert.rejects(
+      withTimeout(ensureNoqrSession(page, {
+        username: 'fixture-user',
+        password: 'fixture-pass',
+        blankGraceMs: 20,
+        blankMaxActiveWaitMs: 40,
+        blankMaxHeartbeatWaitMs: 40,
+      }), '登录提交后的空白页没有安全收口', 3_000),
+      (error: unknown) => error instanceof NoqrSessionError && error.code === 'blank_page',
+    )
+    assert.ok(blankLoads >= 4, '登录提交后的空白页没有执行限定刷新预算')
+  } finally {
+    await context.close()
+    await browser.close()
+  }
+})
+
+test('T006-NAV06 commit 后慢正文响应不得因网络监听过早释放而被刷新', async () => {
+  const server = createServer(async (request, response) => {
+    if (request.url !== '/index.html') {
+      response.writeHead(404)
+      response.end('not found')
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    response.write('<!doctype html><html><body>')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    response.end('<div class="menu-items">形考作业</div></body></html>')
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  assert.ok(address && typeof address !== 'string')
+  const origin = `http://127.0.0.1:${address.port}`
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  const page = await newPage(context)
+  const startedAt = Date.now()
+  try {
+    await withTimeout(navigateNoqrPage(page, `${origin}/index.html`, {
+      origin,
+      blankGraceMs: 20,
+      blankMaxActiveWaitMs: 1_000,
+      blankMaxHeartbeatWaitMs: 500,
+    }), 'commit 后的慢正文响应没有等待完成', 3_000)
+    assert.ok(Date.now() - startedAt >= 200, 'commit 后过早返回并丢失了仍活动的文档请求')
+    assert.equal(await classifyNoqrPage(page), 'home')
+  } finally {
+    await context.close()
+    await browser.close()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('T006-NAV07 空白恢复重导航后的慢正文响应仍保持活动跟踪', async () => {
+  let loads = 0
+  const server = createServer(async (request, response) => {
+    if (request.url !== '/index.html') {
+      response.writeHead(404)
+      response.end('not found')
+      return
+    }
+    loads++
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    if (loads === 1) {
+      response.end('<!doctype html><html><body></body></html>')
+      return
+    }
+    response.write('<!doctype html><html><body>')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    response.end('<div class="menu-items">形考作业</div></body></html>')
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  assert.ok(address && typeof address !== 'string')
+  const origin = `http://127.0.0.1:${address.port}`
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  const page = await newPage(context)
+  const startedAt = Date.now()
+  try {
+    await withTimeout(navigateNoqrPage(page, `${origin}/index.html`, {
+      origin,
+      blankGraceMs: 20,
+      blankMaxActiveWaitMs: 1_000,
+      blankMaxHeartbeatWaitMs: 500,
+    }), '重导航后的慢正文响应没有等待完成', 3_000)
+    assert.ok(loads >= 2, '空白恢复没有重新导航')
+    assert.ok(Date.now() - startedAt >= 200, '重导航后过早返回并丢失了仍活动的文档请求')
+    assert.equal(await classifyNoqrPage(page), 'home')
+  } finally {
+    await context.close()
+    await browser.close()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('T006-NAV08 首页恢复必须复用登录阶段已建立的慢正文活动监听', async () => {
+  let loads = 0
+  const server = createServer(async (request, response) => {
+    if (request.url !== '/index.html') {
+      response.writeHead(404)
+      response.end('not found')
+      return
+    }
+    loads++
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    response.write('<!doctype html><html><body>')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    response.end('<div class="menu-items">形考作业</div></body></html>')
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  assert.ok(address && typeof address !== 'string')
+  const origin = `http://127.0.0.1:${address.port}`
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  const page = await newPage(context)
+  const network = new NoqrNetworkActivity(page, origin)
+  const startedAt = Date.now()
+  try {
+    await page.goto(`${origin}/index.html`, { waitUntil: 'commit', timeout: 0 })
+    await withTimeout(ensureNoqrHomeReady(page, {
+      network,
+      blankGraceMs: 20,
+      blankMaxActiveWaitMs: 1_000,
+      blankMaxHeartbeatWaitMs: 500,
+    }), '首页恢复没有复用已有活动监听', 3_000)
+    assert.ok(Date.now() - startedAt >= 200, '首页恢复过早返回')
+    assert.equal(loads, 1, '首页恢复错误刷新了仍在加载的慢正文')
+    assert.equal(await classifyNoqrPage(page), 'home')
+  } finally {
+    network.dispose()
+    await context.close()
+    await browser.close()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('T006-PAGE01 答题页短暂未知中转不得被包装成人工中断', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  await context.route(`${ORIGIN}/course_work_detail/index.html**`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: '<main>短暂中转</main>',
+    })
+  })
+  const page = await context.newPage()
+  try {
+    await page.goto(pageUrl('/course_work_detail/index.html?workId=fixture&workType=onlineWork'), {
+      waitUntil: 'domcontentloaded',
+    })
+    assert.equal(await classifyNoqrPage(page), 'unknown')
+    const detection = detectNoqrAnswerPageInterruption(page, { settleMs: 160 })
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+    await page.evaluate(() => {
+      document.body.innerHTML = '<div class="question-info"><div class="question-title">合成题</div></div>'
+    })
+    assert.equal(await detection, null)
+  } finally {
+    await context.close()
+    await browser.close()
+  }
+})
+
+test('T006-PAGE02 已启动的慢请求在恢复监听器交接后仍算业务活动', async () => {
+  const browser = await launchBrowser()
+  const context = await browser.newContext()
+  let courseLoads = 0
+  await context.route(`${ORIGIN}/**`, async (route) => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === '/course_work/index.html') {
+      courseLoads++
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: '<div class="van-nav-bar"><div class="van-nav-bar__title">合成课程</div></div><div class="skeleton-area van-skeleton"></div>',
+      })
+      return
+    }
+    if (pathname === '/slow.json') {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 450))
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: '{}',
+      })
+      return
+    }
+    await route.fulfill({ status: 404, body: 'not found' })
+  })
+  const page = await context.newPage()
+  const tracker = new NoqrNetworkActivity(page)
+  const controller = new AbortController()
+  try {
+    await page.goto(pageUrl('/course_work/index.html?courseId=fixture'), {
+      waitUntil: 'domcontentloaded',
+    })
+    const fetchTask = page.evaluate(() =>
+      fetch('/slow.json').then(() => true))
+    await page.waitForRequest((request) => new URL(request.url()).pathname === '/slow.json')
+    const waiting = waitForNoqrCourseWorkReady(page, {
+      signal: controller.signal,
+      network: tracker,
+      blankGraceMs: 30,
+    })
+    await new Promise((resolveWait) => setTimeout(resolveWait, 220))
+    assert.equal(courseLoads, 1, '慢请求仍在进行时恢复了课程页')
+    controller.abort()
+    await assert.rejects(
+      withTimeout(waiting, '慢请求恢复等待没有在停止后收口', 2_000),
+      (error: unknown) => error instanceof NoqrSessionError && error.code === 'stopped',
+    )
+    await fetchTask
+  } finally {
+    tracker.dispose()
+    await context.close()
+    await browser.close()
+  }
+})
+
 test('T005-P09 登录响应后延迟跳转超过旧稳定窗口仍继续等待首页', async () => {
   const browser = await launchBrowser()
   const context = await browser.newContext()
@@ -531,6 +936,44 @@ test('T005-P06b 形考作业页连续刷新仍无作业时按当前课程无作�
     )
     assert.deepEqual(homeworks, [])
     assert.equal(courseLoads, 2)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T006-COURSE01 形考作业页活动请求达到上限时不得误判为空课程', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const pathname = new URL(route.request().url()).pathname
+      if (pathname === '/slow-course-work-request') {
+        await new Promise(() => {})
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: `<div class="van-nav-bar">
+          <div class="van-nav-bar__title">活动课程</div>
+          <div class="van-nav-bar__right"><div class="van-popover__wrapper">菜单</div></div>
+        </div>
+        <script>fetch('/slow-course-work-request')</script>`,
+      })
+    })
+    await page.goto(pageUrl('/course_work/index.html?courseId=course-active'), {
+      waitUntil: 'domcontentloaded',
+    })
+    await assert.rejects(
+      withTimeout(waitForNoqrCourseWorkReady(page, {
+        blankGraceMs: 20,
+        blankMaxActiveWaitMs: 80,
+        blankMaxHeartbeatWaitMs: 80,
+        refreshBudget: 1,
+      }), '活动慢请求被误判为空课程', 2_000),
+      (error: unknown) => error instanceof NoqrSessionError && error.code === 'blank_page',
+    )
   } finally {
     await page.close()
     await browser.close()
@@ -1033,6 +1476,62 @@ test('T005-P20e 同路径三个以上稳定业务参数仍分别计为业务活�
       'empty',
     )
     assert.equal(courseLoads, 2)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T006-ANSWER-NAV01 开始作答的慢文档导航期间绝不刷新课程页', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let courseLoads = 0
+  let answerLoads = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (path === '/course_work/index.html') {
+        courseLoads++
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: `<div class="van-nav-bar"><div class="van-nav-bar__title">合成课程</div></div>
+            <article class="work-item" data-work-id="work-1" data-course-id="course-1">
+              <span class="work-title">合成作业</span>
+              <div class="work-btns">
+                <button class="btn-item" onclick="location.href='/course_work_detail/index.html?workId=work-1&courseId=course-1&workType=onlineWork'">开始作答</button>
+                <button class="btn-item">作答记录(0)</button>
+              </div>
+            </article>`,
+        })
+        return
+      }
+      if (path === '/course_work_detail/index.html') {
+        answerLoads++
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: '<div class="van-nav-bar"><div class="van-nav-bar__title">合成作业</div></div><div class="question-info"><div class="question-title">合成题</div></div>',
+        })
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await page.goto(pageUrl('/course_work/index.html?courseId=course-1'), { waitUntil: 'domcontentloaded' })
+    const homeworks = await readNoqrHomeworks(page, { blankGraceMs: 20, refreshBudget: 1 })
+    const waiting = openNoqrHomework(page, homeworks[0]!, 'start', {
+      blankGraceMs: 20,
+      refreshBudget: 1,
+      blankMaxActiveWaitMs: 80,
+      blankMaxHeartbeatWaitMs: 80,
+      answerNavigationHardDeadlineMs: 1_000,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 220))
+    assert.equal(courseLoads, 1, '答题文档尚未 commit 时课程页被错误刷新')
+    await withTimeout(waiting, '慢答题文档导航没有到达答题页', 3_000)
+    assert.equal(answerLoads, 1)
+    assert.match(page.url(), /\/course_work_detail\/index\.html\?/)
   } finally {
     await page.close()
     await browser.close()

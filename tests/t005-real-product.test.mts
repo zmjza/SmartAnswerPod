@@ -17,6 +17,7 @@ import {
   T005HarnessError,
   buildProductChildEnv,
   chooseNoqrTestCourse,
+  chooseNoqrTestCourses,
   classifyAnswerWorkType,
   createGetOnlyBankService,
   debugDiagnosticsForStudent,
@@ -32,6 +33,7 @@ import {
   normalizeHarnessConfig,
   recordDisplayEvidence,
   safeDiagnosticCode,
+  scoreConcurrentCourseBasePages,
   shouldFailTerminalBeforeTarget,
   summarizeStudentForLog,
 } from './t005-real-product.mjs'
@@ -110,10 +112,15 @@ test('T005-RP-02 normalizes phases, aliases, display, and course scope strictly'
   for (const phase of SUPPORTED_TEST_PHASES) {
     const config = normalizeHarnessConfig({
       KAIDA_T005_PHASE: phase,
-      KAIDA_TEST_ALIAS: phase === 'concurrency' ? 'NOQR-01,NOQR-02,NOQR-03' : 'NOQR-01',
+      KAIDA_TEST_ALIAS: phase === 'concurrency' || phase === 'score-concurrent'
+        ? 'NOQR-01,NOQR-02,NOQR-03'
+        : 'NOQR-01',
     }, credentials)
     assert.equal(config.phase, phase)
-    assert.equal(config.accounts.length, phase === 'concurrency' ? 3 : 1)
+    assert.equal(
+      config.accounts.length,
+      phase === 'concurrency' || phase === 'score-concurrent' ? 3 : 1,
+    )
     assert.equal(config.maxRuntimeMs, Number.POSITIVE_INFINITY)
   }
   for (const displayMode of SUPPORTED_DISPLAY_MODES) {
@@ -159,9 +166,23 @@ test('T005-RP-02 normalizes phases, aliases, display, and course scope strictly'
   assert.deepEqual(concurrent.accounts.map((account) => account.alias), ['NOQR-EN', 'NOQR-01', 'NOQR-02'])
   assert.equal(concurrent.accountParallel, 2)
 
+  const scoreConcurrent = normalizeHarnessConfig({
+    KAIDA_T005_PHASE: 'score-concurrent',
+    KAIDA_TEST_ALIAS: 'NOQR-01,NOQR-02,NOQR-03',
+  }, credentials)
+  assert.equal(scoreConcurrent.accountParallel, 2)
+  assert.equal(scoreConcurrent.accounts.length, 3)
+
   assert.throws(
     () => normalizeHarnessConfig({ KAIDA_T005_PHASE: 'unknown' }, credentials),
     (error) => error instanceof T005HarnessError && error.code === 'invalid_phase',
+  )
+  assert.throws(
+    () => normalizeHarnessConfig({
+      KAIDA_T005_PHASE: 'score-concurrent',
+      KAIDA_TEST_ALIAS: 'NOQR-01,NOQR-02',
+    }, credentials),
+    (error) => error instanceof T005HarnessError && error.code === 'concurrency_aliases_missing',
   )
   assert.throws(
     () => normalizeHarnessConfig({ KAIDA_TEST_ALIAS: 'NOQR-99' }, credentials),
@@ -222,7 +243,7 @@ test('T005-RP-02b course match is applied before strategy and index', () => {
   })?.key, 'd')
 })
 
-test('T005-RP-02A concurrency account limit defaults to two and stays within one to eight', () => {
+test('T005-RP-02A concurrency accepts configured limits and stays within one to eight', () => {
   const credentials = parseT005Credentials(manyNormalAccountGoalText(9))
   const baseEnv = {
     KAIDA_T005_PHASE: 'concurrency',
@@ -230,6 +251,14 @@ test('T005-RP-02A concurrency account limit defaults to two and stays within one
   }
 
   assert.equal(normalizeHarnessConfig(baseEnv, credentials).accountParallel, 2)
+  for (const accountParallel of [2, 3, 4, 5, 6, 8]) {
+    const config = normalizeHarnessConfig({
+      ...baseEnv,
+      KAIDA_T005_ACCOUNT_PARALLEL: String(accountParallel),
+    }, credentials)
+    assert.equal(config.accountParallel, accountParallel)
+    assert.equal(config.accounts.length, 9)
+  }
   assert.equal(normalizeHarnessConfig({
     ...baseEnv,
     KAIDA_T005_ACCOUNT_PARALLEL: '1',
@@ -251,6 +280,38 @@ test('T005-RP-02A concurrency account limit defaults to two and stays within one
     KAIDA_TEST_ALIAS: 'NOQR-01',
     KAIDA_T005_ACCOUNT_PARALLEL: '8',
   }, credentials).accountParallel, 1)
+  assert.equal(normalizeHarnessConfig({
+    KAIDA_T005_PHASE: 'answer',
+    KAIDA_TEST_ALIAS: 'NOQR-01',
+    KAIDA_T005_COURSE_COUNT: '8',
+  }, credentials).courseCount, 8)
+  assert.equal(normalizeHarnessConfig({
+    KAIDA_T005_PHASE: 'answer',
+    KAIDA_TEST_ALIAS: 'NOQR-01',
+    KAIDA_T005_COURSE_COUNT: '12',
+  }, credentials).courseCount, 8)
+})
+
+test('T005-RP-02A2 multi-course selection keeps deterministic requested count', () => {
+  const courses = Array.from({ length: 10 }, (_, index) => ({
+    key: `course-${index + 1}`,
+    name: `课程${index + 1}`,
+    groups: [{
+      rows: Array.from({ length: index + 1 }, () => ({ status: 'todo' })),
+    }],
+  }))
+  const selected = chooseNoqrTestCourses(courses, {
+    courseCount: 8,
+    courseIndex: 0,
+    courseMatch: '',
+    courseStrategy: 'max-todo',
+    forceRetry: false,
+  })
+  assert.equal(selected.length, 8)
+  assert.deepEqual(
+    selected.map((course: { key: string }) => course.key),
+    Array.from({ length: 8 }, (_, index) => `course-${10 - index}`),
+  )
 })
 
 test('T005-RP-02C test-only score stop round is bounded and backward compatible', () => {
@@ -327,7 +388,113 @@ test('T005-RP-02B concurrency observation requires a queue and caps held account
   }, aliases, 2)
   assert.equal(released.releasedCount, 3)
   assert.equal(released.allReleased, true)
+
+  const releasedWithQueuedFlag = inspect({
+    running: false,
+    students: aliases.map((name) => ({ name, slot: 'released', queued: true })),
+  }, aliases, 2)
+  assert.equal(releasedWithQueuedFlag.queuedCount, 3)
+  assert.equal(releasedWithQueuedFlag.allReleased, false)
 })
+
+test('T005-RP-02D score-concurrent polls retain configured peak and queue evidence', () => {
+  const accountParallel = 8
+  const aliases = Array.from(
+    { length: accountParallel + 1 },
+    (_, index) => `NOQR-${String(index + 1).padStart(2, '0')}`,
+  )
+  const observation = t005Harness.createConcurrencyObservation(accountParallel)
+  assert.deepEqual(observation, {
+    accountParallel,
+    queuedObserved: false,
+    queuedAliases: [],
+    promotedQueueAliases: [],
+    queueFlowObserved: false,
+    maxHeld: 0,
+    maxBrowsers: 0,
+  })
+
+  t005Harness.recordConcurrencyObservation(observation, {
+    running: true,
+    machine: { browsers: 5 },
+    students: aliases.map((name, index) => ({
+      name,
+      phase: index < 7 ? 'detecting' : 'queued',
+      account: index < 7 ? 'detecting' : 'queued',
+      slot: index < 7 ? 'occupied' : 'queued',
+      queued: index >= 7,
+    })),
+  }, aliases, accountParallel)
+
+  t005Harness.recordConcurrencyObservation(observation, {
+    running: true,
+    machine: { browsers: accountParallel },
+    students: aliases.map((name, index) => ({
+      name,
+      phase: index < accountParallel ? 'detecting' : 'queued',
+      account: index < accountParallel ? 'detecting' : 'queued',
+      slot: index < accountParallel ? 'occupied' : 'queued',
+      queued: index >= accountParallel,
+    })),
+  }, aliases, accountParallel)
+
+  t005Harness.recordConcurrencyObservation(observation, {
+    running: true,
+    machine: { browsers: accountParallel },
+    students: aliases.map((name, index) => ({
+      name,
+      phase: index === accountParallel ? 'scanning_courses' : index > accountParallel ? 'queued' : 'detecting',
+      account: index === accountParallel ? 'logged_in' : index > accountParallel ? 'queued' : 'detecting',
+      slot: index === 0
+        ? 'released'
+        : index < accountParallel
+          ? 'occupied'
+          : index === accountParallel
+            ? 'occupied'
+            : 'queued',
+      queued: index > accountParallel,
+    })),
+  }, aliases, accountParallel)
+
+  assert.deepEqual(observation, {
+    accountParallel,
+    queuedObserved: true,
+    queuedAliases: aliases.slice(7),
+    promotedQueueAliases: aliases.slice(7),
+    queueFlowObserved: true,
+    maxHeld: accountParallel,
+    maxBrowsers: accountParallel,
+  })
+
+  const finalState = inspectReleaseState(aliases, accountParallel)
+  const evidence = t005Harness.summarizeConcurrencyObservation(observation, finalState, {
+    activeBrowserContexts: 0,
+    maxActiveBrowserContexts: accountParallel,
+  })
+  assert.deepEqual(evidence, {
+    accountParallel,
+    queuedObserved: true,
+    queueFlowObserved: true,
+    maxHeld: accountParallel,
+    maxBrowsers: accountParallel,
+    finalBrowsers: 0,
+    finalQueued: 0,
+    allReleased: true,
+    activeBrowserContexts: 0,
+    maxActiveBrowserContexts: accountParallel,
+    peakWithinLimit: true,
+    peakObserved: true,
+  })
+  assert.equal(t005Harness.noqrConcurrencyEvidenceFailure(evidence, accountParallel), null)
+})
+
+function inspectReleaseState(aliases: string[], accountParallel: number) {
+  return t005Harness.inspectConcurrencySnapshot({
+    running: false,
+    machine: { browsers: 0 },
+    students: aliases.map((name) => ({ name, slot: 'released', queued: false })),
+  }, aliases, accountParallel)
+}
 
 test('T005-RP-03 local bank service is GET-only and counts every write method', async () => {
   const bank = await createGetOnlyBankService()
@@ -503,8 +670,35 @@ test('T005-RP-06 source never routes, mocks, or rewrites the real school domain'
   assert.match(source, /#tool-stop|#btn-stop-all/)
   assert.equal(/globalThis\.kaida\.(?:startStudent|setSelectedCourses|startSelectedCourses)\s*\(/.test(source), false)
   const entryCatch = source.slice(source.lastIndexOf('entry().catch'))
-  assert.equal(entryCatch.includes('error.message'), false)
+  assert.equal(/message\s*:\s*error\.message/.test(entryCatch), false)
+  assert.match(entryCatch, /safeDiagnosticCode\(error\.message\)/)
   assert.match(entryCatch, /diagnostics/)
+})
+
+test('T006-SHARED01 legacy and no-code reservations keep closing and queued capacity honest', () => {
+  const runnerSource = readFileSync(join(PROJECT_ROOT, 'electron/runner.ts'), 'utf8')
+  const noqrSource = readFileSync(join(PROJECT_ROOT, 'electron/noqr/run.ts'), 'utf8')
+  const mainSource = readFileSync(join(PROJECT_ROOT, 'electron/main.ts'), 'utf8')
+  assert.match(runnerSource, /slots\.get\(local_id\) === 'closing'/)
+  assert.match(runnerSource, /slotCountsInToolbar\(slots\.get\(local_id\)\)/)
+  assert.match(runnerSource, /temporaryContextLocks\.get\(local_id\)/)
+  assert.match(runnerSource, /该学生正在运行，浏览器尚未就绪/)
+  assert.match(runnerSource, /if \(acquired\.queued\) await release\(local_id\)/)
+  const temporaryContextBlock = runnerSource.slice(
+    runnerSource.indexOf('async function withStudentContext'),
+    runnerSource.indexOf('async function readHomeworkHistory'),
+  )
+  assert.ok(
+    temporaryContextBlock.indexOf('temporaryContextLocks.get') <
+      temporaryContextBlock.indexOf('getContext(local_id)'),
+    '临时历史上下文必须在取得学生锁后才能读取或创建',
+  )
+  assert.match(runnerSource, /slots\.has\(a\.local_id\)/)
+  assert.match(runnerSource, /浏览器关闭尚未确认，暂不能删除该学生运行状态/)
+  assert.match(runnerSource, /const closingOnly = \[\.\.\.views\.entries\(\)\]/)
+  assert.match(noqrSource, /slot === 'queued' \|\| slot === 'launching'/)
+  assert.match(noqrSource, /Promise\.all\(\[task \|\| Promise\.resolve\(\), releaseTask\]\)/)
+  assert.match(mainSource, /ids\.some\(\(id\) => isStudentLocked\(id\)\)/)
 })
 
 test('T005-RP-07 preflight exits before bank/browser startup and leaks no credentials', async () => {
@@ -972,7 +1166,7 @@ test('T005-RP-09F English slot gate covers every score return path', () => {
   const source = readFileSync(join(PROJECT_ROOT, 'tests/t005-real-product.mjs'), 'utf8')
   assert.equal(
     (source.match(/\n\s+assertEnglishHomeworkSlotEvidence\(config, summaries\)/g) || []).length,
-    2,
+    3,
   )
 })
 
@@ -1660,6 +1854,8 @@ test('T005-RP-18 passive network summary preserves safe attribution and strips r
   ])
   const state = {
     browserContexts: 1,
+    activeBrowserContexts: 0,
+    maxActiveBrowserContexts: 1,
     browserExecutable: 'bundled',
     mutationRequests: { submit_one: 1, submit_all: 0, finish: 0 },
     mutationAccepted: { submit_one: 1, submit_all: 0, finish: 0 },
@@ -1699,6 +1895,8 @@ test('T005-RP-18 passive network summary preserves safe attribution and strips r
   }
 
   const summary = await t005Harness.readPassiveNetworkSummary(fakeApp)
+  assert.equal(summary.activeBrowserContexts, 0)
+  assert.equal(summary.maxActiveBrowserContexts, 1)
   assert.deepEqual(summary.mutationRequestLedger.submit_one, [{
     requestId: 'submit_one:1:1',
     kind: 'submit_one',
@@ -1722,6 +1920,67 @@ test('T005-RP-18 passive network summary preserves safe attribution and strips r
   ]) {
     assert.equal(serialized.includes(privateText), false)
   }
+})
+
+test('T005-RP-18c concurrency resource gate rejects context peaks above the configured limit', () => {
+  const withinLimit = {
+    accountParallel: 8,
+    queuedObserved: true,
+    queueFlowObserved: true,
+    maxHeld: 8,
+    maxBrowsers: 8,
+    finalBrowsers: 0,
+    finalQueued: 0,
+    allReleased: true,
+    activeBrowserContexts: 0,
+    maxActiveBrowserContexts: 8,
+    peakWithinLimit: true,
+    peakObserved: true,
+  }
+  assert.equal(t005Harness.noqrConcurrencyEvidenceFailure(withinLimit, 8), null)
+  assert.equal(t005Harness.noqrConcurrencyEvidenceFailure({
+    ...withinLimit,
+    maxActiveBrowserContexts: 9,
+    peakWithinLimit: false,
+  }, 8), 'active_browser_contexts_exceeded')
+  assert.equal(t005Harness.noqrConcurrencyEvidenceFailure({
+    ...withinLimit,
+    activeBrowserContexts: 1,
+  }, 8), 'concurrency_browsers_not_released')
+  assert.equal(t005Harness.noqrConcurrencyEvidenceFailure({
+    ...withinLimit,
+    maxBrowsers: 0,
+    maxActiveBrowserContexts: 0,
+    peakObserved: false,
+  }, 8), 'concurrency_browser_peak_not_observed')
+  assert.equal(t005Harness.noqrConcurrencyEvidenceFailure({
+    ...withinLimit,
+    finalQueued: 1,
+    allReleased: true,
+  }, 8), 'concurrency_queue_not_empty')
+  assert.equal(t005Harness.noqrConcurrencyEvidenceFailure({
+    ...withinLimit,
+    queueFlowObserved: false,
+  }, 8), 'concurrency_queue_flow_not_observed')
+})
+
+test('T005-RP-18d course-page concurrency evidence must reach the configured parallel', () => {
+  assert.equal(t005Harness.noqrCourseConcurrencyFailure({
+    maxActiveCoursePages: 9,
+  }, 8), null)
+  assert.equal(t005Harness.noqrCourseConcurrencyFailure({
+    maxActiveCoursePages: 8,
+  }, 8, 0), null)
+  assert.equal(t005Harness.noqrCourseConcurrencyFailure({
+    maxActiveCoursePages: 10,
+  }, 8), 'course_parallel_exceeded')
+  assert.equal(t005Harness.noqrCourseConcurrencyFailure({
+    maxActiveCoursePages: 8,
+  }, 8), 'course_parallel_peak_not_observed')
+  assert.equal(scoreConcurrentCourseBasePages(2, 1, 1), 3)
+  assert.equal(t005Harness.noqrCourseConcurrencyFailure({
+    maxActiveCoursePages: 4,
+  }, 1, scoreConcurrentCourseBasePages(2, 1, 1)), null)
 })
 
 test('T005-RP-19 score network gate requires exactly one accepted Finish and no pending mutation', () => {
@@ -1907,6 +2166,11 @@ test('T005-RP-20 pacing audit tolerates one fast gap after a slow phase but reje
     entry(1, 1_000),
     entry(2, 3_000),
     entry(3, 6_000),
+  ], 2_500), 0)
+  assert.equal(noqrPacingViolationCount([
+    entry(1, 1_000),
+    entry(2, 6_000),
+    entry(3, 6_366),
   ], 2_500), 0)
   assert.equal(noqrPacingViolationCount([
     entry(1, 1_000),
