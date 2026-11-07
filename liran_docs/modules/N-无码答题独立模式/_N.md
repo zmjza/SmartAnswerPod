@@ -50,7 +50,7 @@ T007 在 T006 的账号/课程并发、队列补位和空白恢复基础上，�
 
 最近证据：最终 9/9 真机账号均 100 分、题库写0、released；`NOQR-01` 25 题位、`NOQR-04` 40 题位（20单选/20判断）、`NOQR-06` 35 题位（10/10/15）、两英语账号各 45 题位。selected 三账号 `NOQR-01/03/05` 各 25 题位/100 分、GET75/写0、`submit_one=78` 全部 accepted、Finish 3/3、峰值 2、最终全释放。机械自然隔离 14 个主观作业，submit/Finish/题库写均为 0。
 
-最新离线结果：完整 T005 为 `330/330`、runtime `133/133`、P0 为 `82/82`、T006 scheduler+pool 全 true、T007 failure isolation 全 true；E3 exit0、100 分、题库写0、平均 `3008.75ms`、最长 `3010ms`、总 `14661ms`、停止延迟 `687ms`、最终 released；UI 全字段 true、build/tsc/git diff check 通过。旧模式全部 exit0，workbench 为 6 门课程/1 条历史/阶段历史 1，browser-pool 为 3 个真实账号/2 占用/1 排队/2 个浏览器。账号并发 `1/2/visual2/3/4/5/6/8` 全部 exit0；课程并发 2/3/4/5/6 通过，NOQR-07 selected forceretry 全课程 8 并发通过（candidateCount8/maxActiveCoursePages8/active0/released）。2.9 最终包已重打并核验，提交和推送未执行。
+最新离线结果：完整 T005 为 `330/330`、runtime `133/133`、P0 为 `82/82`、T006 scheduler+pool 全 true、T007 failure isolation 全 true；E3 exit0、100 分、题库写0、平均 `3008.75ms`、最长 `3010ms`、总 `14661ms`、停止延迟 `687ms`、最终 released；UI 全字段 true、build/tsc/git diff check 通过。旧模式全部 exit0，workbench 为 6 门课程/1 条历史/阶段历史 1，browser-pool 为 3 个真实账号/2 占用/1 排队/2 个浏览器。账号并发 `1/2/visual2/3/4/5/6/8` 全部 exit0；课程并发 2/3/4/5/6 通过，NOQR-07 selected forceretry 全课程 8 并发通过（candidateCount8/maxActiveCoursePages8/active0/released）。2.9 最终包已重打并核验；实现提交 `bc1e6c108359ceeeec64e54afbb486f2c2dfb980`（`fix: stabilize no-code objective workflow`）已推送，本地 HEAD 与 `origin/main` 相同；当前待用户检查、待归档确认，未归档。
 
 ## T006 并发与队列历史状态
 
@@ -58,6 +58,6 @@ T006 只修复共享浏览器池/调度生命周期、无码登录空白恢复�
 
 ## 当前状态
 
-T006 已交付的 2.8 账号/课程并发、selected 补位、9/9 账号闭环和旧模式回归仍作为历史基线。T007 已在其上完成 CHG-004/005/006/007、完整 T005 `330/330`、旧模式回归、9/9 最终真机、selected 三账号、账号并发矩阵、课程并发 2/3/4/5/6 和 NOQR-07 selected forceretry 全课程 8 并发。2.9 最终包已重打核验，提交、推送和远端 SHA 未执行。
+T006 已交付的 2.8 账号/课程并发、selected 补位、9/9 账号闭环和旧模式回归仍作为历史基线。T007 已在其上完成 CHG-004/005/006/007、完整 T005 `330/330`、旧模式回归、9/9 最终真机、selected 三账号、账号并发矩阵、课程并发 2/3/4/5/6 和 NOQR-07 selected forceretry 全课程 8 并发。2.9 最终包已重打核验；实现提交 `bc1e6c108359ceeeec64e54afbb486f2c2dfb980`（`fix: stabilize no-code objective workflow`）已推送，本地 HEAD 与 `origin/main` 相同；当前待用户检查、待归档确认，未归档。
 
 自然慢登录、错误密码、部分空白重进、已作答白屏、漏题取消、Finish 失败和异常验证仍需按自然触发情况保留；内部覆盖不能冒充 T007 真机全绿。未经用户明确“归档”不归档。
