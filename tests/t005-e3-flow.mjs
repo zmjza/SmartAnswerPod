@@ -48,6 +48,7 @@ function bankRows() {
       options,
       answer_texts: question.answers,
       course_names: ['合成课程一'],
+      conflict: false,
       content_hash: contentHash(question.qtype, question.stem, question.options),
     }
   })
@@ -94,9 +95,13 @@ async function startFixtureServer() {
     if (url.pathname === '/rest/v1/questions') {
       if (request.method === 'GET') {
         state.bankGets++
-        const hash = url.searchParams.get('content_hash')?.replace(/^eq\./, '') || ''
-        const matched = rows.filter((row) => row.content_hash === hash)
-        state.bankQueries.push({ hash, matched: matched.length })
+        const rawHashQuery = url.searchParams.get('content_hash') || ''
+        const batch = rawHashQuery.match(/^in\.\((.*)\)$/)
+        const hashes = batch
+          ? batch[1].split(',').map((value) => value.trim()).filter(Boolean)
+          : [rawHashQuery.replace(/^eq\./, '')].filter(Boolean)
+        const matched = rows.filter((row) => hashes.includes(row.content_hash))
+        state.bankQueries.push({ hashes, matched: matched.length })
         json(matched)
         return
       }

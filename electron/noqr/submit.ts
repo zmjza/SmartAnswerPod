@@ -17,7 +17,12 @@ import {
   reloadNoqrPage,
   sleepNoqr,
 } from './session.ts'
-import type { NoqrQuestionGroup, NoqrQuestionKind } from './question.ts'
+import {
+  readNoqrQuestionGroup,
+  type NoqrQuestionGroup,
+  type NoqrQuestionKind,
+} from './question.ts'
+import { NoqrUnsupportedNonObjectiveError } from './workflow-errors.ts'
 
 export type NoqrAnswerCardAudit = {
   ok: boolean
@@ -61,6 +66,39 @@ export type NoqrSubmitResult = {
   buttonDisabled: boolean
 }
 
+export type NoqrObjectivePreflightResult =
+  | { ok: true; titles: string[] }
+  | {
+      ok: false
+      code: 'unsupported_non_objective' | 'answer_interrupted' | 'page_error'
+      reason: string
+      titles: string[]
+    }
+
+type NoqrObjectivePreflightTarget = {
+  title: string
+  titleOccurrence: number
+  sectionOccurrence: number
+  cardIndex: number
+  number: string
+  numberOccurrence: number
+  numberCount: number
+  rowIndex: number
+  cardRowCount: number
+}
+
+type NoqrAnswerCardRowEvidence = {
+  numberOccurrence: number
+  numberCount: number
+  rowIndex: number
+  cardRowCount: number
+}
+
+type NoqrAnswerCardTargetState = NoqrAnswerCardRowEvidence & {
+  found: boolean
+  current: boolean
+}
+
 const ANSWER_CARD_SECTIONS: Partial<Record<NoqrQuestionKind, string>> = {
   single: '单选题',
   multiple: '多选题',
@@ -82,6 +120,9 @@ const PARENT_ANSWER_CARD_KINDS = new Set<NoqrQuestionKind>([
   'english_reading',
 ])
 
+const ANSWER_CARD_CLICK_MAX_ATTEMPTS = 3
+const ANSWER_CARD_CLICK_GRACE_MS = 1_000
+
 export const ANSWER_CARD_TITLE_SECTIONS = [
   { section: '听力理解', aliases: ['听力理解'] },
   { section: '词汇匹配', aliases: ['词汇匹配'] },
@@ -93,10 +134,379 @@ export const ANSWER_CARD_TITLE_SECTIONS = [
   { section: '语法', aliases: ['语法'] },
 ] as const
 
+const AMBIGUOUS_CHOICE_FILL_TITLE = '选择填空题'
+
+function isAmbiguousChoiceFillTitle(title: string): boolean {
+  return title.replace(/\s+/g, ' ').trim().includes(AMBIGUOUS_CHOICE_FILL_TITLE)
+}
+
+function answerCardTitleAliases(section: string): string[] {
+  const displaySection = answerCardDisplaySection(section)
+  const entry = ANSWER_CARD_TITLE_SECTIONS.find((item) => item.section === displaySection)
+  return entry ? [...entry.aliases] : displaySection ? [displaySection] : []
+}
+
+function answerCardTitleMatchesSection(title: string, section: string): boolean {
+  const normalized = title.replace(/\s+/g, ' ').trim()
+  const displaySection = answerCardDisplaySection(section)
+  if (!normalized || !displaySection) return false
+  if (isAmbiguousChoiceFillTitle(normalized)) {
+    return displaySection === '单选题' || displaySection === '多选题'
+  }
+  return answerCardTitleAliases(displaySection).some((alias) => normalized.includes(alias))
+}
+
 export function answerCardSectionFromTitle(title: string): string {
   const normalized = String(title || '').replace(/\s+/g, ' ').trim()
+  if (isAmbiguousChoiceFillTitle(normalized)) return ''
   return ANSWER_CARD_TITLE_SECTIONS.find((entry) =>
     entry.aliases.some((alias) => normalized.includes(alias)))?.section || ''
+}
+
+const SUPPORTED_OBJECTIVE_TITLE = /单选题|单项选择题|多选题|多项选择题|判断题|语法|听力理解|词汇匹配|完型填空|完形填空|阅读理解|选择填空题/
+const UNSUPPORTED_NON_OBJECTIVE_TITLE = /简答|问答|论述|主观|文本|文件|上传|名词解释|案例分析|材料分析/
+function isCompositeObjectiveShellTitle(title: string): boolean {
+  return answerCardDisplaySection(title) === '综合题'
+}
+
+export function noqrAnswerCardObjectiveOnlyIssue(title: string): string | null {
+  const normalized = String(title || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return '答题卡题组标题为空'
+  if (UNSUPPORTED_NON_OBJECTIVE_TITLE.test(normalized)) {
+    return `答题卡包含非客观题组：${normalized}`
+  }
+  if (/填空题/.test(normalized) && !/完型填空|完形填空|选择填空题/.test(normalized)) {
+    return `答题卡包含非客观题组：${normalized}`
+  }
+  if (/完型填空|完形填空|选择填空题/.test(normalized)) return null
+  // A generic composite shell is safe only after the structural pass below
+  // reads its actual controls. The title alone cannot prove either direction.
+  if (isCompositeObjectiveShellTitle(normalized)) return null
+  if (SUPPORTED_OBJECTIVE_TITLE.test(normalized)) return null
+  return `答题卡包含未支持的题组：${normalized}`
+}
+
+async function readNoqrAnswerCardStructure(page: Page): Promise<{
+  titles: string[]
+  targets: NoqrObjectivePreflightTarget[]
+  cardRowCounts: number[]
+}> {
+  return page.locator(NOQR_SEL.answerCardGroup).evaluateAll((nodes, selectors) => {
+    const visible = (node: Element): boolean => {
+      if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return false
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden'
+    }
+    const clean = (value: string | null | undefined): string =>
+      (value || '').replace(/\s+/g, ' ').trim()
+    const titles: string[] = []
+    const targets: NoqrObjectivePreflightTarget[] = []
+    const cardRowCounts: number[] = []
+    const titleOccurrences = new Map<string, number>()
+    const sectionOccurrences = new Map<string, number>()
+    let cardIndex = 0
+    for (const card of nodes) {
+      if (!visible(card)) continue
+      cardIndex++
+      const title = clean(card.querySelector(selectors.titleSelector)?.textContent)
+      const titleOccurrence = (titleOccurrences.get(title) || 0) + 1
+      titleOccurrences.set(title, titleOccurrence)
+      const section = title.includes(selectors.ambiguousChoiceFillTitle)
+        ? ''
+        : selectors.titleSections.find((entry) =>
+          entry.aliases.some((alias) => title.includes(alias)))?.section || ''
+      const sectionOccurrence = section
+        ? (sectionOccurrences.get(section) || 0) + 1
+        : 0
+      if (section) sectionOccurrences.set(section, sectionOccurrence)
+      titles.push(title)
+      const rows = [...card.querySelectorAll(selectors.questionSelector)].filter(visible)
+      cardRowCounts.push(rows.length)
+      const rowNumbers = rows.map((row) => clean(row.textContent))
+      const numberCounts = new Map<string, number>()
+      for (const number of rowNumbers) {
+        numberCounts.set(number, (numberCounts.get(number) || 0) + 1)
+      }
+      const numberOccurrences = new Map<string, number>()
+      for (const [rowIndex, number] of rowNumbers.entries()) {
+        const numberOccurrence = (numberOccurrences.get(number) || 0) + 1
+        numberOccurrences.set(number, numberOccurrence)
+        targets.push({
+          title,
+          titleOccurrence,
+          sectionOccurrence,
+          cardIndex,
+          number,
+          numberOccurrence,
+          numberCount: numberCounts.get(number) || 1,
+          rowIndex: rowIndex + 1,
+          cardRowCount: rowNumbers.length,
+        })
+      }
+    }
+    return { titles, targets, cardRowCounts }
+  }, {
+    titleSelector: NOQR_SEL.answerCardGroupTitle,
+    questionSelector: NOQR_SEL.answerCardQuestion,
+    titleSections: ANSWER_CARD_TITLE_SECTIONS,
+    ambiguousChoiceFillTitle: AMBIGUOUS_CHOICE_FILL_TITLE,
+  })
+}
+
+function noqrPreflightTargetKind(title: string): NoqrQuestionKind | null {
+  const section = answerCardSectionFromTitle(title)
+  if (section === '单选题') return 'single'
+  if (section === '多选题') return 'multiple'
+  if (section === '判断题') return 'judge'
+  if (section === '语法') return 'english_grammar'
+  if (section === '听力理解') return 'english_listening'
+  if (section === '词汇匹配') return 'picker'
+  if (section === '完型填空' || section === '完形填空') return 'english_cloze'
+  if (section === '阅读理解') return 'english_reading'
+  return null
+}
+
+function noqrPreflightTargetMatches(
+  target: NoqrObjectivePreflightTarget,
+  group: NoqrQuestionGroup,
+): boolean {
+  const expectedKind = noqrPreflightTargetKind(target.title)
+  if (expectedKind) {
+    if (group.kind !== expectedKind) return false
+  } else if (target.title.includes(AMBIGUOUS_CHOICE_FILL_TITLE)) {
+    // Choice-fill cards are an objective-shell title; the actual control
+    // determines whether each slot is single, multiple or judge.
+    if (!['single', 'multiple', 'judge'].includes(group.kind)) return false
+  } else if (isCompositeObjectiveShellTitle(target.title)) {
+    // The generic composite title is accepted only when the current question
+    // surface is one of the known objective kinds. Text/file structures are
+    // rejected by readNoqrQuestionGroup before this check.
+    if (!['single', 'multiple', 'judge', 'picker', 'english_grammar',
+      'english_listening', 'english_cloze', 'english_reading'].includes(group.kind)) {
+      return false
+    }
+  } else {
+    return false
+  }
+  const targetNumber = Number(target.number)
+  if (!Number.isInteger(targetNumber)) return false
+  if (isCompositeAnswerCardSection(target.title)) {
+    if (target.sectionOccurrence < 1) return false
+    return noqrCompositeTargetNumberMatches(
+      group,
+      targetNumber,
+      target.sectionOccurrence,
+      {
+        numberOccurrence: target.numberOccurrence,
+        numberCount: target.numberCount,
+        rowIndex: target.rowIndex,
+        cardRowCount: target.cardRowCount,
+      },
+    )
+  }
+  return group.position != null && Number(group.position) === targetNumber
+}
+
+async function hasNoqrObjectiveProgress(page: Page): Promise<boolean> {
+  return page.evaluate((selectors) => {
+    const visible = (node: Element | null): boolean => {
+      if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return false
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden'
+    }
+    const answered = [...document.querySelectorAll(selectors.answerCardAnswered)]
+      .some((node) => visible(node) && Boolean(node.closest(selectors.answerCardGroup)))
+    if (answered) return true
+    if ([...document.querySelectorAll(
+      '.question-options .option-item[aria-checked="true"], ' +
+      '.question-options .option-item.checked, .question-options .e-a.checked',
+    )].some(visible)) return true
+    return [...document.querySelectorAll('input[name="answer"]')].some((node) => {
+      if (!(node instanceof HTMLInputElement) || node.type !== 'hidden') return false
+      const contentArea = node.closest('.content-area')
+      return node.value.trim().length > 0 &&
+        visible(contentArea) &&
+        !node.closest(selectors.answerCardGroup)
+    })
+  }, NOQR_SEL).catch(() => true)
+}
+
+async function clickNoqrAnswerCardTarget(
+  page: Page,
+  target: NoqrObjectivePreflightTarget,
+): Promise<boolean> {
+  return page.locator(NOQR_SEL.answerCardGroup).evaluateAll((nodes, expected) => {
+    const visible = (node: Element): boolean => {
+      if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return false
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden'
+    }
+    const clean = (value: string | null | undefined): string =>
+      (value || '').replace(/\s+/g, ' ').trim()
+    const cards = nodes.filter(visible)
+    const sameTitleCards = cards.filter((card) =>
+      clean(card.querySelector(expected.titleSelector)?.textContent) === expected.title)
+    const card = sameTitleCards[expected.titleOccurrence - 1]
+    if (!card) return false
+    const rows = [...card.querySelectorAll(expected.questionSelector)].filter(visible)
+    if (rows.length !== expected.cardRowCount) return false
+    const row = rows[expected.rowIndex - 1]
+    if (!(row instanceof HTMLElement)) return false
+    if (clean(row.textContent) !== expected.number) return false
+    row.click()
+    return true
+  }, {
+    ...target,
+    titleSelector: NOQR_SEL.answerCardGroupTitle,
+    questionSelector: NOQR_SEL.answerCardQuestion,
+  })
+}
+
+async function waitForNoqrPreflightQuestion(
+  page: Page,
+  target: NoqrObjectivePreflightTarget,
+  stopRequested: () => boolean,
+  deadlineAt: number,
+): Promise<NoqrQuestionGroup> {
+  let lastReason = '答题卡跳转后未加载可识别题目'
+  for (;;) {
+    if (stopRequested()) throw new Error('任务已停止')
+    const read = await readNoqrQuestionGroup(page)
+    if (read.ok) {
+      if (noqrPreflightTargetMatches(target, read.group)) return read.group
+      lastReason = '答题卡跳转后未到达目标题位'
+    } else if (read.code === 'unsupported_non_objective') {
+      throw new NoqrUnsupportedNonObjectiveError(read.reason)
+    } else {
+      lastReason = read.reason
+    }
+    if (Date.now() >= deadlineAt) {
+      if (
+        /未知|结构|题型|选项|题干|题目单元|字段/.test(lastReason) ||
+        (lastReason === '答题卡跳转后未到达目标题位' &&
+          isCompositeAnswerCardSection(target.title))
+      ) {
+        throw new NoqrUnsupportedNonObjectiveError(`整卷客观题预检无法证明当前题位：${lastReason}`)
+      }
+      throw new NoqrSessionError('page_error', `整卷客观题预检超时：${lastReason}`)
+    }
+    await sleepNoqr(page, 100)
+  }
+}
+
+export async function preflightNoqrObjectiveOnlyAnswerCard(
+  page: Page,
+  stopRequested: () => boolean,
+  opts: {
+    deadlineAt?: number
+    onWaiting?: (elapsedMs: number) => void
+  } = {},
+): Promise<NoqrObjectivePreflightResult> {
+  const startedAt = Date.now()
+  const deadlineAt = opts.deadlineAt ?? startedAt + NOQR_ANSWER_CARD_HARD_WAIT_MS
+  let result: NoqrObjectivePreflightResult | null = null
+  let failure: unknown = null
+  let titles: string[] = []
+  try {
+    await openAnswerCard(page, stopRequested, {
+      deadlineAt,
+      onDiagnostic: (message) => opts.onWaiting?.(Date.now() - startedAt),
+    })
+    const structure = await readNoqrAnswerCardStructure(page)
+    titles = structure.titles
+    const diagnostic = await readNoqrAnswerCardDiagnostic(page)
+    if (
+      !titles.length ||
+      titles.length !== diagnostic.cards ||
+      !structure.targets.length ||
+      structure.cardRowCounts.some((count) => count <= 0) ||
+      diagnostic.rows <= 0 ||
+      titles.some((title) => !title.trim())
+    ) {
+      result = {
+        ok: false,
+        code: 'page_error',
+        reason: '答题卡题组标题缺失，无法证明整卷仅含客观题',
+        titles,
+      }
+    } else if (diagnostic.answered > 0 || await hasNoqrObjectiveProgress(page)) {
+      result = {
+        ok: false,
+        code: 'answer_interrupted',
+        reason: '答题卡已存在作答进度，禁止自动开始新一轮作答',
+        titles,
+      }
+    } else {
+      const issues = titles
+        .map((title) => noqrAnswerCardObjectiveOnlyIssue(title))
+        .filter((issue): issue is string => Boolean(issue))
+      result = issues.length
+        ? { ok: false, code: 'unsupported_non_objective', reason: issues[0], titles }
+        : null
+      if (!result) {
+        for (const target of structure.targets) {
+          if (!(await answerCardSurfaceState(page)).card) {
+            await openAnswerCard(page, stopRequested, {
+              deadlineAt,
+              onDiagnostic: (message) => opts.onWaiting?.(Date.now() - startedAt),
+            })
+          }
+          if (!(await clickNoqrAnswerCardTarget(page, target))) {
+            throw new NoqrSessionError('page_error', `答题卡题位无法点击：${target.title}`)
+          }
+          try {
+            await waitForNoqrPreflightQuestion(page, target, stopRequested, deadlineAt)
+          } catch (error) {
+            if (error instanceof NoqrUnsupportedNonObjectiveError) {
+              result = {
+                ok: false,
+                code: 'unsupported_non_objective',
+                reason: error.message,
+                titles,
+              }
+              break
+            }
+            throw error
+          }
+        }
+        if (!result) {
+          // Structural inspection navigates through every card slot. Restore
+          // the first slot before the real answer flow starts; this is a
+          // navigation-only click and never selects or saves an option.
+          const firstTarget = structure.targets[0]
+          if (!(await answerCardSurfaceState(page)).card) {
+            await openAnswerCard(page, stopRequested, {
+              deadlineAt,
+              onDiagnostic: (message) => opts.onWaiting?.(Date.now() - startedAt),
+            })
+          }
+          if (!(await clickNoqrAnswerCardTarget(page, firstTarget))) {
+            throw new NoqrSessionError('page_error', '客观题预检后无法返回首题')
+          }
+          await waitForNoqrPreflightQuestion(page, firstTarget, stopRequested, deadlineAt)
+        }
+        if (!result) result = { ok: true, titles }
+      }
+    }
+  } catch (error) {
+    failure = error
+  }
+  let closeFailure: unknown = null
+  try {
+    await closeAnswerCard(page, deadlineAt, stopRequested)
+  } catch (error) {
+    closeFailure = error
+  }
+  if (failure) throw failure
+  if (closeFailure && result?.ok) {
+    return {
+      ok: false,
+      code: 'page_error',
+      reason: '答题卡预检后无法关闭，已隔离当前作业',
+      titles: result.titles,
+    }
+  }
+  return result!
 }
 
 export function noqrAnswerCardSection(kind: NoqrQuestionKind): string {
@@ -177,6 +587,58 @@ export function noqrAnswerCardExpectedSlots(
       numbers: [...new Set([local, global, merged].filter(Boolean))],
     }
   })
+}
+
+export async function readNoqrAnswerCardDiagnostic(page: Page): Promise<{
+  cards: number
+  rows: number
+  answered: number
+  current: number
+  sections: string[]
+  cardOrdinals: Array<number | null>
+  numbers: string[]
+}> {
+  return page.locator(NOQR_SEL.answerCardGroup).evaluateAll((nodes, titleSections) => {
+    const visible = (node: Element): boolean => {
+      if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return false
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden'
+    }
+    const sections: string[] = []
+    const cardOrdinals: Array<number | null> = []
+    const numbers: string[] = []
+    let rows = 0
+    let answered = 0
+    let current = 0
+    for (const card of nodes) {
+      if (!visible(card)) continue
+      const title = (card.querySelector('.question-cart-title')?.textContent || '')
+        .replace(/\s+/g, ' ').trim()
+      const ordinal = title.match(/第\s*(\d+)\s*大题/)
+      const section = title.includes('选择填空题')
+        ? ''
+        : titleSections.find((entry) =>
+          entry.aliases.some((alias) => title.includes(alias)))?.section || ''
+      sections.push(section)
+      cardOrdinals.push(ordinal ? Number(ordinal[1]) : null)
+      for (const node of card.querySelectorAll('.sub-question')) {
+        if (!visible(node)) continue
+        rows++
+        numbers.push((node.textContent || '').replace(/\s+/g, ' ').trim())
+        if (node.classList.contains('has-answered')) answered++
+        if (node.classList.contains('is-current')) current++
+      }
+    }
+    return {
+      cards: sections.length,
+      rows,
+      answered,
+      current,
+      sections,
+      cardOrdinals,
+      numbers,
+    }
+  }, ANSWER_CARD_TITLE_SECTIONS)
 }
 
 export function noqrAnswerCardExpectedGroups(
@@ -501,6 +963,96 @@ async function visibleText(page: Page, selector: string): Promise<string> {
   return values.join('\n').replace(/\s+/g, ' ').trim()
 }
 
+async function visibleAnswerCardButtonIndex(page: Page): Promise<number | null> {
+  return page.locator('.btn-item').evaluateAll((nodes) => {
+    const candidates = nodes
+      .map((node, index) => {
+        if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return null
+        const style = getComputedStyle(node)
+        if (style.display === 'none' || style.visibility === 'hidden') return null
+        const text = (node.textContent || '').replace(/\s+/g, ' ').trim()
+        if (!text.startsWith('答题卡')) return null
+        return {
+          index,
+          exact: text === '答题卡',
+          inContentArea: Boolean(node.closest('.content-area')),
+        }
+      })
+      .filter((value): value is NonNullable<typeof value> => Boolean(value))
+    return candidates.find((candidate) => candidate.exact && candidate.inContentArea)?.index ??
+      candidates.find((candidate) => candidate.inContentArea)?.index ??
+      candidates.find((candidate) => candidate.exact)?.index ??
+      candidates[0]?.index ??
+      null
+  })
+}
+
+export async function hasVisibleNoqrAnswerCardButton(page: Page): Promise<boolean> {
+  return (await visibleAnswerCardButtonIndex(page)) != null
+}
+
+async function answerCardSurfaceState(page: Page): Promise<{
+  card: boolean
+  popup: boolean
+  rows: number
+}> {
+  const cardState = await page.locator(NOQR_SEL.answerCardGroup).evaluateAll((nodes, questionSelector) => {
+    const visible = (node: Element): boolean => {
+      if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return false
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden'
+    }
+    const cards = nodes.filter(visible)
+    return {
+      card: cards.length > 0,
+      rows: cards.reduce((count, card) =>
+        count + [...card.querySelectorAll(questionSelector)].filter(visible).length, 0),
+    }
+  }, NOQR_SEL.answerCardQuestion)
+  return {
+    card: cardState.card,
+    // Picker and other Vant panels also use `.van-popup--bottom`. Only a
+    // visible answer-card group proves that the answer-card panel is present.
+    popup: cardState.card,
+    rows: cardState.rows,
+  }
+}
+
+async function answerCardModalState(page: Page): Promise<{
+  popup: boolean
+  overlay: boolean
+  overlayIndex: number | null
+}> {
+  return page.locator(NOQR_SEL.answerCardGroup).evaluateAll((cards) => {
+    const visible = (node: Element): boolean => {
+      if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return false
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden'
+    }
+    const card = cards.find(visible)
+    const popup = card?.closest('.van-popup')
+    if (!(popup instanceof HTMLElement) || !visible(popup)) {
+      return { popup: false, overlay: false, overlayIndex: null }
+    }
+    // Vant renders the modal overlay immediately before its popup. Do not
+    // search global overlays or later siblings; either can belong to a Picker
+    // or unrelated dialog.
+    const siblings = [popup.previousElementSibling]
+    const overlay = siblings.find((node) =>
+      node instanceof HTMLElement &&
+      node.classList.contains('van-overlay') &&
+      visible(node))
+    if (!(overlay instanceof HTMLElement)) {
+      return { popup: true, overlay: false, overlayIndex: null }
+    }
+    return {
+      popup: true,
+      overlay: true,
+      overlayIndex: [...document.querySelectorAll('.van-overlay')].indexOf(overlay),
+    }
+  })
+}
+
 async function openAnswerCard(
   page: Page,
   stopRequested: () => boolean,
@@ -508,46 +1060,155 @@ async function openAnswerCard(
     noProgressBudgetMs?: number
     network?: NoqrNetworkActivity
     deadlineAt?: number
+    onDiagnostic?: (message: string) => void
   } = {},
 ): Promise<void> {
-  const button = page.locator(NOQR_SEL.answerCardButton).first()
-  if (!(await button.count())) throw new Error('答题页缺少答题卡入口')
   if (stopRequested()) throw new Error('任务已停止')
   const ownNetwork = opts.network ? null : new NoqrNetworkActivity(page)
   const network = opts.network || ownNetwork
-  const requestedBudgetMs = Math.max(50, Number(opts.noProgressBudgetMs) || 120_000)
+  const requestedBudgetMs = Math.max(
+    50,
+    Number(opts.noProgressBudgetMs) || NOQR_ANSWER_CARD_HARD_WAIT_MS,
+  )
   const noProgressBudgetMs = opts.deadlineAt
     ? Math.max(50, Math.min(requestedBudgetMs, opts.deadlineAt - Date.now()))
     : requestedBudgetMs
-  let idleSince = Date.now()
+  let quietSince = Date.now()
+  let lastClickAt = 0
+  let clickAttempts = 0
+  let lastOpenDiagnosticAt = 0
+  let obstructionSince = 0
   try {
-    try {
-      await button.evaluate((node) => {
-        if (!(node instanceof HTMLElement)) throw new Error('答题卡入口不可点击')
-        setTimeout(() => node.click(), 0)
-      })
-    } catch (error) {
-      if (opts.deadlineAt && Date.now() >= opts.deadlineAt) {
-        throw new Error('答题卡打开超过总时限，已安全停止当前作业')
-      }
-      throw error
-    }
     for (;;) {
       if (stopRequested()) throw new Error('任务已停止')
       const loading = await page.locator(NOQR_SEL.loadingToast).first().isVisible().catch(() => false)
       const skeleton = await page.locator('.van-skeleton').first().isVisible().catch(() => false)
       const activeRequest = Boolean(network?.isBusinessActive())
-      const card = page.locator(NOQR_SEL.answerCardGroup)
-      for (let index = 0; index < await card.count(); index++) {
-        if (await card.nth(index).isVisible().catch(() => false)) return
-      }
+      const surface = await answerCardSurfaceState(page)
+      if (surface.card && surface.rows > 0) return
       if (opts.deadlineAt && Date.now() >= opts.deadlineAt) {
-        throw new Error('答题卡打开超过总时限，已安全停止当前作业')
+        throw new Error(
+          `答题卡打开超过总时限，已安全停止当前作业（` +
+          `请求=${activeRequest ? '活动' : '静默'}，加载=${loading ? '有' : '无'}，` +
+          `骨架=${skeleton ? '有' : '无'}，弹层=${surface.popup ? '有' : '无'}，` +
+          `卡片行=${surface.rows}，点击=${clickAttempts}）`,
+        )
       }
       if (activeRequest || loading || skeleton) {
-        idleSince = Date.now()
-      } else if (Date.now() - idleSince >= noProgressBudgetMs) {
-        throw new Error('答题卡点击后无请求且未出现可见结构，已到总时限')
+        quietSince = 0
+        obstructionSince = 0
+      } else if (!quietSince) {
+        quietSince = Date.now()
+      }
+
+      // A client-side answer-card click normally produces no network request.
+      // Retry only after a short period with no request, loading toast or
+      // skeleton. An empty popup is also retried because it has no usable card
+      // structure. Real slow requests keep the unbounded response wait and are
+      // never mistaken for a swallowed click.
+      if (
+        !activeRequest &&
+        !loading &&
+        !skeleton &&
+        clickAttempts < ANSWER_CARD_CLICK_MAX_ATTEMPTS &&
+        (clickAttempts === 0 || Date.now() - lastClickAt >= ANSWER_CARD_CLICK_GRACE_MS)
+      ) {
+        const buttonIndex = await visibleAnswerCardButtonIndex(page)
+        if (buttonIndex == null) throw new Error('答题页缺少可见答题卡入口')
+        const button = page.locator('.btn-item').nth(buttonIndex)
+        try {
+          await button.evaluate((node) => {
+            if (!(node instanceof HTMLElement)) throw new Error('答题卡入口不可点击')
+            const rect = node.getBoundingClientRect()
+            const left = Math.max(0, rect.left)
+            const right = Math.min(window.innerWidth, rect.right)
+            const top = Math.max(0, rect.top)
+            const bottom = Math.min(window.innerHeight, rect.bottom)
+            if (right <= left || bottom <= top) throw new Error('答题卡入口不在可见区域')
+            const hit = document.elementFromPoint(
+              (left + right) / 2,
+              (top + bottom) / 2,
+            )
+            if (!(hit && (hit === node || node.contains(hit)))) {
+              throw new Error('答题卡入口被遮挡')
+            }
+            setTimeout(() => node.click(), 0)
+          })
+          obstructionSince = 0
+        } catch (error) {
+          if (opts.deadlineAt && Date.now() >= opts.deadlineAt) {
+            throw new Error(
+              `答题卡打开超过总时限，已安全停止当前作业（` +
+              `请求=${activeRequest ? '活动' : '静默'}，加载=${loading ? '有' : '无'}，` +
+              `骨架=${skeleton ? '有' : '无'}，弹层=${surface.popup ? '有' : '无'}，` +
+              `卡片行=${surface.rows}，点击=${clickAttempts}）`,
+            )
+          }
+          // The answer-card entry can be covered by a transient animation
+          // overlay or skeleton immediately after the answer surface appears.
+          // Keep the page untouched and retry until the bounded deadline; a
+          // permanent blocker still closes out with an explicit error.
+          if (/答题卡入口被遮挡/.test(
+            String(error instanceof Error ? error.message : error),
+          )) {
+            obstructionSince ||= Date.now()
+            if (Date.now() - obstructionSince >= noProgressBudgetMs) {
+              throw new Error(
+                `答题卡入口被遮挡，已到有限等待上限（` +
+                `请求=${activeRequest ? '活动' : '静默'}，加载=${loading ? '有' : '无'}，` +
+                `骨架=${skeleton ? '有' : '无'}，弹层=${surface.popup ? '有' : '无'}，` +
+                `卡片行=${surface.rows}，点击=${clickAttempts}）`,
+              )
+            }
+          } else {
+            throw error
+          }
+        }
+        if (!obstructionSince) {
+          clickAttempts++
+          lastClickAt = Date.now()
+          quietSince = lastClickAt
+          continue
+        }
+      }
+
+      if (
+        !surface.popup &&
+        !activeRequest &&
+        !loading &&
+        !skeleton &&
+        clickAttempts >= ANSWER_CARD_CLICK_MAX_ATTEMPTS &&
+        quietSince &&
+        Date.now() - quietSince >= ANSWER_CARD_CLICK_GRACE_MS
+      ) {
+        throw new Error(
+          `答题卡点击后无请求且未出现可见结构，已到有限重试上限（` +
+          `请求=${activeRequest ? '活动' : '静默'}，加载=${loading ? '有' : '无'}，` +
+          `骨架=${skeleton ? '有' : '无'}，点击=${clickAttempts}）`,
+        )
+      }
+      if (
+        surface.popup &&
+        !activeRequest &&
+        !loading &&
+        !skeleton &&
+        clickAttempts >= ANSWER_CARD_CLICK_MAX_ATTEMPTS &&
+        quietSince &&
+        Date.now() - quietSince >= noProgressBudgetMs
+      ) {
+        throw new Error(
+          `答题卡弹层已打开但题目结构未加载（` +
+          `请求=${activeRequest ? '活动' : '静默'}，加载=${loading ? '有' : '无'}，` +
+          `骨架=${skeleton ? '有' : '无'}，卡片行=${surface.rows}，点击=${clickAttempts}）`,
+        )
+      }
+      if (Date.now() - lastOpenDiagnosticAt >= 5_000) {
+        lastOpenDiagnosticAt = Date.now()
+        opts.onDiagnostic?.(
+          `答题卡打开状态：请求${activeRequest ? '活动' : '静默'}，` +
+          `加载${loading ? '有' : '无'}，骨架${skeleton ? '有' : '无'}，` +
+          `弹层${surface.popup ? '有' : '无'}，卡片行${surface.rows}，点击${clickAttempts}`,
+        )
       }
       await sleepNoqr(page, 100)
     }
@@ -556,41 +1217,40 @@ async function openAnswerCard(
   }
 }
 
-async function closeAnswerCard(page: Page, deadlineAt?: number): Promise<void> {
+async function closeAnswerCard(
+  page: Page,
+  deadlineAt?: number,
+  stopRequested?: () => boolean,
+): Promise<void> {
   const closeDeadline = deadlineAt ?? Date.now() + 5_000
-  const answerCardState = async (): Promise<{ popup: boolean; overlay: boolean }> => {
-    const popup = page.locator(`${NOQR_SEL.answerCardPopup}:visible`)
-    const overlay = page.locator('.van-overlay:visible')
-    return {
-      popup: (await popup.count().catch(() => 0)) > 0,
-      overlay: (await overlay.count().catch(() => 0)) > 0,
-    }
-  }
-  const backdrop = page.locator('.van-overlay').last()
   let attemptedKeyboard = false
+  let overlayClickAttempts = 0
   for (;;) {
-    const state = await answerCardState()
+    if (stopRequested?.()) throw new Error('任务已停止')
+    const state = await answerCardModalState(page)
     if (!state.popup && !state.overlay) return
     // The site's modal answer card pairs the popup with an overlay. A popup
     // without an overlay is a non-modal panel (also used by lightweight
     // fixtures); it must not hold the answer flow hostage waiting for an
     // Escape handler that the page does not provide.
-    if (state.popup && !state.overlay) {
+    if (!state.overlay || state.overlayIndex == null) {
       return
     }
-    const remaining = Math.max(1, closeDeadline - Date.now())
     if (Date.now() >= closeDeadline) {
       throw new NoqrSessionError('page_error', '答题卡弹层关闭失败，已安全停止当前作业')
     }
-    if (await backdrop.isVisible().catch(() => false)) {
-      await backdrop.click({
-        position: { x: 5, y: 5 },
-        timeout: remaining,
+    if (overlayClickAttempts < 3) {
+      overlayClickAttempts++
+      // The overlay can be a zero-size fixture or a fully transparent portal.
+      // This is a close action, not a user-facing hit test.
+      await page.locator('.van-overlay').nth(state.overlayIndex).evaluate((node) => {
+        if (node instanceof HTMLElement) node.click()
       }).catch(() => {})
     } else if (!attemptedKeyboard) {
       attemptedKeyboard = true
       await page.keyboard.press('Escape').catch(() => {})
     }
+    if (stopRequested?.()) throw new Error('任务已停止')
     await new Promise((resolveWait) => setTimeout(resolveWait, 100))
   }
 }
@@ -603,6 +1263,70 @@ function isCompositeAnswerCardSection(section: string): boolean {
   return /听力理解|词汇匹配|完型填空|完形填空|阅读理解/.test(answerCardDisplaySection(section))
 }
 
+function noqrCompositeTargetNumberMatches(
+  group: NoqrQuestionGroup,
+  targetNumber: number,
+  cardOccurrence: number,
+  row?: NoqrAnswerCardRowEvidence,
+): boolean {
+  if (!Number.isInteger(targetNumber) || !Number.isInteger(cardOccurrence) || cardOccurrence <= 0) {
+    return false
+  }
+  const position = group.position == null ? null : Number(group.position)
+  if (
+    position == null ||
+    !Number.isInteger(position) ||
+    position <= 0
+  ) return false
+  const total = group.total == null ? null : Number(group.total)
+  const unitCount = Math.max(1, group.units.length)
+  const local = group.units.map((unit, index) => Number(unit.ordinal || index + 1))
+  const merged = local.map((number) =>
+    (position - 1) * unitCount + number)
+  const numberMatches = local.includes(targetNumber) || merged.includes(targetNumber)
+  if (
+    row &&
+    total != null &&
+    Number.isInteger(total) &&
+    total > 0 &&
+    row.cardRowCount === total &&
+    row.cardRowCount > 1
+  ) {
+    // With one card holding several logical groups, row order is the group
+    // identity. Do not let a local/merged number from another row pass when
+    // the page is still showing a different group.
+    if (cardOccurrence > 1 && position !== cardOccurrence) return false
+    return row.rowIndex === position
+  }
+  if (row && total != null && Number.isInteger(total) && total > 1 && row.cardRowCount === 1) {
+    // A single-row card can still represent a later logical group only by
+    // its page position or a globally merged number for that position.
+    if (cardOccurrence > 1 && position !== cardOccurrence) return false
+    const mergedStart = (position - 1) * unitCount + 1
+    const mergedEnd = position * unitCount
+    return targetNumber === position ||
+      (position > 1 && targetNumber >= mergedStart && targetNumber <= mergedEnd)
+  }
+  if (row && row.numberCount > 1) {
+    // A single card can carry multiple logical composite groups with the same
+    // local row numbers. The page position is the only safe group ordinal;
+    // a duplicated row occurrence must match it before local/merged matching
+    // is allowed.
+    if (
+      !Number.isInteger(row.numberOccurrence) ||
+      row.numberOccurrence <= 0 ||
+      row.numberOccurrence !== position
+    ) return false
+  }
+  // A merged answer-card form can number a later composite group globally
+  // (for example 6..10) while the visible question header is 2/2. There is
+  // still only one composite card, so allow its local/merged row numbers
+  // without requiring the header's group position to equal the card
+  // occurrence. Multi-card forms still require the occurrence to match.
+  if (cardOccurrence === 1) return numberMatches
+  return position === cardOccurrence && (numberMatches || targetNumber === cardOccurrence)
+}
+
 function answerCardLocator(sectionKey: string): { section: string, occurrence: number } {
   const matched = sectionKey.trim().match(/^(.*)@(\d+)$/)
   return matched
@@ -611,12 +1335,101 @@ function answerCardLocator(sectionKey: string): { section: string, occurrence: n
 }
 
 async function answerPageNavigationSignature(page: Page): Promise<string> {
-  return page.locator(`${NOQR_SEL.questionInfo}:visible`).first().innerText()
+  const questionInfo = page.locator(`${NOQR_SEL.questionInfo}:visible`).first()
+  if (!(await questionInfo.isVisible().catch(() => false))) return ''
+  return questionInfo.innerText({ timeout: 1_000 })
     .then((text) => text.replace(/\s+/g, ' ').trim())
     .catch(() => '')
 }
 
-async function targetQuestionVisible(page: Page, section: string, number: string): Promise<boolean> {
+async function compositeQuestionSurfaceReady(
+  page: Page,
+  section: string,
+): Promise<boolean> {
+  const questionInfo = page.locator(`${NOQR_SEL.questionInfo}:visible`).first()
+  if (!(await questionInfo.isVisible().catch(() => false))) return false
+  return questionInfo.evaluate((root, expectedSection) => {
+    const visible = (node: Element): boolean => {
+      if (!(node instanceof HTMLElement) || node.getClientRects().length === 0) return false
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden'
+    }
+    const visibleCount = (selector: string): number =>
+      [...root.querySelectorAll(selector)].filter(visible).length
+    const subItems = visibleCount('.sub-questions > .sub-item')
+    const options = visibleCount(
+      '.question-options .option-item[role="radio"], .question-options .option-item[role="checkbox"]',
+    )
+    if (expectedSection === '听力理解') {
+      const audio = visibleCount('a[data-url], audio[src], video[src], iframe[src]')
+      return audio > 0 && (subItems > 0 || options > 0)
+    }
+    if (expectedSection === '词汇匹配') {
+      return visibleCount(
+        '.question-options .van-cell.van-cell--clickable.van-field[role="button"]',
+      ) > 0
+    }
+    if (expectedSection === '完型填空' || expectedSection === '完形填空') {
+      return visibleCount('.spaceIndex[index]') > 0 && (subItems > 0 || options > 0)
+    }
+    if (expectedSection === '阅读理解') {
+      return subItems > 0 && options > 0
+    }
+    return false
+  }, section).catch(() => false)
+}
+
+async function compositeTargetNumberReached(
+  page: Page,
+  section: string,
+  number: string,
+  row?: NoqrAnswerCardRowEvidence,
+): Promise<boolean> {
+  const locator = answerCardLocator(section)
+  const visibleText = await page.locator('.content-area:visible').first().innerText()
+    .then((text) => text
+      .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
+      .replace(/你还未交卷[^\n]*/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim())
+    .catch(() => '')
+  const position = visibleText.match(/\b(?:question\s*)?(\d+)\s*\/\s*(\d+)\b/i)
+  if (!position) return false
+  const pagePosition = Number(position[1])
+  const targetNumber = Number(number)
+  if (!Number.isInteger(pagePosition) || !Number.isInteger(targetNumber)) return false
+  if (
+    locator.occurrence === 1 &&
+    row?.cardRowCount === 1 &&
+    pagePosition === targetNumber
+  ) return true
+  const read = await readNoqrQuestionGroup(page).catch(() => null)
+  if (!read || !read.ok) {
+    // Keep the navigation check usable on minimal/legacy fixtures that only
+    // expose one composite row. Structural preflight still fails closed when
+    // the full question group cannot be read.
+    return locator.occurrence === 1 &&
+      row?.cardRowCount === 1 &&
+      pagePosition === targetNumber
+  }
+  if (!['english_listening', 'picker', 'english_cloze', 'english_reading']
+    .includes(read.group.kind)) return false
+  return noqrCompositeTargetNumberMatches(
+    read.group,
+    targetNumber,
+    locator.occurrence,
+    row,
+  )
+}
+
+async function targetQuestionVisible(
+  page: Page,
+  section: string,
+  number: string,
+  row?: NoqrAnswerCardRowEvidence,
+): Promise<boolean> {
+  const questionInfo = page.locator(`${NOQR_SEL.questionInfo}:visible`).first()
+  if (!(await questionInfo.isVisible().catch(() => false))) return false
   const text = await page.locator('.content-area:visible').first().innerText()
     .then((value) => value
       .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
@@ -626,18 +1439,45 @@ async function targetQuestionVisible(page: Page, section: string, number: string
     .catch(() => '')
   const displaySection = answerCardDisplaySection(answerCardLocator(section).section)
   if (!displaySection) return false
-  const knownSections = ['听力理解', '词汇匹配', '完型填空', '完形填空', '阅读理解', '多选题', '单选题', '判断题', '语法']
-  if (!knownSections.includes(displaySection)) return true
-  if (!text.includes(displaySection)) return false
-  if (isCompositeAnswerCardSection(section)) return true
   const position = text.match(/\b(?:question\s*)?(\d+)\s*\/\s*(\d+)\b/i)
-  return Boolean(position && Number(position[1]) === Number(number))
+  const positionReached = Boolean(position && Number(position[1]) === Number(number))
+  if (isCompositeAnswerCardSection(section)) {
+    return text.includes(displaySection) &&
+      await compositeQuestionSurfaceReady(page, displaySection) &&
+      await compositeTargetNumberReached(page, section, number, row)
+  }
+  const knownObjectiveSections = ['多选题', '单选题', '判断题', '语法']
+  if (knownObjectiveSections.includes(displaySection)) {
+    const expectedRole = displaySection === '单选题'
+      ? 'radio'
+      : displaySection === '多选题'
+        ? 'checkbox'
+        : ''
+    const options = await questionInfo.locator(
+      expectedRole
+        ? `.question-options .option-item[role="${expectedRole}"]`
+        : '.question-options .option-item[role="radio"], .question-options .option-item[role="checkbox"]',
+    ).evaluateAll((nodes) => nodes.filter((node) => {
+      if (!(node instanceof HTMLElement)) return false
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+    }).length).catch(() => 0)
+    return answerCardTitleMatchesSection(text, displaySection) &&
+      options > 0 &&
+      (!position || positionReached)
+  }
+  // Generic answer-card sections such as 综合题 do not necessarily appear in
+  // the answer header. Require the question body to have a matching position
+  // instead of treating any non-empty content area as a successful jump.
+  return positionReached || text.includes(displaySection)
 }
 
-async function targetCardState(page: Page, sectionKey: string, number: string): Promise<{
-  found: boolean
-  current: boolean
-}> {
+async function targetCardState(
+  page: Page,
+  sectionKey: string,
+  number: string,
+  expectedRow?: Pick<NoqrAnswerCardRowEvidence, 'rowIndex' | 'cardRowCount'>,
+): Promise<NoqrAnswerCardTargetState> {
   const locator = answerCardLocator(sectionKey)
   return page.locator(NOQR_SEL.answerCardGroup).evaluateAll((nodes, expected) => {
     const clean = (value: string | null | undefined) => (value || '').replace(/\s+/g, ' ').trim()
@@ -650,20 +1490,61 @@ async function targetCardState(page: Page, sectionKey: string, number: string): 
     for (const node of nodes) {
       if (!visible(node)) continue
       const title = clean(node.querySelector(expected.titleSelector)?.textContent)
-      if (title !== expected.section && !title.includes(expected.section)) continue
+      const ambiguousChoice = title.includes(expected.ambiguousChoiceFillTitle) &&
+        (expected.section === '单选题' || expected.section === '多选题')
+      if (!ambiguousChoice && title !== expected.section && !title.includes(expected.section)) continue
       occurrence++
       if (occurrence !== expected.occurrence) continue
-      const target = [...node.querySelectorAll(expected.questionSelector)]
-        .find((item) => visible(item) && clean(item.textContent) === expected.number)
-      if (target instanceof HTMLElement) {
-        return { found: true, current: target.classList.contains('is-current') }
+      const rows = [...node.querySelectorAll(expected.questionSelector)].filter(visible)
+      if (expected.row?.cardRowCount != null && rows.length !== expected.row.cardRowCount) {
+        return {
+          found: false,
+          current: false,
+          numberOccurrence: 0,
+          numberCount: 0,
+          rowIndex: 0,
+          cardRowCount: rows.length,
+        }
+      }
+      const rowIndex = expected.row?.rowIndex != null
+        ? expected.row.rowIndex
+        : rows.findIndex((item) => clean(item.textContent) === expected.number) + 1
+      const target = rows[rowIndex - 1]
+      if (!(target instanceof HTMLElement) || clean(target.textContent) !== expected.number) {
+        return {
+          found: false,
+          current: false,
+          numberOccurrence: 0,
+          numberCount: 0,
+          rowIndex,
+          cardRowCount: rows.length,
+        }
+      }
+      const numbers = rows.map((item) => clean(item.textContent))
+      return {
+        found: true,
+        current: target.classList.contains('is-current'),
+        numberOccurrence: numbers.slice(0, rowIndex).filter((value) => value === expected.number).length,
+        numberCount: numbers.filter((value) => value === expected.number).length,
+        rowIndex,
+        cardRowCount: rows.length,
       }
     }
-    return { found: false, current: false }
+    return {
+      found: false,
+      current: false,
+      numberOccurrence: 0,
+      numberCount: 0,
+      rowIndex: 0,
+      cardRowCount: 0,
+    }
   }, {
     section: locator.section,
     occurrence: locator.occurrence,
     number,
+    row: expectedRow || null,
+    aliases: answerCardTitleAliases(locator.section),
+    ambiguousChoiceFillTitle: AMBIGUOUS_CHOICE_FILL_TITLE,
     titleSelector: NOQR_SEL.answerCardGroupTitle,
     questionSelector: NOQR_SEL.answerCardQuestion,
   })
@@ -695,47 +1576,81 @@ export async function goToNoqrAnswerCardQuestion(
       for (const node of nodes) {
         if (!visible(node)) continue
         const title = clean(node.querySelector(expected.titleSelector)?.textContent)
-        if (title !== expected.section && !title.includes(expected.section)) continue
+        const ambiguousChoice = title.includes(expected.ambiguousChoiceFillTitle) &&
+          (expected.section === '单选题' || expected.section === '多选题')
+        if (!ambiguousChoice && !expected.aliases.some((alias) => title.includes(alias))) continue
         occurrence++
         if (occurrence !== expected.occurrence) continue
-        const target = [...node.querySelectorAll(expected.questionSelector)]
-          .find((item) => visible(item) && clean(item.textContent) === expected.number)
+        const rows = [...node.querySelectorAll(expected.questionSelector)].filter(visible)
+        const rowIndex = rows.findIndex((item) => clean(item.textContent) === expected.number) + 1
+        const target = rows[rowIndex - 1]
         if (target instanceof HTMLElement) {
           const wasCurrent = target.classList.contains('is-current')
+          const numbers = rows.map((item) => clean(item.textContent))
           target.click()
-          return { clicked: true, wasCurrent }
+          return {
+            clicked: true,
+            wasCurrent,
+            rowIndex,
+            cardRowCount: rows.length,
+            numberOccurrence: numbers.slice(0, rowIndex)
+              .filter((value) => value === expected.number).length,
+            numberCount: numbers.filter((value) => value === expected.number).length,
+          }
         }
       }
-      return { clicked: false, wasCurrent: false }
+      return {
+        clicked: false,
+        wasCurrent: false,
+        rowIndex: 0,
+        cardRowCount: 0,
+        numberOccurrence: 0,
+        numberCount: 0,
+      }
     }, {
       section: locator.section,
       occurrence: locator.occurrence,
       number,
+      aliases: answerCardTitleAliases(locator.section),
+      ambiguousChoiceFillTitle: AMBIGUOUS_CHOICE_FILL_TITLE,
       titleSelector: NOQR_SEL.answerCardGroupTitle,
       questionSelector: NOQR_SEL.answerCardQuestion,
     })
     if (!clicked.clicked) throw new Error('答题卡中找不到漏题题号')
+    const rowEvidence: NoqrAnswerCardRowEvidence = {
+      rowIndex: clicked.rowIndex,
+      cardRowCount: clicked.cardRowCount,
+      numberOccurrence: clicked.numberOccurrence,
+      numberCount: clicked.numberCount,
+    }
     const verifyStartedAt = Date.now()
     let cardState = clicked.wasCurrent
-      ? { found: true, current: true }
-      : await targetCardState(page, sectionKey, number)
+      ? { found: true, current: true, ...rowEvidence }
+      : await targetCardState(page, sectionKey, number, rowEvidence)
     for (;;) {
       if (stopRequested()) throw new Error('任务已停止')
-      cardState = await targetCardState(page, sectionKey, number).catch(() => cardState)
-      const pageReached = await targetQuestionVisible(page, sectionKey, number)
+      cardState = await targetCardState(page, sectionKey, number, rowEvidence)
+        .catch(() => cardState)
+      const pageReached = await targetQuestionVisible(page, sectionKey, number, rowEvidence)
       const navigated = await answerPageNavigationSignature(page) !== beforeSignature
-      if (cardState.current || (pageReached && (clicked.wasCurrent || navigated))) return
+      // An answer-card row can become `is-current` before the question body
+      // finishes rendering. Never treat the card marker alone as a completed
+      // jump; the target question surface must also be readable.
+      if (pageReached && (cardState.current || clicked.wasCurrent || navigated)) return
       const surface = await classifyNoqrPage(page)
       if (surface === 'auth_blocked') throw new NoqrSessionError('auth_blocked', '答题卡跳转后进入人工认证')
       if (surface === 'error') throw new NoqrSessionError('page_error', '答题卡跳转后页面显示明确错误')
-      if (Date.now() - verifyStartedAt >= Math.max(50, opts.verifyBudgetMs ?? 5_000) ||
+      if (Date.now() - verifyStartedAt >= Math.max(
+        50,
+        opts.verifyBudgetMs ?? 5_000,
+      ) ||
         Date.now() >= actionDeadline) {
         throw new Error(`答题卡跳转后未到达目标题：${sectionKey}#${number}`)
       }
       await sleepNoqr(page, 100)
     }
   } finally {
-    await closeAnswerCard(page, actionDeadline)
+    await closeAnswerCard(page, actionDeadline, stopRequested)
   }
 }
 
@@ -762,7 +1677,7 @@ async function auditNoqrAnswerCardInner(page: Page, opts: {
   const noProgressBudgetMs = Math.max(
     50,
     Math.min(
-      Number(opts.noProgressBudgetMs) || 120_000,
+      Number(opts.noProgressBudgetMs) || NOQR_ANSWER_CARD_HARD_WAIT_MS,
       auditDeadlineMs,
     ),
   )
@@ -777,13 +1692,14 @@ async function auditNoqrAnswerCardInner(page: Page, opts: {
         noProgressBudgetMs,
         network,
         deadlineAt,
+        onDiagnostic: opts.onDiagnostic,
       })
       opened = true
       break
     } catch (error) {
       if (openAttempt >= maxReopens || opts.stopRequested()) throw error
       opts.onRecovery?.('答题卡未出现结构，关闭重开', openAttempt + 1)
-      await closeAnswerCard(page, deadlineAt)
+      await closeAnswerCard(page, deadlineAt, opts.stopRequested)
     }
   }
   if (!opened) throw new Error('答题卡连续打开失败')
@@ -830,8 +1746,10 @@ async function auditNoqrAnswerCardInner(page: Page, opts: {
             .replace(/\s+/g, ' ').trim()
           const ordinalMatch = title.match(/第\s*(\d+)\s*大题/)
           const cardOrdinal = ordinalMatch ? Math.max(1, Number(ordinalMatch[1])) : null
-          const section = titleSections.find((entry) =>
-            entry.aliases.some((alias) => title.includes(alias)))?.section || ''
+          const section = title.includes('选择填空题')
+            ? ''
+            : titleSections.find((entry) =>
+              entry.aliases.some((alias) => title.includes(alias)))?.section || ''
           const occurrence = section ? (occurrences.get(section) || 0) + 1 : 0
           if (section) occurrences.set(section, occurrence)
           for (const node of card.querySelectorAll('.sub-question')) {
@@ -889,6 +1807,28 @@ async function auditNoqrAnswerCardInner(page: Page, opts: {
         return sectionIsUnique &&
           Boolean(opts.savedKeys?.has(row.legacyKey) || opts.savedKeys?.has(row.number))
       }
+      const loading = await page.locator(NOQR_SEL.loadingToast).first().isVisible().catch(() => false)
+      const skeleton = await page.locator('.van-skeleton').first().isVisible().catch(() => false)
+      const networkActive = network.isBusinessActive()
+      const activityActive = loading || skeleton || networkActive
+      const savedExpectedGroupCount = expectedGroups
+        .filter((group) => savedGroupOrdinals.has(group.groupOrdinal)).length
+      const allExpectedGroupsSaved = expectedGroups.length > 0 &&
+        savedExpectedGroupCount === expectedGroups.length
+      const allVisibleRowsHaveProgress = rows.length > 0 &&
+        rows.every((row) => row.answered || row.current || hasSavedEvidence(row))
+      // Some school answer-card layouts virtualize or truncate mixed reading
+      // groups even after every logical group has an accepted save request.
+      // Permit only the exact-cardinality, all-saved, all-progress case; any
+      // missing group, active request, skeleton, loading toast or unaccounted
+      // row remains blocked below.
+      const savedGroupsFallback = Boolean(
+        groupMatch &&
+        allExpectedGroupsSaved &&
+        rows.length === expectedGroups.length &&
+        allVisibleRowsHaveProgress &&
+        !activityActive,
+      )
       const parentOnlyGroupsSaved = Boolean(
         groupMatch &&
         [...groupMatch.parentOnlyGroupOrdinals]
@@ -910,25 +1850,23 @@ async function auditNoqrAnswerCardInner(page: Page, opts: {
           : expectedCount > 0
             ? rows.length >= expectedCount && (!hasExpectedEvidence || keyEvidenceLoaded)
             : keyEvidenceLoaded
+      const answerCardReady = expectedLoaded || savedGroupsFallback
       // A matched answer-card group only exists after its save request was
       // accepted. Treat the whole group as saved when every visible card row
       // maps to the expected structure, even if the site lags on one
       // `has-answered` class. Extra/unmapped rows still require direct
       // per-row evidence below, so this cannot hide an unexpected blank slot.
       const matchedRowsHaveSavedGroupEvidence = Boolean(
-        groupMatch &&
-        groupMatch.matchedGroupCount === expectedGroups.length &&
-        groupMatch.matchedRows.size === rows.length &&
-        expectedGroups.every((group) => savedGroupOrdinals.has(group.groupOrdinal)),
+        savedGroupsFallback ||
+        (
+          groupMatch &&
+          groupMatch.matchedGroupCount === expectedGroups.length &&
+          groupMatch.matchedRows.size === rows.length &&
+          expectedGroups.every((group) => savedGroupOrdinals.has(group.groupOrdinal))
+        ),
       )
-      const loading = await page.locator(NOQR_SEL.loadingToast).first().isVisible().catch(() => false)
-      const skeleton = await page.locator('.van-skeleton').first().isVisible().catch(() => false)
-      const networkActive = network.isBusinessActive()
-      const activityActive = loading || skeleton || networkActive
       const matchedGroupCount = groupMatch?.matchedGroupCount || 0
       const matchedRowCount = groupMatch?.matchedRows.size || 0
-      const savedExpectedGroupCount = expectedGroups
-        .filter((group) => savedGroupOrdinals.has(group.groupOrdinal)).length
       const parentOnlyGroupCount = groupMatch?.parentOnlyGroupOrdinals.size || 0
       const unmatchedVisibleRowCount = Math.max(0, rows.length - matchedRowCount)
       const structuralEntries = rows
@@ -982,7 +1920,7 @@ async function auditNoqrAnswerCardInner(page: Page, opts: {
           `骨架 ${skeleton ? '有' : '无'}`,
         )
       }
-      if ((!expectedCount && !hasExpectedEvidence) || expectedLoaded) {
+      if ((!expectedCount && !hasExpectedEvidence) || answerCardReady) {
         const missing = rows.filter((row) =>
           !row.answered &&
           !hasSavedEvidence(row) &&
@@ -1028,11 +1966,12 @@ async function auditNoqrAnswerCardInner(page: Page, opts: {
         }
         reopens++
         opts.onRecovery?.('答题卡加载无进展，关闭重开', reopens)
-        await closeAnswerCard(page, deadlineAt)
+        await closeAnswerCard(page, deadlineAt, opts.stopRequested)
         await openAnswerCard(page, opts.stopRequested, {
           noProgressBudgetMs,
           network,
           deadlineAt,
+          onDiagnostic: opts.onDiagnostic,
         })
         structureVersion = ''
         lastProgressAt = Date.now()
@@ -1043,7 +1982,7 @@ async function auditNoqrAnswerCardInner(page: Page, opts: {
     }
   } finally {
     network.dispose()
-    await closeAnswerCard(page, deadlineAt)
+    await closeAnswerCard(page, deadlineAt, opts.stopRequested)
   }
 }
 
@@ -1058,7 +1997,7 @@ export function auditNoqrAnswerCard(
   let hardStopped = false
   const wrappedOpts = {
     ...opts,
-    auditDeadlineMs: hardDeadlineMs,
+    auditDeadlineMs: hardDeadlineMs > 5_000 ? hardDeadlineMs - 2_000 : hardDeadlineMs,
     stopRequested: () => hardStopped || opts.stopRequested(),
   }
   return withNoqrHardDeadline(

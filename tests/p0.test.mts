@@ -345,6 +345,7 @@ test('本次得分保留零分和小数，未批阅不冒充零分，新轮不�
   assert.equal(homeworkScoreLabel({ attempt: 1, score: 0, status: 'reviewing' }), '第 1 次 · 本次得分：0 分')
   assert.equal(homeworkScoreLabel({ attempt: 2, score: null, status: 'waiting_grade' }), '第 2 次 · 本次得分：等待批阅')
   assert.equal(homeworkScoreLabel({ attempt: 2, score: null, status: 'answering' }), '第 2 次 · 本次得分：尚未出分')
+  assert.equal(homeworkScoreLabel({ attempt: 1, score: null, status: 'score_unavailable' }), '第 1 次 · 本次得分：分数待确认')
   assert.equal(homeworkScoreLabel({ attempt: 1, score: null, status: 'skip_bank_miss' }), '本次得分：尚未作答')
 })
 

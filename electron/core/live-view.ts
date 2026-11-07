@@ -61,7 +61,9 @@ export function homeworkScoreLabel(row: Pick<LiveHomework, 'attempt' | 'score' |
   if (!row.attempt || row.status === 'skip_bank_miss') return '本次得分：尚未作答'
   const prefix = '第 ' + row.attempt + ' 次 · 本次得分：'
   if (row.score != null && Number.isFinite(row.score)) return prefix + row.score + ' 分'
-  const current = ['waiting_grade', 'pending_writeback', 'reviewing'].includes(row.status) ? '等待批阅' : '尚未出分'
+  const current = row.status === 'score_unavailable'
+    ? '分数待确认'
+    : ['waiting_grade', 'pending_writeback', 'reviewing'].includes(row.status) ? '等待批阅' : '尚未出分'
   const previous = row.lastScore != null && Number.isFinite(row.lastScore) && row.lastAttempt && row.lastAttempt < row.attempt
     ? ` · 上次 ${row.lastScore} 分`
     : ''

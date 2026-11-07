@@ -15,6 +15,7 @@ import {
   throwIfNoqrStopped,
 } from './session.ts'
 import { waitForNoqrCourseWorkReady } from './course.ts'
+import { NoqrUnsupportedWorkTypeError } from './workflow-errors.ts'
 
 export type NoqrHomeworkRuleReason =
   | ''
@@ -333,7 +334,9 @@ export async function openNoqrHomework(
         const url = new URL(page.url())
         const actualWorkType = url.searchParams.get('workType')
         if (action === 'start' && !isSupportedNoqrWorkType(actualWorkType)) {
-          throw new NoqrSessionError('homework_contract', '目标作业的 workType 不是已确认的 onlineWork 或 stageExam')
+          throw new NoqrUnsupportedWorkTypeError(
+            '目标作业的 workType 不是已确认的 onlineWork 或 stageExam',
+          )
         }
         const actualWorkId = url.searchParams.get('workId') || ''
         const actualCourseId = url.searchParams.get('courseId') || ''

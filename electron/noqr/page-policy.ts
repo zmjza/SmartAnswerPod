@@ -38,19 +38,38 @@ const REFRESHABLE_PAGES = new Set<NoqrPageKind>([
   'submit_success',
 ])
 
-export function terminalNoqrPhase(error: unknown): Extract<NoqrPhase, 'login_failed' | 'needs_user' | 'unsupported'> {
-  const code = error && typeof error === 'object' && 'code' in error
+const ACCOUNT_TERMINAL_CODES = new Set([
+  'login_failed',
+  'auth_blocked',
+  'credentials_missing',
+  'answer_interrupted',
+  'submitted_uncertain',
+])
+
+function noqrErrorCode(error: unknown): string {
+  return error && typeof error === 'object' && 'code' in error
     ? String((error as { code?: unknown }).code || '')
     : ''
+}
+
+export function terminalNoqrPhase(
+  error: unknown,
+): Extract<NoqrPhase, 'login_failed' | 'needs_user' | 'unsupported' | 'not_full'> {
+  const code = noqrErrorCode(error)
   if (code === 'login_failed') return 'login_failed'
-  if (['auth_blocked', 'credentials_missing', 'blank_page', 'page_error', 'answer_interrupted', 'submitted_uncertain'].includes(code)) return 'needs_user'
+  if (['auth_blocked', 'credentials_missing', 'answer_interrupted', 'submitted_uncertain'].includes(code)) return 'needs_user'
+  if (['blank_page', 'page_error'].includes(code)) return 'not_full'
   return 'unsupported'
 }
 
+export function isNoqrAccountTerminalError(error: unknown): boolean {
+  if (ACCOUNT_TERMINAL_CODES.has(noqrErrorCode(error))) return true
+  const message = error instanceof Error ? error.message : ''
+  return /人工认证|登录失败|账号或密码错误|凭据/.test(message)
+}
+
 export function noqrFailurePolicy(error: unknown): NoqrFailurePolicy {
-  const code = error && typeof error === 'object' && 'code' in error
-    ? String((error as { code?: unknown }).code || '')
-    : ''
+  const code = noqrErrorCode(error)
   if (code === 'answer_interrupted') {
     return { status: 'answer_page_interrupted', phase: 'needs_user', preservePage: true }
   }
@@ -121,8 +140,8 @@ export function shouldRestoreNoqrRecordPage(currentPath: string, stopRequested: 
 
 export function shouldStopNoqrCourseAfterHomeworkFailure(url: string): boolean {
   // A normal homework error must not send an answer page with saved progress
-  // into the non-answer recovery path. Stop this course and let the task close
-  // the context so queued accounts can continue.
+  // into the non-answer recovery path. Stop this course lane; other course
+  // lanes and queued accounts continue independently.
   return isNoqrAnswerPath(url)
 }
 

@@ -626,15 +626,24 @@ export async function navigateNoqrPage(
       if (settled && !recoverAfterNavigationError) {
         if (navigationError) {
           const surface = await classifyNavigationPage()
-          if (!['blank', 'home_blank', 'unknown'].includes(surface)) throw navigationError
+          const recoverableNavigationFailure =
+            surface === 'error' || surface === 'blank' || surface === 'home_blank' || surface === 'unknown'
+          if (!recoverableNavigationFailure) throw navigationError
           recoverAfterNavigationError = true
         }
       }
       const surface = await classifyNavigationPage()
-      if (['login', 'home', 'auth_blocked', 'login_failed', 'error', 'course_work', 'record', 'answer', 'answer_boot', 'submit_success'].includes(surface)) {
-        return
+      const recoveringDocumentFailure = Boolean(navigationError) && recoverAfterNavigationError
+      if (surface !== 'error' || !recoveringDocumentFailure) {
+        if (['login', 'home', 'auth_blocked', 'login_failed', 'error', 'course_work', 'record', 'answer', 'answer_boot', 'submit_success'].includes(surface)) {
+          return
+        }
       }
-      const blank = surface === 'blank' || surface === 'home_blank' || surface === 'unknown'
+      const blank =
+        surface === 'blank' ||
+        surface === 'home_blank' ||
+        surface === 'unknown' ||
+        (surface === 'error' && recoveringDocumentFailure)
       if (blank) {
         const decision = recovery.observe({
           now: Date.now(),

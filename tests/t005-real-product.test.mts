@@ -604,6 +604,22 @@ test('T005-RP-04 child environment cannot inherit credentials or fixture routing
   assert.equal(forced.KAIDA_T005_FORCE_RETRY, '1')
 })
 
+test('T005-RP-04b explicit test timing controls are forwarded to the product child', () => {
+  const env = buildProductChildEnv({
+    PATH: '/usr/bin',
+    KAIDA_T005_SCORE_PENDING_BUDGET_MS: '300000',
+    KAIDA_BROWSER_CLOSE_TIMEOUT_MS: '1200',
+    KAIDA_BROWSER_FORCE_CLOSE_CONFIRM_MS: '800',
+    KAIDA_BROWSER_CLOSING_RETRY_MS: '400',
+    KAIDA_SILICONFLOW_KEY: 'must-not-leak',
+  }, '/project/.playwright/profile')
+  assert.equal(env.KAIDA_T005_SCORE_PENDING_BUDGET_MS, '300000')
+  assert.equal(env.KAIDA_BROWSER_CLOSE_TIMEOUT_MS, '1200')
+  assert.equal(env.KAIDA_BROWSER_FORCE_CLOSE_CONFIRM_MS, '800')
+  assert.equal(env.KAIDA_BROWSER_CLOSING_RETRY_MS, '400')
+  assert.equal(env.KAIDA_SILICONFLOW_KEY, '')
+})
+
 test('T005-RP-05 log summaries contain only aliases, enums, booleans, and counts', () => {
   const summary = summarizeStudentForLog('NOQR-01', {
     studentNo: NORMAL_USER,
@@ -655,6 +671,45 @@ test('T005-RP-05 log summaries contain only aliases, enums, booleans, and counts
   assert.equal(summary.maxHomeworkDurationSeconds, 75)
   assert.equal(summary.repairLogCount, 1)
   assert.equal(serialized.includes('单选题@1#1'), false)
+})
+
+test('T005-RP-05b score-pending completion is terminal and requires timing evidence', () => {
+  const summary = summarizeStudentForLog('NOQR-01', {
+    studentNo: NORMAL_USER,
+    phase: 'detecting',
+    account: 'detecting',
+    slot: 'occupied',
+    courses: [{
+      name: 'private-course-name',
+      status: '尚未完成',
+      groups: [{
+        rows: [{
+          name: 'manual-homework',
+          status: 'score_unavailable',
+          score: null,
+          attempt: 2,
+          noqrAnsweredQuestionCount: 19,
+          noqrAverageQuestionDurationMs: 4000,
+          noqrMaxQuestionDurationMs: 61_000,
+          noqrTotalDurationMs: 76_000,
+        }, {
+          name: 'not-started-homework',
+          status: 'todo',
+        }],
+      }],
+    }],
+  })
+  const serialized = JSON.stringify(summary)
+  assert.equal(summary.terminalHomeworkCount, 1)
+  assert.equal(summary.scoreUnavailableCount, 1)
+  assert.equal(summary.scoredHomeworkCount, 0)
+  assert.equal(summary.timedHomeworkCount, 1)
+  assert.equal(summary.timingMissingHomeworkCount, 0)
+  assert.equal(summary.maxAverageQuestionDurationSeconds, 4)
+  assert.equal(summary.maxQuestionDurationSeconds, 61)
+  assert.equal(summary.maxHomeworkDurationSeconds, 76)
+  assert.equal(serialized.includes(NORMAL_USER), false)
+  assert.equal(serialized.includes('manual-homework'), false)
 })
 
 test('T005-RP-06 source never routes, mocks, or rewrites the real school domain', () => {
@@ -2072,6 +2127,12 @@ test('T005-RP-19b score network gate can verify the expected reanswer round coun
   assert.equal(t005Harness.expectedNoqrScoreFinishRequests({
     stopAfterScoreRound: 2,
   }, { scoreRoundHistory: [] }), 2)
+  assert.equal(t005Harness.expectedNoqrScoreFinishRequests({
+    stopAfterScoreRound: 1,
+  }, {
+    scoreRoundHistory: [{ homeworkIndex: 2, attempt: 1, score: 100 }],
+    summaries: [{ scoreUnavailableCount: 2 }],
+  }), 3)
 })
 
 test('T005-RP-21 score-round evidence reaches the second scored attempt without raw identity', () => {

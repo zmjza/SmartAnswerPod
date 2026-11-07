@@ -1,7 +1,11 @@
 import {
   contentHash,
+  englishMatchStem,
+  englishSlotStem,
   hasReadableQuestionText,
   matchOptionText,
+  normalizeEnglishMatchLeft,
+  normalizeEnglishMatchOption,
   normalizeOption,
   normalizeStem,
   type QType,
@@ -32,6 +36,7 @@ export type NoqrQuestionUnit = {
   options: NoqrOption[]
   bigQuestionId?: string
   questionId?: string
+  identityCandidates?: string[]
   blankIndex?: number
   currentText?: string
 }
@@ -39,11 +44,27 @@ export type NoqrQuestionUnit = {
 export type NoqrQuestionGroup = {
   kind: NoqrQuestionKind
   sharedStem: string
+  sharedStemCandidates?: string[]
   units: NoqrQuestionUnit[]
   audioUrl?: string
   rawTypeCode?: string
   position?: number
   total?: number
+}
+
+export type NoqrIdentityCandidateSource =
+  | 'canonical'
+  | 'picker_slot'
+  | 'cloze_raw_type'
+  | 'cloze_ordinal'
+  | 'cloze_shared_evidence'
+  | 'cloze_child_variant'
+
+export type NoqrIdentityCandidate = {
+  hash: string
+  source: NoqrIdentityCandidateSource
+  ordinal: number
+  rawTypeCode: string
 }
 
 export type NoqrValidation = {
@@ -86,15 +107,17 @@ export type NoqrAnswerPlanResult =
 
 export type NoqrQuestionReadResult =
   | { ok: true; group: NoqrQuestionGroup }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; code?: 'unsupported_non_objective' }
 
 const COMPOSITE_KINDS = new Set<NoqrQuestionKind>([
-  'english_grammar',
   'english_listening',
   'english_cloze',
   'english_reading',
   'picker',
 ])
+
+export const NOQR_MAX_IDENTITY_CANDIDATES = 8
+const NOQR_MAX_CLOZE_SHARED_VARIANTS = 4
 
 export function classifyNoqrQuestion(label: string): NoqrQuestionKind {
   const text = normalizeStem(label)
@@ -120,7 +143,6 @@ function expectedQtypes(kind: NoqrQuestionKind): Set<QType> | null {
   if (kind === 'english_listening' || kind === 'english_cloze' || kind === 'picker') {
     return new Set<QType>(['single'])
   }
-  if (kind === 'english_reading') return new Set<QType>(['judge'])
   if (kind === 'single' || kind === 'multiple' || kind === 'judge') {
     return new Set<QType>([kind])
   }
@@ -170,7 +192,7 @@ export function validateNoqrQuestionGroup(group: NoqrQuestionGroup): NoqrValidat
     }
   }
 
-  if (COMPOSITE_KINDS.has(group.kind) && group.kind !== 'english_grammar' && !group.sharedStem.trim()) {
+  if (COMPOSITE_KINDS.has(group.kind) && !group.sharedStem.trim()) {
     issues.push('复合题缺少共享材料')
   }
   if (group.kind === 'english_cloze') {
@@ -189,16 +211,163 @@ export function buildNoqrQuestionIdentity(group: NoqrQuestionGroup, unit: NoqrQu
   const options = unit.options.map((option) => option.text)
   if (!COMPOSITE_KINDS.has(group.kind)) return contentHash(unit.qtype, unit.stem, options)
   if (group.kind === 'picker') {
-    return contentHash(unit.qtype, `${normalizeStem(group.sharedStem)}\n[匹配槽 ${unit.ordinal}] ${normalizeStem(unit.stem)}`, options)
+    return contentHash(unit.qtype, englishMatchStem(group.sharedStem, unit.ordinal, unit.stem), options)
   }
-  const rawType = group.rawTypeCode || ({
-    english_grammar: '8',
-    english_cloze: '8',
-    english_reading: '9',
+  const fallbackType = ({
+    english_cloze: '9',
+    english_reading: '8',
     english_listening: '11',
-  } as Partial<Record<NoqrQuestionKind, string>>)[group.kind] || group.kind
-  const stem = `${normalizeStem(group.sharedStem)}\n[父题型 ${rawType}][子题 ${unit.ordinal}] ${normalizeStem(unit.stem)}`
-  return contentHash(unit.qtype, stem, options)
+  } as Partial<Record<NoqrQuestionKind, string>>)[group.kind]
+  const rawType = group.rawTypeCode?.trim() || fallbackType
+  if (!rawType) return contentHash(unit.qtype, unit.stem, options)
+  return contentHash(unit.qtype, englishSlotStem(group.sharedStem, rawType, unit.ordinal, unit.stem), options)
+}
+
+// A paper can contain several question groups whose visible progress resets to
+// 1/N (for example 1/2 followed later by 1/3). Position alone cannot identify
+// a logical group. Keep this runtime key content-derived and hash-based so no
+// page text is exposed in progress logs.
+export function buildNoqrQuestionGroupSessionKey(
+  group: NoqrQuestionGroup,
+  occurrence = 1,
+): string {
+  const sharedIdentity = contentHash('single', group.sharedStem, [])
+  const units = group.units.map((unit) => ({
+    id: unit.id.trim(),
+    ordinal: unit.ordinal,
+    bigQuestionId: unit.bigQuestionId?.trim() || '',
+    questionId: unit.questionId?.trim() || '',
+    identity: buildNoqrQuestionIdentity(group, unit),
+  }))
+  const base = JSON.stringify({
+    kind: group.kind,
+    position: group.position || 0,
+    total: group.total || 0,
+    sharedIdentity,
+    units,
+  })
+  return occurrence > 1 ? `${base}#${Math.trunc(occurrence)}` : base
+}
+
+export function buildNoqrQuestionIdentityDescriptors(
+  group: NoqrQuestionGroup,
+  unit: NoqrQuestionUnit,
+): NoqrIdentityCandidate[] {
+  const candidates: NoqrIdentityCandidate[] = []
+  const seen = new Set<string>()
+  const add = (
+    hash: string,
+    source: NoqrIdentityCandidateSource,
+    ordinal: number,
+    rawTypeCode: string,
+  ) => {
+    if (seen.has(hash) || candidates.length >= NOQR_MAX_IDENTITY_CANDIDATES) return
+    seen.add(hash)
+    candidates.push({ hash, source, ordinal, rawTypeCode })
+  }
+  const options = unit.options.map((option) => option.text)
+  const canonicalRawType = group.rawTypeCode?.trim()
+    || ({
+      english_cloze: '9',
+      english_reading: '8',
+      english_listening: '11',
+      picker: '7',
+    } as Partial<Record<NoqrQuestionKind, string>>)[group.kind]
+    || ''
+  add(buildNoqrQuestionIdentity(group, unit), 'canonical', unit.ordinal, canonicalRawType)
+
+  if (group.kind === 'picker') {
+    add(
+      contentHash(unit.qtype, englishSlotStem(group.sharedStem, 7, unit.ordinal, unit.stem), options),
+      'picker_slot',
+      unit.ordinal,
+      '7',
+    )
+    return candidates
+  }
+
+  if (group.kind === 'english_cloze') {
+    const ordinals = [...new Set([unit.ordinal, unit.blankIndex].filter(
+      (value): value is number => Number.isInteger(value) && Number(value) > 0,
+    ))]
+    const rawTypes = [...new Set([canonicalRawType, '9'].filter(Boolean))]
+    const sharedVariants = [...new Set([
+      group.sharedStem,
+      ...(group.sharedStemCandidates || []),
+    ].filter(Boolean))].slice(0, NOQR_MAX_CLOZE_SHARED_VARIANTS)
+    const childVariants = [...new Set([unit.stem, ''].filter(
+      (value, index, values) => index === values.indexOf(value),
+    ))]
+    for (const shared of sharedVariants) {
+      for (const ordinal of ordinals) {
+        for (const rawType of rawTypes) {
+          for (const child of childVariants) {
+            const source: NoqrIdentityCandidateSource = shared !== group.sharedStem
+              ? 'cloze_shared_evidence'
+              : ordinal !== unit.ordinal
+                ? 'cloze_ordinal'
+                : rawType !== canonicalRawType
+                  ? 'cloze_raw_type'
+                  : 'cloze_child_variant'
+            add(
+              contentHash(unit.qtype, englishSlotStem(shared, rawType, ordinal, child), options),
+              source,
+              ordinal,
+              rawType,
+            )
+            if (candidates.length >= NOQR_MAX_IDENTITY_CANDIDATES) return candidates
+          }
+        }
+      }
+    }
+  } else if (group.kind === 'english_listening') {
+    add(
+      contentHash(unit.qtype, englishSlotStem(group.sharedStem, 11, unit.ordinal, unit.stem), options),
+      'canonical',
+      unit.ordinal,
+      '11',
+    )
+  } else if (group.kind === 'english_reading') {
+    add(
+      contentHash(unit.qtype, englishSlotStem(group.sharedStem, 8, unit.ordinal, unit.stem), options),
+      'canonical',
+      unit.ordinal,
+      '8',
+    )
+  }
+  return candidates
+}
+
+export function buildNoqrQuestionIdentityCandidates(
+  group: NoqrQuestionGroup,
+  unit: NoqrQuestionUnit,
+): string[] {
+  return buildNoqrQuestionIdentityDescriptors(group, unit).map((candidate) => candidate.hash)
+}
+
+export function noqrQuestionBankDiagnostic(group: NoqrQuestionGroup): string {
+  const sharedSignature = contentHash('single', '[共享材料]', [group.sharedStem]).slice(0, 12)
+  const optionSignatures = group.units.map((unit) => contentHash(
+    'single',
+    '[选项集合]',
+    unit.options.map((option) => option.text),
+  ).slice(0, 12))
+  const childSignature = contentHash(
+    'single',
+    '[子题集合]',
+    group.units.map((unit) => unit.stem),
+  ).slice(0, 12)
+  return [
+    `kind=${group.kind}`,
+    `type=${group.rawTypeCode || 'none'}`,
+    `shared=${group.sharedStem.length}`,
+    `sharedSig=${sharedSignature}`,
+    `sharedVariants=${(group.sharedStemCandidates || []).map((value) => value.length).join('/') || 'none'}`,
+    `units=${group.units.length}`,
+    `child=${group.units.map((unit) => unit.stem.length).join('/')}`,
+    `childSig=${childSignature}`,
+    `optionSig=${optionSignatures.join('/')}`,
+  ].join(' ')
 }
 
 export function mapNoqrAnswerTexts(
@@ -336,11 +505,14 @@ type RawDomUnit = {
   pickerValue?: string
   bigQuestionId?: string
   questionId?: string
+  identityCandidates?: string[]
 }
 
 type RawDomQuestion = {
   label: string
+  rawTypeCode: string
   sharedStem: string
+  sharedStemVariants: string[]
   units: RawDomUnit[]
   pickerCandidates: string[]
   blankIndexes: number[]
@@ -348,6 +520,7 @@ type RawDomQuestion = {
   position: number | null
   total: number | null
   hasPicker: boolean
+  hasTextControls: boolean
 }
 
 function inferReadKind(raw: RawDomQuestion): NoqrQuestionKind {
@@ -382,15 +555,34 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
       }
       const questionInfo = [...root.querySelectorAll('.question-info')].find(visible)
       if (!questionInfo) return null
+      const englishTypeCodes = new Set(['7', '8', '9', '11'])
+      let questionTypeNode = questionInfo.closest('[data-questiontype]')
+      while (questionTypeNode && !englishTypeCodes.has(
+        questionTypeNode.getAttribute('data-questiontype')?.trim() || '',
+      )) {
+        questionTypeNode = questionTypeNode.parentElement?.closest('[data-questiontype]') || null
+      }
+      if (!questionTypeNode) {
+        questionTypeNode = [...root.querySelectorAll('[data-questiontype]')]
+          .find((node) => visible(node) && englishTypeCodes.has(
+            node.getAttribute('data-questiontype')?.trim() || '',
+          )) || questionInfo.closest('[data-questiontype]') ||
+          [...root.querySelectorAll('[data-questiontype]')].find(visible) || null
+      }
+      const rawTypeCode = questionTypeNode?.getAttribute('data-questiontype')?.trim() || ''
       const visibleTextParts: string[] = []
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
         const parent = node.parentElement
         const text = (node.textContent || '').replace(/\s+/g, ' ').trim()
-        if (parent && text && visible(parent)) visibleTextParts.push(text)
+        if (parent && text && !parent.closest('.question-card') && visible(parent)) {
+          visibleTextParts.push(text)
+        }
       }
       const rootText = visibleTextParts.join(' ').replace(/\s+/g, ' ').trim()
-      const labels = ['听力理解', '词汇匹配', '完型填空', '阅读理解', '多选题', '单选题', '判断题', '语法']
+      const labels = [
+        '听力理解', '词汇匹配', '完型填空', '阅读理解', '多选题', '单选题', '判断题', '语法',
+      ]
       const label = labels.find((item) => rootText.includes(item)) || ''
       const positionMatch = rootText.match(/\b(?:question\s*)?(\d+)\s*\/\s*(\d+)\b/i)
 
@@ -407,10 +599,6 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
           }
         })
       }
-      const directTitle = [...questionInfo.children].find((node) => node.classList.contains('question-title'))
-      const sharedStem = (directTitle?.textContent || '').replace(/\s+/g, ' ').trim()
-      const subItems = [...questionInfo.querySelectorAll('.sub-questions > .sub-item')]
-      const pickerRows = [...questionInfo.querySelectorAll('.question-options .van-cell.van-cell--clickable.van-field[role="button"]')]
       const attrId = (node: Element | null | undefined, names: string[]): string => {
         for (const name of names) {
           const value = node?.getAttribute(name) || ''
@@ -429,19 +617,119 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
         }
         return ''
       }
-      const identityFor = (container: Element): { bigQuestionId: string; questionId: string } => ({
+      const identityFor = (container: Element | null | undefined): {
+        bigQuestionId: string
+        questionId: string
+      } => ({
         bigQuestionId: attrId(container, [
           'data-big-question-id',
           'data-bigquestionid',
           'data-big-question',
-        ]) || hiddenId(container, ['bigQuestionId', 'bigquestionid']),
+        ]) || (container ? hiddenId(container, ['bigQuestionId', 'bigquestionid']) : ''),
         questionId: attrId(container, [
           'data-question-id',
           'data-questionid',
           'data-id',
-        ]) || hiddenId(container, ['questionId', 'questionid', 'subQuestionId', 'subquestionid']),
+        ]) || (container
+          ? hiddenId(container, ['questionId', 'questionid', 'subQuestionId', 'subquestionid'])
+          : ''),
       })
+      const identityCandidatesFor = (container: Element | null | undefined): string[] => {
+        const values = new Set<string>()
+        const addValue = (value: string | null | undefined) => {
+          const text = String(value || '').trim()
+          if (text && text.length <= 160 && !/[\s{}<>]/.test(text)) values.add(text)
+        }
+        const addNode = (node: Element | null | undefined) => {
+          if (!node) return
+          const questionLike = node.matches(
+            '.question-info, .sub-item, .question-item, .question-options, ' +
+            '.paper-content, .exam-content, [class*="question"], [class*="paper"]',
+          )
+          for (const name of node.getAttributeNames()) {
+            const explicitQuestionIdentity =
+              /(?:question.*(?:id|unique)|(?:big|sub)?questionid|paper.*(?:id|unique)|homework.*unique)/i.test(name)
+            if (name === 'id' && questionLike) {
+              addValue(node.getAttribute(name))
+              continue
+            }
+            if (!explicitQuestionIdentity) continue
+            addValue(node.getAttribute(name))
+          }
+          if (node instanceof HTMLInputElement && node.value &&
+              /(?:question.*(?:id|unique)|(?:big|sub)?questionid|paper.*(?:id|unique)|homework.*unique)/i.test(node.name || '')) {
+            addValue(node.value)
+          }
+        }
+        addNode(container)
+        let ancestor = container?.parentElement || null
+        for (let depth = 0; ancestor && depth < 5; depth++, ancestor = ancestor.parentElement) {
+          addNode(ancestor)
+        }
+        for (const node of container?.querySelectorAll(
+          '[id], [data-id], [data-question-id], [data-questionid], ' +
+          '[data-big-question-id], [data-bigquestionid], [data-sub-question-id], ' +
+          'input[name*="question" i], input[name*="unique" i], input[name*="paper" i]',
+        ) || []) addNode(node)
+        return [...values].slice(0, 64)
+      }
+      const hasTextControls = [...root.querySelectorAll(
+        'textarea, select, input:not([type]), input[type="text"], input[type="search"], ' +
+        'input[type="password"], input[type="email"], input[type="url"], input[type="tel"], ' +
+        'input[type="number"], input[type="file"], ' +
+        '[contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]',
+      )].some((node) => {
+        if (!(node instanceof HTMLElement)) return false
+        if (node instanceof HTMLInputElement &&
+            (node.readOnly || node.disabled || node.name === 'picker' || node.type === 'hidden')) {
+          return false
+        }
+        if (node instanceof HTMLTextAreaElement && (node.readOnly || node.disabled)) return false
+        if (node instanceof HTMLInputElement && node.type === 'file') {
+          const uploader = node.closest('.van-uploader')
+          return visible(node) || Boolean(uploader && visible(uploader))
+        }
+        return visible(node)
+      })
+      const directTitle = [...questionInfo.children].find((node) => node.classList.contains('question-title'))
+      const sharedStem = (directTitle?.textContent || '').replace(/\s+/g, ' ').trim()
+      const textWithoutBlankMarkers = (node: Element) => {
+        const clone = node.cloneNode(true) as Element
+        for (const marker of clone.querySelectorAll('.spaceIndex')) marker.remove()
+        return (clone.textContent || '').replace(/\s+/g, ' ').trim()
+      }
+      const markerParagraphs = directTitle
+        ? [...directTitle.querySelectorAll('p')]
+          .filter((node) => Boolean(node.querySelector('.spaceIndex')))
+        : []
+      const hasBlankMarkers = Boolean(directTitle?.querySelector('.spaceIndex'))
+      const sharedWithoutBlankMarkers = hasBlankMarkers && directTitle
+        ? textWithoutBlankMarkers(directTitle)
+        : ''
+      const markerParagraphTexts = markerParagraphs
+        .map((node) => textWithoutBlankMarkers(node))
+        .filter(Boolean)
+      const markerSuffixTexts = markerParagraphTexts.length > 1
+        ? markerParagraphTexts
+          .slice(0, -1)
+          .map((_, index) => markerParagraphTexts.slice(index).join(''))
+        : []
+      const markerChildTexts = directTitle
+        ? [...directTitle.children]
+          .filter((node) => Boolean(node.querySelector('.spaceIndex')))
+          .map((node) => textWithoutBlankMarkers(node))
+          .filter(Boolean)
+        : []
+      const sharedStemVariants = [...new Set([
+        sharedWithoutBlankMarkers,
+        ...markerParagraphTexts,
+        ...markerSuffixTexts,
+        ...markerChildTexts,
+      ])].filter((value) => value && value !== sharedStem).slice(0, 4)
+      const subItems = [...questionInfo.querySelectorAll('.sub-questions > .sub-item')]
+      const pickerRows = [...questionInfo.querySelectorAll('.question-options .van-cell.van-cell--clickable.van-field[role="button"]')]
       const directIdentity = identityFor(questionInfo)
+      const directIdentityCandidates = identityCandidatesFor(questionInfo)
       const units: RawDomUnit[] = pickerRows.length
         ? pickerRows.map((row) => {
             const identity = identityFor(row)
@@ -451,23 +739,32 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
               pickerValue: (row.querySelector('input[name="picker"]') as HTMLInputElement | null)?.value || '',
               bigQuestionId: identity.bigQuestionId || directIdentity.bigQuestionId,
               questionId: identity.questionId || directIdentity.questionId,
+              identityCandidates: [...new Set([
+                ...identityCandidatesFor(row),
+                ...directIdentityCandidates,
+              ])],
             }
           })
         : subItems.length
-          ? subItems.map((item) => {
+            ? subItems.map((item, index) => {
               const identity = identityFor(item)
               return {
                 stem: (item.querySelector('.question-title')?.textContent || '').replace(/\s+/g, ' ').trim(),
                 options: optionsIn(item),
                 bigQuestionId: identity.bigQuestionId || directIdentity.bigQuestionId,
                 questionId: identity.questionId || directIdentity.questionId,
+                identityCandidates: [...new Set([
+                  ...identityCandidatesFor(item),
+                  ...directIdentityCandidates,
+                ])],
               }
             })
-          : [{
-              stem: sharedStem,
-              options: optionsIn(questionInfo),
-              ...directIdentity,
-            }]
+            : [{
+                stem: sharedStem,
+                options: optionsIn(questionInfo),
+                ...directIdentity,
+                identityCandidates: directIdentityCandidates,
+              }]
 
       const pickerCandidates = [...root.querySelectorAll('.van-picker-column__item')]
         .filter(visible)
@@ -479,7 +776,9 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
       const audio = questionInfo.querySelector('a[data-url]')
       return {
         label,
+        rawTypeCode,
         sharedStem,
+        sharedStemVariants,
         units,
         pickerCandidates,
         blankIndexes,
@@ -487,13 +786,55 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
         position: positionMatch ? Number(positionMatch[1]) : null,
         total: positionMatch ? Number(positionMatch[2]) : null,
         hasPicker: pickerRows.length > 0,
+        hasTextControls,
       }
     })
   } catch {
     return { ok: false, reason: '当前答题页题组读取失败' }
   }
-  if (!raw) return { ok: false, reason: '当前答题页没有可识别题目' }
+  if (!raw) {
+    const hasVisibleTextControls = await page.locator('.content-area:visible').first().evaluate((root) => {
+      const visible = (node: Element) => {
+        if (!(node instanceof HTMLElement)) return false
+        const style = window.getComputedStyle(node)
+        const rect = node.getBoundingClientRect()
+        return style.display !== 'none' && style.visibility !== 'hidden' &&
+          rect.width > 0 && rect.height > 0
+      }
+      return [...root.querySelectorAll(
+        'textarea, select, input:not([type]), input[type="text"], input[type="search"], ' +
+        'input[type="email"], input[type="url"], input[type="tel"], input[type="number"], ' +
+        'input[type="file"], [contenteditable="true"], [contenteditable=""], ' +
+        '[contenteditable="plaintext-only"]',
+      )].some((node) => {
+        if (!(node instanceof HTMLElement)) return false
+        if (node instanceof HTMLInputElement &&
+            (node.readOnly || node.disabled || node.name === 'picker' || node.type === 'hidden')) {
+          return false
+        }
+        if (node instanceof HTMLTextAreaElement && (node.readOnly || node.disabled)) return false
+        if (node instanceof HTMLInputElement && node.type === 'file') {
+          const uploader = node.closest('.van-uploader')
+          return visible(node) || Boolean(uploader && visible(uploader))
+        }
+        return visible(node)
+      })
+    }).catch(() => false)
+    if (hasVisibleTextControls) {
+      return {
+        ok: false,
+        reason: '当前作业含主观题或文件题，本模式仅支持客观题',
+        code: 'unsupported_non_objective',
+      }
+    }
+    return { ok: false, reason: '当前答题页没有可识别题目' }
+  }
 
+  if (raw.hasTextControls) return {
+    ok: false,
+    reason: '当前作业含主观题或文件题，本模式仅支持客观题',
+    code: 'unsupported_non_objective',
+  }
   const kind = inferReadKind(raw)
   if (kind === 'unknown') return { ok: false, reason: '未知题型或控件，已停止当前作业' }
 
@@ -525,28 +866,51 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
     }
   }
 
-  const qtypeFor = (role: 'radio' | 'checkbox' | undefined, idx: number): QType => {
-    if (kind === 'judge' || kind === 'english_reading') return 'judge'
+  const qtypeFor = (unit: RawDomUnit): QType | null => {
+    const roles = new Set(unit.options.map((option) => option.role))
+    if (kind === 'english_reading') {
+      if (roles.size !== 1) return null
+      const role = unit.options[0]?.role
+      if (!role) return null
+      if (role === 'checkbox') return 'multiple'
+      const normalized = unit.options.map((option) => normalizeOption(option.text, 'judge')).sort()
+      return normalized.length === 2 && normalized[0] === '正确' && normalized[1] === '错误' ? 'judge' : 'single'
+    }
+    if (kind === 'judge') return 'judge'
+    if (roles.size !== 1) return null
+    const role = unit.options[0]?.role
+    if (!role) return null
     if (role === 'checkbox') return 'multiple'
-    const isJudge = raw!.units[idx]?.options.length === 2 &&
-      raw!.units[idx].options.every((option) => /^(正确|错误)$/.test(normalizeOption(option.text)))
+    const isJudge = unit.options.length === 2 &&
+      unit.options.every((option) => /^(正确|错误)$/.test(normalizeOption(option.text, 'judge')))
     return isJudge ? 'judge' : 'single'
   }
 
+  const qtypes = raw.units.map((unit) => qtypeFor(unit))
+  if (qtypes.some((qtype) => qtype === null)) {
+    return { ok: false, reason: '题目子题题型无法确定，已停止当前作业' }
+  }
   const units: NoqrQuestionUnit[] = raw.units.map((unit, index) => {
     const ordinal = index + 1
-    const role = unit.options[0]?.role
+    const qtype = qtypes[index]!
     return {
       id: `${kind}-${ordinal}`,
       ordinal,
-      qtype: qtypeFor(role, index),
-      stem: normalizeStem(unit.stem),
+      qtype,
+      stem: kind === 'picker'
+        ? normalizeEnglishMatchLeft(unit.stem)
+        : normalizeStem(unit.stem),
       options: unit.options.map((option) => ({
         index: option.index,
-        text: normalizeOption(option.text, qtypeFor(option.role, index)),
+        text: kind === 'picker'
+          ? normalizeEnglishMatchOption(option.text)
+          : normalizeOption(option.text, qtype),
       })),
       bigQuestionId: unit.bigQuestionId || undefined,
       questionId: unit.questionId || undefined,
+      identityCandidates: unit.identityCandidates?.length
+        ? [...new Set(unit.identityCandidates)].slice(0, 64)
+        : undefined,
       blankIndex: kind === 'english_cloze' ? raw.blankIndexes[index] : undefined,
       currentText: unit.pickerValue,
     }
@@ -554,16 +918,24 @@ export async function readNoqrQuestionGroup(page: Page): Promise<NoqrQuestionRea
   const group: NoqrQuestionGroup = {
     kind,
     sharedStem: normalizeStem(raw.sharedStem),
+    sharedStemCandidates: [...new Set(raw.sharedStemVariants.map(normalizeStem).filter(
+      (value) => value && value !== normalizeStem(raw.sharedStem),
+    ))].slice(0, 4),
     units,
     audioUrl: raw.audioUrl || undefined,
     position: raw.position || undefined,
     total: raw.total || undefined,
-    rawTypeCode: kind === 'english_listening' ? '11'
-      : kind === 'english_cloze' || kind === 'english_grammar' ? '8'
-        : kind === 'english_reading' ? '9'
-          : kind === 'picker' ? '7'
-            : undefined,
+    rawTypeCode: raw.rawTypeCode || (kind === 'english_listening' ? '11'
+      : kind === 'english_cloze' ? '9'
+        : kind === 'english_reading' ? '8'
+          : kind === 'english_grammar' ? '1'
+            : kind === 'picker' ? '7'
+              : kind === 'single' ? '1'
+                : kind === 'multiple' ? '2'
+                  : kind === 'judge' ? '3'
+                    : undefined),
   }
   const validation = validateNoqrQuestionGroup(group)
-  return validation.ok ? { ok: true, group } : { ok: false, reason: validation.issues.join('；') }
+  if (validation.ok) return { ok: true, group }
+  return { ok: false, reason: validation.issues.join('；') }
 }

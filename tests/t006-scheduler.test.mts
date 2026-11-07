@@ -118,12 +118,26 @@ const modules: Record<string, string> = {
     export const readNoqrHistoryAfterOpen = async () => ({ ok: true, records: [] })
   `,
   './network.ts': `export class NoqrMutationObserver { dispose() {} }`,
-  './limits.ts': `export const NOQR_ANSWER_BOOT_HARD_WAIT_MS = 1000`,
+  './limits.ts': `
+    export const NOQR_ANSWER_CARD_HARD_WAIT_MS = 1000
+    export const NOQR_ANSWER_BOOT_HARD_WAIT_MS = 1000
+    export const NOQR_SCORE_PENDING_WAIT_MS = 600000
+    export const withNoqrHardDeadline = (task, deadlineMs, onTimeout) => {
+      let timer
+      const timeout = new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          Promise.resolve().then(onTimeout).then(resolve, reject)
+        }, Math.max(50, Number(deadlineMs) || 0))
+      })
+      return Promise.race([task, timeout]).finally(() => clearTimeout(timer))
+    }
+  `,
   './recovery.ts': `export const recoverNoqrCourseWorkWithoutLogin = async () => {}`,
   './selectors.ts': `export const NOQR_PATH = { home: '/index.html', courseWork: '/course_work/index.html', answer: '/course_work_detail/index.html' }; export const NOQR_SEL = {}`,
   './workflow-errors.ts': `
     export const isNoqrFatalWorkflowError = () => false
     export class NoqrScoreUnavailableError extends Error {}
+    export class NoqrUnsupportedNonObjectiveError extends Error {}
     export const noqrHomeworkFailureStatus = () => null
     export const shouldDegradeNoqrBaselineFailure = () => true
   `,
@@ -131,6 +145,8 @@ const modules: Record<string, string> = {
     export const applyNoqrFailureToView = () => ({ preservePage: false, phase: 'unsupported' })
     export const assertNoqrRecordPageCanReturn = () => {}
     export const detectNoqrAnswerPageInterruption = async () => null
+    export const isNoqrAccountTerminalError = (error) =>
+      ['login_failed', 'auth_blocked', 'credentials_missing', 'answer_interrupted', 'submitted_uncertain'].includes(error?.code)
     export const noqrAnswerProgressInterruption = () => null
     export const noqrFailurePolicy = () => ({ preservePage: false, phase: 'unsupported' })
     export const shouldRestoreNoqrRecordPage = () => false
@@ -146,11 +162,14 @@ const modules: Record<string, string> = {
     export const snapshotNoqrTiming = () => ({})
   `,
   './submit.ts': `
+    export const preflightNoqrObjectiveOnlyAnswerCard = async () => ({ ok: true, titles: ['单选题'] })
     export const auditNoqrAnswerCard = async () => ({ ok: true })
     export const goToNoqrAnswerCardQuestion = async () => {}
     export const noqrAnswerCardGroupKeys = () => []
     export const noqrAnswerCardExpectedGroups = () => []
     export const noqrAnswerCardKey = () => ''
+    export const hasVisibleNoqrAnswerCardButton = async () => true
+    export const readNoqrAnswerCardDiagnostic = async () => null
     export const returnToNoqrCourseWork = async () => {}
     export const submitNoqrHomework = async () => ({ ok: true })
   `,
@@ -225,6 +244,16 @@ async function waitFor(check: () => boolean, label: string) {
 const first = runner.loginAndRefreshNoqr(['a', 'b', 'c'])
 await waitFor(() => fixture.starts.includes('a') && fixture.starts.includes('b'), '前两个账号没有启动')
 assert.equal(fixture.starts.includes('c'), false, '第三个账号在名额未释放时不应启动')
+assert.equal(
+  runner.enqueueNoqrStudents(['b']),
+  0,
+  '正在排队的账号被重复入队',
+)
+assert.equal(
+  fixture.starts.filter((id) => id === 'b').length,
+  1,
+  '重复 enqueue 导致 queued 账号重复启动',
+)
 const queueStartedAt = Date.now()
 await first
 const queueLatencyMs = Date.now() - queueStartedAt
@@ -431,6 +460,16 @@ assert.equal(
 assert.equal(runner.isRunning(), true, '浏览器关闭未确认时运行锁不能提前结束')
 assert.equal(runner.isStudentLocked('a'), true, '浏览器关闭未确认时同一学生不能再次启动')
 assert.equal(runner.startNoqrStudent('a').ok, false, '关闭占位期间不允许重复启动同一学生')
+assert.equal(
+  runner.enqueueNoqrStudents(['a']),
+  0,
+  'closing 占位期间 enqueue 不应再次启动同一学生',
+)
+assert.equal(
+  fixture.starts.filter((id) => id === 'a').length,
+  1,
+  'closing 占位期间重复入队造成账号重复启动',
+)
 await assert.rejects(
   runner.deleteNoqrRuntime('a'),
   /浏览器关闭尚未确认/,

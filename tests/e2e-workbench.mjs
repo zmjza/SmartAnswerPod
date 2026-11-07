@@ -9,6 +9,7 @@ let secondAccount
 let stageHistoryItems = 0
 let stageHistoryStates = []
 const historyStateEvidence = {}
+const historyStateUnavailable = {}
 let historyEmptyEvidence = null
 let historyFailureEvidence = null
 try {
@@ -276,6 +277,7 @@ try {
               course: candidateCourse.name,
               homework: candidateHomework.name,
               attempt: item.attempt,
+              submittedAt: item.submittedAt,
             }
           }
         }
@@ -290,11 +292,24 @@ try {
     no_view: '无可靠查看入口',
   }
   for (const [state, candidate] of Object.entries(historyStateEvidence)) {
+    const freshHistory = await rendererCall((payload) => window.kaida.getHomeworkHistory(payload.id, payload.course, payload.homework), {
+      id: candidate.localId,
+      course: candidate.course,
+      homework: candidate.homework,
+    })
+    assert.equal(freshHistory.ok, true, freshHistory.error || '历史状态复核读取失败')
+    const freshItem = freshHistory.items.find((item) => item.displayState === state)
+    if (!freshItem) {
+      historyStateUnavailable[state] = true
+      continue
+    }
     const candidateCard = await homeworkCardInUi(candidate)
     await candidateCard.getByRole('button', { name: '历史成绩' }).click()
     await page.getByRole('heading', { name: '历史成绩' }).waitFor()
     await page.getByText('正在读取真实历史记录', { exact: true }).waitFor({ state: 'hidden', timeout: 60_000 })
-    const historyRow = page.locator('article').filter({ hasText: '第 ' + candidate.attempt + ' 次' }).filter({ has: page.getByRole('button', { name: stateLabels[state], exact: true }) }).first()
+    const historyRow = page.locator('article')
+      .filter({ has: page.getByRole('button', { name: stateLabels[state], exact: true }) })
+      .first()
     await historyRow.waitFor()
     const stateButton = historyRow.getByRole('button', { name: stateLabels[state], exact: true })
     assert.equal(await stateButton.count(), 1, state + ' 历史状态没有显示对应按钮')
@@ -381,6 +396,7 @@ try {
     stageHistoryItems,
     stageHistoryStates,
     historyStateEvidence: Object.keys(historyStateEvidence),
+    historyStateUnavailable: Object.keys(historyStateUnavailable),
     emptyHistoryChecked,
     failedHistoryChecked,
     courseLogScoped: true,

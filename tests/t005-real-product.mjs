@@ -288,6 +288,18 @@ export function buildProductChildEnv(baseEnv, userDataDir, opts = {}) {
   env.VITE_DEV_SERVER_URL = ''
   env.KAIDA_E2E_USERDATA = userDataDir
   if (opts.forceRetry === true) env.KAIDA_T005_FORCE_RETRY = '1'
+  if (baseEnv.KAIDA_T005_DEBUG_DIAGNOSTICS === '1') {
+    env.KAIDA_T005_DEBUG_DIAGNOSTICS = '1'
+  }
+  for (const key of [
+    'KAIDA_T005_ANSWER_CARD_WAIT_MS',
+    'KAIDA_T005_SCORE_PENDING_BUDGET_MS',
+    'KAIDA_BROWSER_CLOSE_TIMEOUT_MS',
+    'KAIDA_BROWSER_FORCE_CLOSE_CONFIRM_MS',
+    'KAIDA_BROWSER_CLOSING_RETRY_MS',
+  ]) {
+    if (baseEnv[key] !== undefined) env[key] = baseEnv[key]
+  }
   for (const key of [
     'KAIDA_E2E_ENV',
     'KAIDA_ACCOUNTS_JSON',
@@ -760,8 +772,11 @@ export function expectedNoqrScoreFinishRequests(config, outcome) {
   const observed = Array.isArray(outcome?.scoreRoundHistory)
     ? outcome.scoreRoundHistory.length
     : 0
-  if (observed > 0) return observed
-  return Math.max(1, Math.trunc(Number(config?.stopAfterScoreRound) || 1))
+  const scorePendingFinishes = (Array.isArray(outcome?.summaries) ? outcome.summaries : [])
+    .reduce((total, summary) => total + safeCount(summary?.scoreUnavailableCount), 0)
+  if (observed > 0) return observed + scorePendingFinishes
+  return Math.max(1, Math.trunc(Number(config?.stopAfterScoreRound) || 1)) +
+    scorePendingFinishes
 }
 
 export function noqrPacingViolationCount(entries, minimumMsPerQuestion = 1_500) {
@@ -999,6 +1014,29 @@ function sanitizedCourseFailureReason(value, student) {
   return text.replace(/\s+/g, ' ').trim().slice(0, 240)
 }
 
+function safeDebugLogText(value, student) {
+  let text = String(value || '')
+    .replace(/https?:\/\/\S+/gi, '[地址已隐藏]')
+    .replace(/\b\d{6,}\b/g, '[编号已隐藏]')
+  const courseNames = (Array.isArray(student?.courses) ? student.courses : [])
+    .map((course) => String(course?.name || '').trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+  const homeworkNames = (Array.isArray(student?.courses) ? student.courses : [])
+    .flatMap((course) => Array.isArray(course?.groups) ? course.groups : [])
+    .flatMap((group) => Array.isArray(group?.rows) ? group.rows : [])
+    .map((row) => String(row?.name || '').trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+  for (const name of courseNames) text = text.split(name).join('[课程]')
+  for (const name of homeworkNames) text = text.split(name).join('[作业]')
+  return text
+    .replace(/(?:题干|选项|题目)\s*[:：]?\s*[^；;]*/gi, '题目文本已隐藏')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180)
+}
+
 export function safeQuestionKindCounts(value) {
   const result = {}
   for (const kind of SAFE_QUESTION_KINDS) {
@@ -1118,6 +1156,13 @@ export function debugDiagnosticsForStudent(alias, student) {
     ...(Array.isArray(student?.logs) ? student.logs : []),
     ...(Array.isArray(student?.courseLogs) ? student.courseLogs.map((entry) => entry?.reason) : []),
   ].filter(Boolean)
+  const logMessages = [
+    ...(Array.isArray(student?.logs) ? student.logs : []),
+    ...(Array.isArray(student?.courseLogs) ? student.courseLogs.flatMap((entry) => [
+      entry?.action,
+      entry?.reason,
+    ]) : []),
+  ].filter(Boolean).slice(-40).map((value) => safeDebugLogText(value, student))
   const courseStateCounts = {}
   const homeworkStateCounts = {}
   const courseFailureReasons = (Array.isArray(student?.courseLogs) ? student.courseLogs : [])
@@ -1139,6 +1184,7 @@ export function debugDiagnosticsForStudent(alias, student) {
     lastActionShape: diagnosticShape(student?.action),
     logCodes: rawLogs.slice(-30).map(safeDiagnosticCode),
     logShapes: rawLogs.slice(-30).map(diagnosticShape),
+    logMessages,
     answerCardShape: answerCardShapeDiagnostic(rawLogs),
     courseStateCounts,
     homeworkStateCounts,
@@ -1222,10 +1268,12 @@ export function summarizeStudentForLog(alias, student) {
   const homeworks = homeworkRows(student)
   const attemptedScored = homeworks.filter((row) =>
     safeCount(row?.attempt) > 0 && safeScore(row?.score) !== null)
+  const scoreUnavailable = homeworks.filter((row) => row?.status === 'score_unavailable')
+  const completedForTiming = [...new Set([...attemptedScored, ...scoreUnavailable])]
   const scores = attemptedScored.map((row) => safeScore(row.score)).filter((score) => score !== null)
   const skippedFullScoreCount = homeworks.filter((row) =>
     row?.status === 'skip_full_score' && safeScore(row?.score) === 100).length
-  const timed = attemptedScored.filter((row) =>
+  const timed = completedForTiming.filter((row) =>
     safeCount(row?.noqrAnsweredQuestionCount) > 0 &&
     safeCount(row?.noqrAverageQuestionDurationMs) > 0 &&
     safeCount(row?.noqrMaxQuestionDurationMs) > 0 &&
@@ -1251,7 +1299,11 @@ export function summarizeStudentForLog(alias, student) {
       : null,
     courseCount: Array.isArray(student?.courses) ? student.courses.length : 0,
     homeworkCount: homeworks.length,
-    terminalHomeworkCount: homeworks.filter((row) => row?.status === 'done_100' || row?.status === 'not_full_next_time').length,
+    terminalHomeworkCount: homeworks.filter((row) =>
+      row?.status === 'done_100' ||
+      row?.status === 'not_full_next_time' ||
+      row?.status === 'score_unavailable' ||
+      row?.status === 'skip_non_objective').length,
     bankCount: safeCount(student?.bankCount),
     aiCount: safeCount(student?.aiCount),
     saveClickAttempts: safeCount(student?.saveClickAttempts),
@@ -1265,9 +1317,11 @@ export function summarizeStudentForLog(alias, student) {
     repairLogCount: (Array.isArray(student?.logs) ? student.logs : [])
       .filter((line) => /答题卡漏题，回跳补答/.test(String(line || ''))).length,
     scoredHomeworkCount: scores.length,
+    scoreUnavailableCount: scoreUnavailable.length,
+    skipNonObjectiveCount: homeworks.filter((row) => row?.status === 'skip_non_objective').length,
     skippedFullScoreCount,
     timedHomeworkCount: timed.length,
-    timingMissingHomeworkCount: attemptedScored.length - timed.length,
+    timingMissingHomeworkCount: completedForTiming.length - timed.length,
     fullScoreCount: scores.filter((score) => score === 100).length,
     maxScore: scores.length ? Math.max(...scores) : null,
     maxAverageQuestionDurationSeconds: timed.length
@@ -1583,6 +1637,36 @@ export async function installPassiveNetworkMonitor(app) {
               response.status() < 300 &&
               payload?.success === true &&
               payload?.result?.status === 'success'
+            const safeToken = (value, fallback) => {
+              const text = String(value ?? '')
+              return /^[A-Za-z0-9_.:-]{1,64}$/.test(text) ? text : fallback
+            }
+            const payloadRecord = payload && typeof payload === 'object' ? payload : null
+            const success = payloadRecord?.success
+            const resultStatus = payloadRecord?.result && typeof payloadRecord.result === 'object'
+              ? payloadRecord.result.status
+              : undefined
+            const errorValue = payloadRecord?.error
+            const errorRecord = errorValue && typeof errorValue === 'object' && !Array.isArray(errorValue)
+              ? errorValue
+              : null
+            mutation.ledgerEntry.responseDiagnostic = {
+              httpStatus: Number.isInteger(response.status()) ? response.status() : null,
+              payloadType: payload === null ? 'null' : Array.isArray(payload) ? 'array' : typeof payload,
+              successType: success === undefined ? 'missing' : typeof success,
+              successValue: typeof success === 'boolean' ? success : null,
+              resultStatus: resultStatus === undefined ? 'missing' : safeToken(resultStatus, 'other'),
+              errorType: errorValue === undefined ? 'missing' : typeof errorValue,
+              errorCode: errorRecord
+                ? safeToken(errorRecord.code ?? errorRecord.status ?? errorRecord.name, 'other')
+                : null,
+              rootKeys: payloadRecord
+                ? Object.keys(payloadRecord)
+                  .sort()
+                  .slice(0, 12)
+                  .map((key) => /^[A-Za-z0-9_]{1,40}$/.test(key) ? key : 'other')
+                : [],
+            }
           } catch {
             state.mutationUncertain++
             mutation.ledgerEntry.outcome = 'uncertain'
@@ -1646,6 +1730,9 @@ export async function readPassiveNetworkSummary(app) {
             ? item.attemptFingerprint
             : null,
           outcome: allowedOutcomes.has(item?.outcome) ? item.outcome : 'uncertain',
+          ...(item?.responseDiagnostic && typeof item.responseDiagnostic === 'object'
+            ? { responseDiagnostic: item.responseDiagnostic }
+            : {}),
         }
       })
       .filter(Boolean)
@@ -2455,10 +2542,11 @@ async function stopAndWaitReleased(product, config) {
     current.running === false &&
     config.accounts.every((account) => studentForAlias(current, account.alias)?.slot === 'released')
   ) {
+    product.finalSnapshot = current
     return { snapshot: current, elapsedMs: 0 }
   }
   await stopViaUi(product, config.accounts)
-  return pollProduct(
+  const stopped = await pollProduct(
     product,
     config,
     (snapshot) =>
@@ -2466,6 +2554,8 @@ async function stopAndWaitReleased(product, config) {
       config.accounts.every((account) => studentForAlias(snapshot, account.alias)?.slot === 'released'),
     { allowReleased: true, allowTerminal: true, allowExplicitStop: true },
   )
+  product.finalSnapshot = stopped.snapshot
+  return stopped
 }
 
 async function assertNoqrTimingUi(product, config) {
@@ -2812,11 +2902,11 @@ async function runConfiguredPhase(product, config) {
     }
   }
 
+  const initialSelectionAliases = config.phase === 'score-concurrent' &&
+    config.accounts.length > config.accountParallel
+    ? config.accounts.slice(0, config.accountParallel).map((account) => account.alias)
+    : null
   if (config.courseScope === 'selected') {
-    const initialSelectionAliases = config.phase === 'score-concurrent' &&
-      config.accounts.length > config.accountParallel
-      ? config.accounts.slice(0, config.accountParallel).map((account) => account.alias)
-      : null
     if (initialSelectionAliases) {
       logHarnessStage('score_concurrent_initial_batch_selection_start', {
         aliases: initialSelectionAliases,
@@ -2867,25 +2957,90 @@ async function runConfiguredPhase(product, config) {
       observeConcurrentSnapshot(snapshot)
       rememberScores(snapshot)
       return config.accounts.some((account) =>
-        studentForAlias(snapshot, account.alias)?.slot === 'occupied' &&
         noqrScoreRoundEvidence(studentForAlias(snapshot, account.alias)).length > 0)
     }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
     const scoredAlias = config.accounts.find((account) => {
       const student = studentForAlias(firstScore.snapshot, account.alias)
-      return student?.slot === 'occupied' && noqrScoreRoundEvidence(student).length > 0
+      return noqrScoreRoundEvidence(student).length > 0
     })?.alias
-    if (!scoredAlias) fail('score_concurrent_scored_account_missing', 'No active account produced a score')
-    await selectStudentInUi(product, scoredAlias)
-    const stopControl = await stopViaUi(
-      product,
-      config.accounts.filter((account) => account.alias === scoredAlias),
-    )
-    logHarnessStage('score_concurrent_batch_stop', {
-      scoredAlias,
-      queuedAlias,
-      selector: stopControl.selector,
-      action: stopControl.action,
-    })
+    if (!scoredAlias) fail('score_concurrent_scored_account_missing', 'No account produced a score')
+    const scoredStudent = studentForAlias(firstScore.snapshot, scoredAlias)
+    if (scoredStudent?.slot === 'occupied') {
+      await selectStudentInUi(product, scoredAlias)
+      const selectedState = studentForAlias(await readSnapshot(product), scoredAlias)
+      if (selectedState?.slot === 'occupied') {
+        const stopControl = await stopViaUi(
+          product,
+          config.accounts.filter((account) => account.alias === scoredAlias),
+        )
+        logHarnessStage('score_concurrent_batch_stop', {
+          scoredAlias,
+          queuedAlias,
+          selector: stopControl.selector,
+          action: stopControl.action,
+        })
+      } else {
+        logHarnessStage('score_concurrent_batch_stop', {
+          scoredAlias,
+          queuedAlias,
+          selector: 'natural_release',
+          action: 'released',
+        })
+      }
+    } else {
+      logHarnessStage('score_concurrent_batch_stop', {
+        scoredAlias,
+        queuedAlias,
+        selector: 'natural_release',
+        action: 'released',
+      })
+    }
+    const otherInitialAliases = (initialSelectionAliases || [])
+      .filter((alias) => alias !== scoredAlias)
+    const secondBatchState = new Map()
+    if (otherInitialAliases.length) {
+      try {
+        await pollProduct(product, config, async (snapshot) => {
+          observeConcurrentSnapshot(snapshot)
+          rememberScores(snapshot)
+          for (const alias of otherInitialAliases) {
+            const student = studentForAlias(snapshot, alias)
+            const current = secondBatchState.get(alias)
+            const scored = noqrScoreRoundEvidence(student).length > 0
+            if (
+              scored &&
+              student?.slot === 'occupied' &&
+              current !== 'stop_requested' &&
+              current !== 'terminal'
+            ) {
+              await stopAliases(product, [alias])
+              secondBatchState.set(alias, 'stop_requested')
+              logHarnessStage('score_concurrent_second_batch_stop', {
+                secondScoredAlias: alias,
+                selector: 'renderer:window.kaida.stop',
+                action: 'stop-current',
+              })
+              continue
+            }
+            if (
+              student?.slot === 'released' ||
+              ['stopped', 'not_full', 'round_ended'].includes(student?.phase)
+            ) {
+              secondBatchState.set(alias, 'terminal')
+            }
+          }
+          return otherInitialAliases.every((alias) =>
+            secondBatchState.get(alias) === 'terminal')
+        }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
+      } catch (error) {
+        logHarnessStage('score_concurrent_second_batch_wait_failed', {
+          safeCode: safeDiagnosticCode(error instanceof Error ? error.message : ''),
+          aliases: otherInitialAliases,
+          states: Object.fromEntries(secondBatchState),
+        })
+        throw error
+      }
+    }
     await pollProduct(product, config, (snapshot) => {
       observeConcurrentSnapshot(snapshot)
       rememberScores(snapshot)
@@ -2909,31 +3064,6 @@ async function runConfiguredPhase(product, config) {
       logHarnessStage('score_concurrent_batch_selection_done', { queuedAlias })
     }
     concurrencyObservation.queueFlowObserved = true
-    const secondScored = await pollProduct(product, config, (snapshot) => {
-      observeConcurrentSnapshot(snapshot)
-      rememberScores(snapshot)
-      return config.accounts.some((account) =>
-        account.alias !== queuedAlias &&
-        studentForAlias(snapshot, account.alias)?.slot === 'occupied' &&
-        noqrScoreRoundEvidence(studentForAlias(snapshot, account.alias)).length > 0)
-    }, { allowReleased: true, allowExplicitStop: true, allowTerminal: true })
-    const secondScoredAlias = config.accounts.find((account) =>
-      account.alias !== queuedAlias &&
-      studentForAlias(secondScored.snapshot, account.alias)?.slot === 'occupied' &&
-      noqrScoreRoundEvidence(studentForAlias(secondScored.snapshot, account.alias)).length > 0,
-    )?.alias
-    if (secondScoredAlias) {
-      await selectStudentInUi(product, secondScoredAlias)
-      const secondStop = await stopViaUi(
-        product,
-        config.accounts.filter((account) => account.alias === secondScoredAlias),
-      )
-      logHarnessStage('score_concurrent_second_batch_stop', {
-        secondScoredAlias,
-        selector: secondStop.selector,
-        action: secondStop.action,
-      })
-    }
     await pollProduct(product, config, (snapshot) => {
       observeConcurrentSnapshot(snapshot)
       rememberScores(snapshot)
@@ -3081,8 +3211,31 @@ async function runConfiguredPhase(product, config) {
     : null
   const summaries = config.accounts.map((account) =>
     summarizeStudentForLog(account.alias, studentForAlias(finished.snapshot, account.alias)))
-  if (!summaries.every((summary) => summary.scoredHomeworkCount > 0)) {
-    fail('score_missing', 'No read-only score was produced by the real-product score phase')
+  if (!summaries.every((summary) =>
+    summary.scoredHomeworkCount > 0 || summary.scoreUnavailableCount > 0)) {
+    fail('score_missing', 'No read-only score or confirmed score-pending completion was produced')
+  }
+  const scorePendingWithoutObjectiveSlots = summaries.flatMap((summary) => {
+    const homeworkRows = homeworkRows(studentForAlias(finished.snapshot, summary.alias))
+    return homeworkRows.flatMap((row, index) => {
+      if (row?.status !== 'score_unavailable') return []
+      const evidence = summary.homeworkQuestionKindSlotCounts.find(
+        (item) => safeCount(item?.index) === index,
+      )
+      const objectiveSlots = Object.entries(evidence?.questionKindSlotCounts || {})
+        .filter(([kind]) => SAFE_QUESTION_KINDS.includes(kind))
+        .reduce((total, [, value]) => total + safeCount(value), 0)
+      return safeCount(evidence?.answeredQuestionCount) > 0 && objectiveSlots > 0
+        ? []
+        : [{ alias: summary.alias, homeworkIndex: index }]
+    })
+  })
+  if (scorePendingWithoutObjectiveSlots.length > 0) {
+    fail(
+      'score_pending_without_objective_evidence',
+      'Score-pending completion lacked per-homework accepted objective question slots',
+      { rows: scorePendingWithoutObjectiveSlots },
+    )
   }
   for (const [index, account] of config.accounts.entries()) {
     if (summaries[index]?.timedHomeworkCount === 0 || summaries[index]?.timingMissingHomeworkCount > 0) {
@@ -3369,7 +3522,7 @@ async function runHarness(config, credentials) {
     }
     let siteGeneratedFinalDuplicate = false
     if (saveRequestAudit.hardFailure) {
-      const debugSnapshot = await readSnapshot(product)
+      const debugSnapshot = product.finalSnapshot || await readSnapshot(product)
       const debugDiagnostics = config.accounts.map((account) =>
         debugDiagnosticsForStudent(account.alias, studentForAlias(debugSnapshot, account.alias)))
       const saveClickAttempts = config.accounts.reduce((total, account) =>

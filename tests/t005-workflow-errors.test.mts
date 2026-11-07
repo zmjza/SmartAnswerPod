@@ -7,6 +7,7 @@ import { courseOutcome } from '../electron/core/live-view.ts'
 import {
   isNoqrFatalWorkflowError,
   NoqrScoreUnavailableError,
+  NoqrUnsupportedNonObjectiveError,
   noqrHomeworkFailureStatus,
   shouldDegradeNoqrBaselineFailure,
 } from '../electron/noqr/workflow-errors.ts'
@@ -37,6 +38,13 @@ test('T005-FLOW02 取分失败映射为分数待确认，不冒充提交失败',
   assert.equal(error.code, 'score_unavailable')
   assert.equal(noqrHomeworkFailureStatus(error), 'score_unavailable')
   assert.equal(noqrHomeworkFailureStatus(new Error('fixture failure')), null)
+})
+
+test('T007-FLOW02b 非客观题控件映射为跳过，不冒充分数待确认', () => {
+  const error = new NoqrUnsupportedNonObjectiveError('不支持的文本控件')
+  assert.equal(error.code, 'unsupported_non_objective')
+  assert.equal(noqrHomeworkFailureStatus(error), 'skip_non_objective')
+  assert.equal(isNoqrFatalWorkflowError(error), false)
 })
 
 test('T005-FLOW03 分数待确认有独立课程结果，不标成提交失败', () => {

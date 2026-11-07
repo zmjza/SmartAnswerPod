@@ -11,7 +11,11 @@ import {
   saveNoqrAnswerAndAdvance,
   waitForNoqrAnswerReady,
 } from './answer.ts'
-import type { NoqrQuestionKind } from './question.ts'
+import {
+  buildNoqrQuestionGroupSessionKey,
+  readNoqrQuestionGroup,
+  type NoqrQuestionKind,
+} from './question.ts'
 import { openNoqrCourseWork, readNoqrCourseMenu, switchNoqrCourse, waitForNoqrCourseWorkReady } from './course.ts'
 import {
   evaluateNoqrHomeworkRule,
@@ -28,12 +32,18 @@ import {
   type NoqrHistoryRecord,
 } from './history.ts'
 import { NoqrMutationObserver } from './network.ts'
-import { NOQR_ANSWER_BOOT_HARD_WAIT_MS } from './limits.ts'
+import {
+  NOQR_ANSWER_CARD_HARD_WAIT_MS,
+  NOQR_ANSWER_BOOT_HARD_WAIT_MS,
+  NOQR_SCORE_PENDING_WAIT_MS,
+  withNoqrHardDeadline,
+} from './limits.ts'
 import { recoverNoqrCourseWorkWithoutLogin } from './recovery.ts'
 import { NOQR_PATH, NOQR_SEL } from './selectors.ts'
 import {
   isNoqrFatalWorkflowError,
   NoqrScoreUnavailableError,
+  NoqrUnsupportedNonObjectiveError,
   noqrHomeworkFailureStatus,
   shouldDegradeNoqrBaselineFailure,
 } from './workflow-errors.ts'
@@ -41,7 +51,7 @@ import {
   applyNoqrFailureToView,
   assertNoqrRecordPageCanReturn,
   detectNoqrAnswerPageInterruption,
-  noqrFailurePolicy,
+  isNoqrAccountTerminalError,
   shouldRestoreNoqrRecordPage,
   shouldStopNoqrCourseAfterHomeworkFailure,
   terminalNoqrPhase,
@@ -61,10 +71,13 @@ import {
   noqrAnswerCardGroupKeys,
   noqrAnswerCardExpectedGroups,
   noqrAnswerCardKey,
+  preflightNoqrObjectiveOnlyAnswerCard,
+  readNoqrAnswerCardDiagnostic,
   returnToNoqrCourseWork,
   submitNoqrHomework,
   type NoqrExpectedAnswerCardGroup,
 } from './submit.ts'
+import { waitForNoqrAnswerSurfaceBeforeSubmit } from './submit-surface.ts'
 import {
   classifyNoqrPage,
   ensureNoqrHomeReady,
@@ -116,6 +129,15 @@ let detailLogsEnabled = true
 onPoolRelease((event) => {
   if (event.reason === 'context_closed') {
     stopControllers.get(event.localId)?.abort()
+  }
+  const view = views.get(event.localId)
+  if (view) {
+    view.slot = slots.get(event.localId)
+    view.configLocked = activeRuns.has(event.localId) ||
+      isHeld(event.localId) ||
+      noqrSlotHoldsCapacity(view.slot)
+    view.queued = view.slot === 'queued'
+    notify()
   }
   for (const wake of [...queuedWaiters.values()]) wake()
 })
@@ -254,7 +276,8 @@ export function snapshot() {
 export function isRunning() {
   return stoppingAll ||
     activeRuns.size > 0 ||
-    [...views.values()].some((view) => noqrSlotHoldsCapacity(view.slot))
+    [...views.keys()].some((localId) =>
+      isHeld(localId) || noqrSlotHoldsCapacity(slots.get(localId)))
 }
 
 export function isStudentLocked(local_id: string) {
@@ -274,11 +297,16 @@ function assertNotStopped(signal: AbortSignal) {
   if (signal.aborted) throw new NoqrSessionError('stopped', '任务已停止')
 }
 
-async function waitForNoqrUserDecision(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return
-  await new Promise<void>((resolve) => {
-    signal.addEventListener('abort', () => resolve(), { once: true })
-  })
+function createNoqrAccountSignal(parent: AbortSignal) {
+  const controller = new AbortController()
+  const abortFromParent = () => controller.abort()
+  if (parent.aborted) controller.abort()
+  else parent.addEventListener('abort', abortFromParent, { once: true })
+  return {
+    signal: controller.signal,
+    abort: () => controller.abort(),
+    dispose: () => parent.removeEventListener('abort', abortFromParent),
+  }
 }
 
 function courseView(view: NoqrStudentView, course: NoqrCourse) {
@@ -335,6 +363,59 @@ function markHomeworkTiming(
   Object.assign(row, timing)
   view.groups = current.groups
   notify()
+}
+
+function closeNoqrPageBounded(page: Page, timeoutMs = 1_000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    page.close().catch(() => {}),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs)
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
+function createNoqrPageBounded(
+  context: BrowserContext,
+  signal: AbortSignal,
+  timeoutMs = NOQR_ANSWER_BOOT_HARD_WAIT_MS,
+): Promise<Page> {
+  const task = context.newPage()
+  let settled = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return new Promise<Page>((resolve, reject) => {
+    const cleanup = () => {
+      if (timer) clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+    }
+    const finish = (page: Page) => {
+      if (settled) {
+        void closeNoqrPageBounded(page)
+        return
+      }
+      settled = true
+      cleanup()
+      resolve(page)
+    }
+    const fail = (error: unknown) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    }
+    const onAbort = () => fail(new NoqrSessionError('stopped', '任务已停止'))
+    timer = setTimeout(() => {
+      fail(new NoqrSessionError(
+        'blank_page',
+        '浏览器页面创建超过安全上限，已释放当前学生名额',
+      ))
+    }, Math.max(50, timeoutMs))
+    timer.unref?.()
+    signal.addEventListener('abort', onAbort, { once: true })
+    task.then(finish, fail)
+  })
 }
 
 function selectedCourses(view: NoqrStudentView, courses: NoqrCourse[]): NoqrCourse[] {
@@ -428,22 +509,45 @@ async function readRecordsForHomework(
     if (homework.recordCount > 0) throw new Error('作业存在历史次数但作答记录按钮不可用，禁止猜测分数')
     return []
   }
+  const pendingWaitStartedAt = waitForValid ? Date.now() : 0
+  const pendingWaitBudgetMs = Math.max(
+    50,
+    Number(process.env.KAIDA_T005_SCORE_PENDING_BUDGET_MS) || NOQR_SCORE_PENDING_WAIT_MS,
+  )
   for (;;) {
+    let historyReadTimedOut = false
     let result: Awaited<ReturnType<typeof readNoqrHistoryAfterOpen>>
     let restoreFailure: unknown = null
+    const remainingWaitMs = Math.max(
+      50,
+      pendingWaitBudgetMs - (Date.now() - pendingWaitStartedAt),
+    )
     try {
-      result = await readNoqrHistoryAfterOpen({
+      const historyRead = readNoqrHistoryAfterOpen({
         page,
         open: async () => openNoqrHomework(page, homework, 'record', {
           signal,
           onWaiting: (elapsed) => addLog(view, 'waiting_score', `等待作答记录加载 ${Math.floor(elapsed / 1000)} 秒`, course.name, homework.name, course.key),
         }),
-        stopRequested: () => signal.aborted,
+        stopRequested: () => historyReadTimedOut || signal.aborted,
         requireFreshRecord: waitForValid,
         baseline,
         freshEvidence,
         onWaiting: (elapsed) => addLog(view, 'waiting_score', `等待作答记录接口 ${Math.floor(elapsed / 1000)} 秒`, course.name, homework.name, course.key),
       })
+      result = waitForValid
+        ? await withNoqrHardDeadline(historyRead, remainingWaitMs, () => {
+            historyReadTimedOut = true
+            return {
+              ok: false,
+              records: [],
+              latest: null,
+              apiCount: 0,
+              domCount: 0,
+              error: '作答记录读取超过分数待确认预算',
+            }
+          })
+        : await historyRead
     } finally {
       const currentPath = (() => {
         try { return new URL(page.url()).pathname.replace(/\/+$/, '') || '/' } catch { return '' }
@@ -486,6 +590,11 @@ async function readRecordsForHomework(
       throw new Error(result.error || '作答记录读取失败')
     }
     addLog(view, 'waiting_score', `最新分数尚未批阅，继续等待 · ${homework.name}`, course.name, homework.name, course.key)
+    if (Date.now() - pendingWaitStartedAt >= pendingWaitBudgetMs) {
+      throw new NoqrScoreUnavailableError(
+        `交卷后分数等待超过 ${Math.ceil(pendingWaitBudgetMs / 1000)} 秒，标记分数待确认并继续`,
+      )
+    }
     await sleepNoqr(page, 3_000, signal)
   }
 }
@@ -519,12 +628,12 @@ async function createReadyCourseWorkPage(
   signal: AbortSignal,
 ): Promise<Page> {
   return withNoqrStartupLock(account.local_id, async () => {
-    const page = await ctx.newPage()
+    const page = await createNoqrPageBounded(ctx, signal)
     try {
       await prepareCourseWorkPage(page, account, view, signal)
       return page
     } catch (error) {
-      await page.close().catch(() => {})
+      await closeNoqrPageBounded(page)
       throw error
     }
   }, signal)
@@ -532,7 +641,7 @@ async function createReadyCourseWorkPage(
 
 async function createCoursePage(ctx: BrowserContext, account: LocalAccount, course: NoqrCourse, view: NoqrStudentView, signal: AbortSignal): Promise<Page> {
   return withNoqrStartupLock(account.local_id, async () => {
-    const page = await ctx.newPage()
+    const page = await createNoqrPageBounded(ctx, signal)
     try {
       await prepareCourseWorkPage(page, account, view, signal, course)
       const courses = await readNoqrCourseMenu(page, { signal })
@@ -545,72 +654,10 @@ async function createCoursePage(ctx: BrowserContext, account: LocalAccount, cour
       })
       return page
     } catch (error) {
-      await page.close().catch(() => {})
+      await closeNoqrPageBounded(page)
       throw error
     }
   }, signal)
-}
-
-async function waitForNoqrAnswerSurfaceBeforeSubmit(
-  page: Page,
-  opts: {
-    signal: AbortSignal
-    onWaiting?: (elapsedMs: number) => void
-    hardDeadlineMs?: number
-  },
-): Promise<void> {
-  const startedAt = Date.now()
-  const hardDeadlineMs = Math.max(
-    50,
-    Number(opts.hardDeadlineMs) || NOQR_ANSWER_BOOT_HARD_WAIT_MS,
-  )
-  const network = new NoqrNetworkActivity(page)
-  let quietSince = 0
-  let lastLogAt = 0
-  try {
-    for (;;) {
-      if (opts.signal.aborted) throw new NoqrSessionError('stopped', '任务已停止')
-      const surface = await classifyNoqrPage(page)
-      const answerCardButtonVisible = await page.locator(NOQR_SEL.answerCardButton)
-        .first()
-        .isVisible()
-        .catch(() => false)
-      if (surface === 'answer' && answerCardButtonVisible) return
-      if (surface === 'auth_blocked' || surface === 'login' || surface === 'login_failed') {
-        throw new NoqrSessionError('auth_blocked', '答题页恢复时进入登录或人工认证页面')
-      }
-      if (surface === 'error') {
-        throw new NoqrSessionError('page_error', '答题页恢复时显示明确错误')
-      }
-      if (surface === 'course_work' || surface === 'home' || surface === 'record' || surface === 'submit_success') {
-        throw new NoqrSessionError('answer_interrupted', '答题页在交卷前意外离开，已保留当前页面')
-      }
-      if (Date.now() - startedAt >= hardDeadlineMs) {
-        throw new NoqrSessionError(
-          'answer_interrupted',
-          '答题页等待就绪超过安全上限，已保留当前页面并停止当前作业',
-        )
-      }
-      const loading = await page.locator(NOQR_SEL.loadingToast).first()
-        .isVisible()
-        .catch(() => false)
-      if (network.isBusinessActive() || loading) {
-        quietSince = 0
-      } else {
-        quietSince ||= Date.now()
-        if (Date.now() - quietSince >= 180_000) {
-          throw new NoqrSessionError('answer_interrupted', '答题页长时间无响应，已保留当前页面并等待人工处理')
-        }
-      }
-      if (Date.now() - lastLogAt >= 5_000) {
-        lastLogAt = Date.now()
-        opts.onWaiting?.(Date.now() - startedAt)
-      }
-      await sleepNoqr(page, 150, opts.signal)
-    }
-  } finally {
-    network.dispose()
-  }
 }
 
 async function processHomework(opts: {
@@ -702,10 +749,15 @@ async function processHomework(opts: {
     const bank = createReadOnlyBankClient()
     const ai = new NoqrAiClient()
     const answerPageReady = true
+    let persistedAnswerEvidence = false
     const savedKeys = new Set<string>()
     const expectedCardGroups: NoqrExpectedAnswerCardGroup[] = []
     const kindGroupOccurrences = new Map<NoqrQuestionKind, number>()
     const savedLogicalKeys = new Set<string>()
+    const answeredKinds = new Set<NoqrQuestionKind>()
+    const logicalGroupOccurrences = new Map<string, number>()
+    const logicalBaseKeyByOrdinal = new Map<number, string>()
+    const logicalKeyByOrdinal = new Map<number, string>()
     let expectedCardSlotOffset = 0
     let lastQuestion = false
     let latestHomeWorkUniqueFlag = ''
@@ -714,9 +766,68 @@ async function processHomework(opts: {
     let submittedAt = 0
     let submitConfirmed = false
     try {
-      const solveCurrentAndSave = async (opts: { recordCardStructure?: boolean } = {}) => {
+      const objectivePreflight = await preflightNoqrObjectiveOnlyAnswerCard(
+        page,
+        () => signal.aborted,
+        {
+          onWaiting: (elapsed) => addLog(
+            view,
+            'answer_boot',
+            `检查整卷客观题边界 ${Math.floor(elapsed / 1000)} 秒`,
+            course.name,
+            homework.name,
+            course.key,
+          ),
+        },
+      )
+      if (!objectivePreflight.ok) {
+        if (objectivePreflight.code === 'unsupported_non_objective') {
+          throw new NoqrUnsupportedNonObjectiveError(objectivePreflight.reason)
+        }
+        if (objectivePreflight.code === 'answer_interrupted') {
+          persistedAnswerEvidence = true
+        }
+        throw new NoqrSessionError(objectivePreflight.code, objectivePreflight.reason)
+      }
+      const solveCurrentAndSave = async (opts: {
+        recordCardStructure?: boolean
+        repairKey?: string
+      } = {}) => {
         const recordCardStructure = opts.recordCardStructure !== false
         const questionStartedAt = Date.now()
+        let repairTargetKey = ''
+        if (!recordCardStructure) {
+          // Answer-card repair must never fill or save a logical group that was
+          // not recorded during the original read-through. Check before
+          // answerNoqrGroup() because that function may already write field or
+          // option values to the page before the save request is sent.
+          const read = await readNoqrQuestionGroup(page)
+          if (!read.ok) {
+            throw new NoqrSessionError('answer_interrupted', read.reason)
+          }
+          const repairBaseKey = buildNoqrQuestionGroupSessionKey(read.group)
+          const requestedOccurrence = Number(
+            opts.repairKey?.match(/@(\d+)#[^#]+$/)?.[1] || 1,
+          )
+          const candidates = expectedCardGroups.filter((group) =>
+            group.kind === read.group.kind &&
+            (requestedOccurrence <= 1 || group.kindOccurrence === requestedOccurrence) &&
+            logicalBaseKeyByOrdinal.get(group.groupOrdinal) === repairBaseKey,
+          )
+          if (candidates.length !== 1) {
+            throw new NoqrSessionError(
+              'answer_interrupted',
+              '答题卡补答无法唯一绑定已记录题组，已保留页面并停止当前作业',
+            )
+          }
+          repairTargetKey = logicalKeyByOrdinal.get(candidates[0].groupOrdinal) || ''
+          if (!repairTargetKey || !savedLogicalKeys.has(repairTargetKey)) {
+            throw new NoqrSessionError(
+              'answer_interrupted',
+              '答题卡补答目标题组未在答题过程中保存，已保留页面并停止当前作业',
+            )
+          }
+        }
         const answered = await answerNoqrGroup({
           page,
           bank,
@@ -744,6 +855,14 @@ async function processHomework(opts: {
             homework.name,
             course.key,
           ),
+          onMismatch: (reason) => addLog(
+            view,
+            'waiting_save',
+            `保存请求待确认 · ${reason}`,
+            course.name,
+            homework.name,
+            course.key,
+          ),
           onClickAttempt: (attempt) => {
             view.saveClickAttempts++
             if (attempt > 1) view.saveRequestRetries++
@@ -757,6 +876,7 @@ async function processHomework(opts: {
             )
           },
         })
+        answeredKinds.add(answered.group.kind)
         if (!saved.saved) {
           if (saved.state === 'submitted_uncertain' || saved.uncertain) {
             throw new NoqrSessionError('submitted_uncertain', '保存请求结果不确定，已停止当前作业')
@@ -764,6 +884,7 @@ async function processHomework(opts: {
           throw new Error('保存失败，未推进')
         }
         if (saved.uncertain) throw new NoqrSessionError('submitted_uncertain', '保存结果不确定，已停止当前作业')
+        persistedAnswerEvidence = true
         if (!saved.advanced && !saved.lastQuestion) {
           if (signal.aborted) throw new NoqrSessionError('stopped', '任务已停止')
           throw new NoqrSessionError(
@@ -772,13 +893,24 @@ async function processHomework(opts: {
           )
         }
         if (saved.homeWorkUniqueFlag) latestHomeWorkUniqueFlag = saved.homeWorkUniqueFlag
-        const cardGroupKey = [
-          answered.group.kind,
-          answered.group.position || 1,
-          answered.group.units.map((unit) => unit.id).join('|'),
-        ].join('@')
-        const isNewLogicalGroup = !savedLogicalKeys.has(cardGroupKey)
+        const answeredBaseKey = buildNoqrQuestionGroupSessionKey(answered.group)
+        let cardGroupKey = repairTargetKey || answeredBaseKey
+        let isNewLogicalGroup = false
+        if (recordCardStructure) {
+          const occurrence = (logicalGroupOccurrences.get(answeredBaseKey) || 0) + 1
+          logicalGroupOccurrences.set(answeredBaseKey, occurrence)
+          cardGroupKey = buildNoqrQuestionGroupSessionKey(answered.group, occurrence)
+          isNewLogicalGroup = true
+        } else if (!savedLogicalKeys.has(cardGroupKey)) {
+          throw new NoqrSessionError(
+            'answer_interrupted',
+            '答题卡补答进入了未记录的新题组，已保留页面并停止当前作业',
+          )
+        }
         savedLogicalKeys.add(cardGroupKey)
+        const savedGroupOrdinal = savedLogicalKeys.size
+        logicalBaseKeyByOrdinal.set(savedGroupOrdinal, answeredBaseKey)
+        logicalKeyByOrdinal.set(savedGroupOrdinal, cardGroupKey)
         const previousKindOccurrence = kindGroupOccurrences.get(answered.group.kind) || 0
         const kindOccurrence = isNewLogicalGroup
           ? previousKindOccurrence + 1
@@ -786,7 +918,7 @@ async function processHomework(opts: {
         if (recordCardStructure && isNewLogicalGroup) {
           kindGroupOccurrences.set(answered.group.kind, kindOccurrence)
           expectedCardGroups.push(noqrAnswerCardExpectedGroups(answered.group, {
-            groupOrdinal: savedLogicalKeys.size,
+            groupOrdinal: savedGroupOrdinal,
             kindOccurrence,
             slotOffset: expectedCardSlotOffset,
           }))
@@ -903,6 +1035,11 @@ async function processHomework(opts: {
       markHomework(view, course, homework, 'submitting')
       addLog(view, 'submitting', `核对答题卡 · ${homework.name}`, course.name, homework.name, course.key)
       let awaitingMissingAfterIncompleteDialog = false
+      const configuredAnswerCardWaitMs = Number(process.env.KAIDA_T005_ANSWER_CARD_WAIT_MS)
+      const answerCardAuditDeadlineMs =
+        Number.isFinite(configuredAnswerCardWaitMs) && configuredAnswerCardWaitMs > 0
+          ? Math.min(NOQR_ANSWER_CARD_HARD_WAIT_MS, Math.max(10_000, configuredAnswerCardWaitMs))
+          : undefined
       for (let repairRound = 0; ; repairRound++) {
         const audit = await auditNoqrAnswerCard(page, {
           stopRequested: () => signal.aborted,
@@ -911,6 +1048,7 @@ async function processHomework(opts: {
           expectedGroups: expectedCardGroups,
           savedGroupOrdinals: new Set(expectedCardGroups.map((group) => group.groupOrdinal)),
           expectedCount: savedLogicalKeys.size,
+          auditDeadlineMs: answerCardAuditDeadlineMs,
           onWaiting: (elapsed) => addLog(
             view,
             'submitting',
@@ -944,8 +1082,14 @@ async function processHomework(opts: {
           if (!missingKey) throw new Error('答题卡报告漏题但没有可定位题号，禁止交卷')
           assertNotStopped(signal)
           addLog(view, 'answering', `答题卡漏题，回跳补答 · ${missingKey}`, course.name, homework.name, course.key)
-          await goToNoqrAnswerCardQuestion(page, missingKey, () => signal.aborted)
-          await solveCurrentAndSave({ recordCardStructure: false })
+          await goToNoqrAnswerCardQuestion(page, missingKey, () => signal.aborted, {
+            verifyBudgetMs: NOQR_ANSWER_CARD_HARD_WAIT_MS,
+            deadlineAt: Date.now() + NOQR_ANSWER_CARD_HARD_WAIT_MS,
+          })
+          await solveCurrentAndSave({
+            recordCardStructure: false,
+            repairKey: missingKey,
+          })
           awaitingMissingAfterIncompleteDialog = false
           markHomework(view, course, homework, 'submitting')
           continue
@@ -1038,14 +1182,74 @@ async function processHomework(opts: {
       // freshly scored 100 must always end this homework instead of looping.
       if (fresh.score === 100) return
     } catch (error) {
-      if (!signal.aborted && answerPageReady && !submitConfirmed) {
+      let terminalError = error
+      if (
+        process.env.KAIDA_T005_DEBUG_DIAGNOSTICS === '1' &&
+        answerPageReady &&
+        !submitConfirmed
+      ) {
+        const shape = await readNoqrAnswerCardDiagnostic(page).catch(() => null)
+        if (shape) {
+          addLog(
+            view,
+            'submitting',
+            `答题卡实际结构：cards=${shape.cards}; rows=${shape.rows}; answered=${shape.answered};` +
+              ` current=${shape.current}; sections=${shape.sections.join('|') || '-'};` +
+              ` ordinals=${shape.cardOrdinals.map((value) => value ?? '?').join('|')};` +
+              ` numbers=${shape.numbers.join('|')}`,
+            course.name,
+            homework.name,
+            course.key,
+          )
+        }
+        addLog(
+          view,
+          'submitting',
+          `答题卡期望结构：${expectedCardGroups.map((group) =>
+            `${group.section}#${group.position}@${group.kindOccurrence}:${group.unitCount}`,
+          ).join('|') || '-'}`,
+          course.name,
+          homework.name,
+          course.key,
+        )
+      }
+      if (
+        !signal.aborted &&
+        answerPageReady &&
+        !submitConfirmed &&
+        (savedLogicalKeys.size > 0 || persistedAnswerEvidence)
+      ) {
         const uncertain = error instanceof NoqrSessionError && error.code === 'submitted_uncertain'
         if (!uncertain) {
           const interruption = await detectNoqrAnswerPageInterruption(page).catch(() => null)
-          if (interruption) throw interruption
+          if (interruption) {
+            const message = error instanceof Error ? error.message : String(error || '未知错误')
+            terminalError = new NoqrSessionError(
+              interruption.code,
+              `${interruption.message}；原始错误：${message}`,
+            )
+          }
         }
       }
-      throw error
+      if (
+        terminalError instanceof NoqrSessionError &&
+        isNoqrAccountTerminalError(terminalError) &&
+        (savedLogicalKeys.size > 0 || persistedAnswerEvidence)
+      ) {
+        throw new NoqrSessionError(
+          terminalError.code,
+          `${terminalError.message}（已保存 ${savedLogicalKeys.size} 个题组）`,
+        )
+      }
+      if (
+        terminalError instanceof NoqrSessionError &&
+        terminalError.code === 'answer_interrupted' &&
+        savedLogicalKeys.size === 0 &&
+        !persistedAnswerEvidence
+      ) {
+        throw new NoqrSessionError('page_error', terminalError.message)
+      }
+      throw terminalError
     } finally {
       observer.dispose()
     }
@@ -1068,11 +1272,11 @@ async function processCourse(opts: {
   signal: AbortSignal
 }): Promise<void> {
   const { account, course, view, settings, signal } = opts
+  let ctx: BrowserContext | undefined
   let page: Page | undefined
   let resetPage = false
-  let preservePage = false
   try {
-    const ctx = (await getContext(account.local_id))!
+    ctx = (await getContext(account.local_id))!
     page = await createCoursePage(ctx, account, course, view, signal)
     markCourse(view, course, '检测中')
     const list = await readNoqrHomeworks(page, {
@@ -1084,7 +1288,12 @@ async function processCourse(opts: {
     row.groups = []
     view.activeCourseName = course.name
     view.activeCourseKey = course.key
+    const processedHomeworkKeys = new Set<string>()
     for (const plannedHomework of list) {
+      const plannedKey = plannedHomework.workId ||
+        `${plannedHomework.courseId}|${plannedHomework.name}|${plannedHomework.startAt}|${plannedHomework.endAt}`
+      if (processedHomeworkKeys.has(plannedKey)) continue
+      processedHomeworkKeys.add(plannedKey)
       let homework = plannedHomework
       markHomework(view, course, plannedHomework, 'todo')
       if (resetPage || shouldResetNoqrCoursePage(page.url(), false)) {
@@ -1107,20 +1316,48 @@ async function processCourse(opts: {
         await processHomework({ page, account, course, homework, view, settings, signal })
       } catch (error) {
         if (signal.aborted) throw error
-        const failure = applyNoqrFailureToView(view, course, homework, error)
-        if (failure.preservePage) {
-          const message = error instanceof Error ? error.message : '未知作业错误'
-          addLog(view, failure.phase, `${homework.name} 已隔离 · ${message}`, course.name, homework.name, course.key)
-          preservePage = true
-          await waitForNoqrUserDecision(signal)
-          throw new NoqrSessionError('stopped', '需人工处理的作业已结束，任务已停止')
+        if (error instanceof NoqrSessionError && error.code === 'answer_interrupted') {
+          const message = error.message || '已作答答题页异常中断'
+          markHomework(view, course, homework, 'answer_page_interrupted')
+          addLog(
+            view,
+            'unsupported',
+            `${homework.name} 已隔离 · ${message}`,
+            course.name,
+            homework.name,
+            course.key,
+          )
+          throw error
         }
-        if (error instanceof NoqrSessionError && ['auth_blocked', 'login_failed', 'credentials_missing'].includes(error.code)) throw error
-        if (error instanceof Error && /人工认证|登录失败|账号或密码错误|凭据/.test(error.message)) throw error
+        if (isNoqrAccountTerminalError(error)) {
+          applyNoqrFailureToView(view, course, homework, error)
+          const message = error instanceof Error ? error.message : '未知作业错误'
+          addLog(
+            view,
+            terminalNoqrPhase(error),
+            `${homework.name} 已终止账号 · ${message}`,
+            course.name,
+            homework.name,
+            course.key,
+          )
+          throw error
+        }
         const message = error instanceof Error ? error.message : '未知作业错误'
         const failureStatus = noqrHomeworkFailureStatus(error)
         if (failureStatus) {
           markHomework(view, course, homework, failureStatus)
+          if (failureStatus === 'skip_non_objective') {
+            addLog(
+              view,
+              'unsupported',
+              `${homework.name} 已隔离 · ${message}`,
+              course.name,
+              homework.name,
+              course.key,
+            )
+            resetPage = true
+            continue
+          }
           addLog(
             view,
             'waiting_score',
@@ -1135,7 +1372,22 @@ async function processCourse(opts: {
         markHomework(view, course, homework, 'submit_failed')
         addLog(view, 'unsupported', `${homework.name} 已隔离 · ${message}`, course.name, homework.name, course.key)
         if (shouldStopNoqrCourseAfterHomeworkFailure(page.url())) {
-          break
+          try {
+            await recoverNoqrCourseWorkWithoutLogin(page, {
+              signal,
+              course,
+              refreshBudget: 3,
+              onWaiting: (elapsed) => addLog(view, 'detecting', `等待课程页恢复 ${Math.floor(elapsed / 1000)} 秒`, course.name, homework.name, course.key),
+            })
+          } catch (recoveryError) {
+            if (signal.aborted) throw recoveryError
+            if (isNoqrAccountTerminalError(recoveryError)) throw recoveryError
+            addLog(view, 'detecting', `${homework.name} 页面恢复失败，重建课程页后继续`, course.name, homework.name, course.key)
+            await closeNoqrPageBounded(page)
+            page = await createCoursePage(ctx, account, course, view, signal)
+          }
+          resetPage = false
+          continue
         }
         resetPage = true
       }
@@ -1145,22 +1397,12 @@ async function processCourse(opts: {
     markCourse(view, course, row.status)
   } catch (error) {
     if (signal.aborted) throw error
-    const policy = noqrFailurePolicy(error)
-    if (policy.preservePage && page) {
-      preservePage = true
-      const message = error instanceof Error ? error.message : '课程页面需要人工处理'
-      markCourse(view, course, '有失败待处理')
-      addLog(view, policy.phase, `课程已保留 · ${message}`, course.name, undefined, course.key)
-      await waitForNoqrUserDecision(signal)
-      throw error
-    }
-    if (error instanceof NoqrSessionError && ['auth_blocked', 'login_failed', 'credentials_missing'].includes(error.code)) throw error
-    if (error instanceof Error && /人工认证|登录失败|账号或密码错误|凭据/.test(error.message)) throw error
+    if (isNoqrAccountTerminalError(error)) throw error
     const message = error instanceof Error ? error.message : '未知课程错误'
     markCourse(view, course, '检测失败')
     addLog(view, 'unsupported', `课程已隔离 · ${message}`, course.name, undefined, course.key)
   } finally {
-    if (page && !preservePage) await page.close().catch(() => {})
+    if (page) await closeNoqrPageBounded(page)
   }
 }
 
@@ -1198,88 +1440,99 @@ async function detectCourseOnPage(opts: {
     markCourse(view, course, row.status)
   } catch (error) {
     if (signal.aborted) throw error
-    if (error instanceof NoqrSessionError && ['auth_blocked', 'login_failed', 'credentials_missing'].includes(error.code)) throw error
-    if (error instanceof Error && /人工认证|登录失败|账号或密码错误|凭据/.test(error.message)) throw error
+    if (isNoqrAccountTerminalError(error)) throw error
     markCourse(view, course, '检测失败')
     addLog(view, 'unsupported', `课程检测已隔离 · ${error instanceof Error ? error.message : '未知错误'}`, course.name, undefined, course.key)
   }
 }
 
 async function runOne(opts: NoqrRunOptions): Promise<void> {
-  const { account, context, signal, view, settings } = opts
-  resetNoqrStudentRunView(view)
-  detailLogsEnabled = settings.log_enabled
-  view.slot = 'occupied'
-  addLog(view, 'launching_browser', '浏览器已启动，开始登录')
-  const page = context.pages()[0] || await context.newPage()
-  await ensureNoqrSession(page, {
-    username: account.username,
-    password: account.password,
-    signal,
-    onPhase: (phase) => addLog(view, phase === 'logging_in' ? 'logging_in' : phase === 'home' ? 'home' : 'login_page', phase === 'home' ? '登录成功，进入首页' : phase === 'logging_in' ? '登录中，等待真实响应' : '打开无码登录入口'),
-    onWaiting: (elapsed) => addLog(view, 'logging_in', `等待登录响应 ${Math.floor(elapsed / 1000)} 秒`),
-  })
-  await ensureNoqrHomeReady(page, { signal, refreshBudget: 3 })
-  addLog(view, 'scanning_courses', '点击形考作业并读取课程')
-  await openNoqrCourseWork(page, {
-    signal,
-    refreshBudget: 3,
-    onWaiting: (elapsed) => addLog(view, 'scanning_courses', `等待形考作业页 ${Math.floor(elapsed / 1000)} 秒`),
-  })
-  const courses = await readNoqrCourseMenu(page, { signal })
-  view.courses = courses.map((course) => ({ key: course.key, name: course.name, order: course.order, status: '待检测', groups: [] }))
-  view.activeCourseName = courses.find((course) => course.current)?.name || courses[0]?.name || ''
-  view.activeCourseKey = courses.find((course) => course.current)?.key || courses[0]?.key || ''
-  addLog(view, 'detecting', `已读取 ${courses.length} 门课程`)
-  const detectionParallel = Math.min(
-    courses.length,
-    Math.max(1, settings.course_parallel),
-  )
-  const lanePages: Page[] = [page]
-  let detectFatal: unknown
+  const { account, context, signal: parentSignal, view, settings } = opts
+  const accountRun = createNoqrAccountSignal(parentSignal)
+  const signal = accountRun.signal
   try {
-    const ctx = (await getContext(account.local_id))!
-    for (let lane = 1; lane < detectionParallel; lane++) {
-      lanePages.push(await createReadyCourseWorkPage(ctx, account, view, signal))
+    resetNoqrStudentRunView(view)
+    detailLogsEnabled = settings.log_enabled
+    view.slot = 'occupied'
+    addLog(view, 'launching_browser', '浏览器已启动，开始登录')
+    const page = context.pages()[0] || await createNoqrPageBounded(context, signal)
+    await ensureNoqrSession(page, {
+      username: account.username,
+      password: account.password,
+      signal,
+      onPhase: (phase) => addLog(view, phase === 'logging_in' ? 'logging_in' : phase === 'home' ? 'home' : 'login_page', phase === 'home' ? '登录成功，进入首页' : phase === 'logging_in' ? '登录中，等待真实响应' : '打开无码登录入口'),
+      onWaiting: (elapsed) => addLog(view, 'logging_in', `等待登录响应 ${Math.floor(elapsed / 1000)} 秒`),
+    })
+    await ensureNoqrHomeReady(page, { signal, refreshBudget: 3 })
+    addLog(view, 'scanning_courses', '点击形考作业并读取课程')
+    await openNoqrCourseWork(page, {
+      signal,
+      refreshBudget: 3,
+      onWaiting: (elapsed) => addLog(view, 'scanning_courses', `等待形考作业页 ${Math.floor(elapsed / 1000)} 秒`),
+    })
+    const courses = await readNoqrCourseMenu(page, { signal })
+    view.courses = courses.map((course) => ({ key: course.key, name: course.name, order: course.order, status: '待检测', groups: [] }))
+    view.activeCourseName = courses.find((course) => course.current)?.name || courses[0]?.name || ''
+    view.activeCourseKey = courses.find((course) => course.current)?.key || courses[0]?.key || ''
+    addLog(view, 'detecting', `已读取 ${courses.length} 门课程`)
+    const detectionParallel = Math.min(
+      courses.length,
+      Math.max(1, settings.course_parallel),
+    )
+    const lanePages: Page[] = [page]
+    let detectFatal: unknown
+    try {
+      const ctx = (await getContext(account.local_id))!
+      for (let lane = 1; lane < detectionParallel; lane++) {
+        lanePages.push(await createReadyCourseWorkPage(ctx, account, view, signal))
+      }
+      let nextCourse = 0
+      await mapWithConcurrency(lanePages, lanePages.length, async (lanePage) => {
+        while (!detectFatal) {
+          const index = nextCourse++
+          if (index >= courses.length) return
+          try {
+            await detectCourseOnPage({ page: lanePage, course: courses[index], view, signal })
+          } catch (error) {
+            if (!detectFatal) {
+              detectFatal = error
+              if (isNoqrAccountTerminalError(error)) accountRun.abort()
+            }
+          }
+        }
+      })
+    } finally {
+      await Promise.all(lanePages.slice(1).map((lanePage) => closeNoqrPageBounded(lanePage)))
     }
-    let nextCourse = 0
-    await mapWithConcurrency(lanePages, lanePages.length, async (lanePage) => {
-      while (!detectFatal) {
-        const index = nextCourse++
-        if (index >= courses.length) return
-        try {
-          await detectCourseOnPage({ page: lanePage, course: courses[index], view, signal })
-        } catch (error) {
-          if (!detectFatal) detectFatal = error
+    if (detectFatal) throw detectFatal
+    await waitForCourseSelection(view, signal)
+    const runCourses = selectedCourses(view, courses)
+    if (!runCourses.length) {
+      view.phase = 'stopped'
+      view.account = 'stopped'
+      addLog(view, 'stopped', '本轮没有选择课程')
+      return
+    }
+    const parallel = Math.max(1, settings.course_parallel)
+    let fatalError: unknown
+    await mapWithConcurrency(runCourses, parallel, async (course) => {
+      if (fatalError) return
+      try {
+        await processCourse({ account, course, view, settings, signal })
+      } catch (error) {
+        if (!fatalError) {
+          fatalError = error
+          if (isNoqrAccountTerminalError(error)) accountRun.abort()
         }
       }
     })
-  } finally {
-    await Promise.all(lanePages.slice(1).map((lanePage) => lanePage.close().catch(() => {})))
-  }
-  if (detectFatal) throw detectFatal
-  await waitForCourseSelection(view, signal)
-  const runCourses = selectedCourses(view, courses)
-  if (!runCourses.length) {
-    view.phase = 'stopped'
-    view.account = 'stopped'
-    addLog(view, 'stopped', '本轮没有选择课程')
-    return
-  }
-  const parallel = Math.max(1, settings.course_parallel)
-  let fatalError: unknown
-  await mapWithConcurrency(runCourses, parallel, async (course) => {
-    if (fatalError) return
-    try {
-      await processCourse({ account, course, view, settings, signal })
-    } catch (error) {
-      if (!fatalError) fatalError = error
+    if (fatalError) throw fatalError
+    if (!signal.aborted) {
+      const outcome = noqrRunOutcome(runCourses.map((course) => courseView(view, course).status))
+      addLog(view, outcome.phase, outcome.message)
     }
-  })
-  if (fatalError) throw fatalError
-  if (!signal.aborted) {
-    const outcome = noqrRunOutcome(runCourses.map((course) => courseView(view, course).status))
-    addLog(view, outcome.phase, outcome.message)
+  } finally {
+    accountRun.dispose()
   }
 }
 
@@ -1318,13 +1571,23 @@ async function scheduleStudent(account: LocalAccount): Promise<void> {
   }
   const task = (async () => {
     selectionStartTokens.delete(account.local_id)
-    let acquired = await acquire(account.local_id, account.display_mode === 'visual')
+    if (controller.signal.aborted) return
+    let acquired = await acquire(
+      account.local_id,
+      account.display_mode === 'visual',
+      controller.signal,
+    )
     while (!acquired.ok && !controller.signal.aborted) {
       if (acquired.error) throw new Error(acquired.error)
       view.slot = 'queued'
       addLog(view, 'queued', '等待浏览器名额')
       await waitForQueueSignal()
-      acquired = await acquire(account.local_id, account.display_mode === 'visual')
+      if (controller.signal.aborted) return
+      acquired = await acquire(
+        account.local_id,
+        account.display_mode === 'visual',
+        controller.signal,
+      )
     }
     if (!acquired.ok || !acquired.context) return
     if (controller.signal.aborted) {
@@ -1401,7 +1664,9 @@ export function enqueueNoqrStudents(ids: string[]) {
   const allowed = new Set(ids)
   let count = 0
   for (const account of listAccounts()) {
-    if (allowed.has(account.local_id) && getAccountWorkMode(account.local_id) === 'noqr' && !activeRuns.has(account.local_id)) {
+    if (allowed.has(account.local_id) &&
+      getAccountWorkMode(account.local_id) === 'noqr' &&
+      !isStudentLocked(account.local_id)) {
       void scheduleStudent(account)
       count++
     }
@@ -1414,7 +1679,7 @@ export async function stopNoqrStudent(local_id: string) {
   stopControllers.get(local_id)?.abort()
   const task = activeRuns.get(local_id)
   const slot = slots.get(local_id)
-  const releaseTask = slot === 'queued' || slot === 'launching'
+  const releaseTask = slot === 'queued' || slot === 'launching' || slot === 'closing'
     ? release(local_id)
     : Promise.resolve(true)
   await Promise.all([task || Promise.resolve(), releaseTask])

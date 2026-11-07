@@ -164,6 +164,10 @@ async function domSignals(page) {
         optionItem: count('.option-item'),
         radio: count('.option-item[role="radio"]'),
         checkbox: count('.option-item[role="checkbox"]'),
+        textarea: count('textarea'),
+        textInput: count('input:not([type]), input[type="text"], input[type="search"]'),
+        contenteditable: count('[contenteditable]'),
+        readonly: count('[readonly], [disabled]'),
         subQuestions: count('.sub-questions > .sub-item'),
         picker: count('input[name="picker"]'),
         skeleton: count('.skeleton-area.van-skeleton'),
@@ -175,14 +179,36 @@ async function domSignals(page) {
 }
 
 function parseOptions(argv) {
-  const options = { preflight: false, accountAlias: 'NOQR-01' }
+  const options = {
+    preflight: false,
+    accountAlias: 'NOQR-01',
+    courseMatch: '',
+    homeworkIndex: 0,
+    cardsOnly: false,
+  }
   for (const arg of argv) {
     if (arg === '--preflight') {
       options.preflight = true
       continue
     }
+    if (arg === '--cards-only') {
+      options.cardsOnly = true
+      continue
+    }
     if (arg.startsWith('--account=')) {
       options.accountAlias = arg.slice('--account='.length).trim()
+      continue
+    }
+    if (arg.startsWith('--course-match=')) {
+      options.courseMatch = arg.slice('--course-match='.length).trim().slice(0, 80)
+      continue
+    }
+    if (arg.startsWith('--homework-index=')) {
+      const value = Number(arg.slice('--homework-index='.length))
+      if (!Number.isInteger(value) || value < 1 || value > 50) {
+        throw new T005CredentialError('cli_invalid', 'Invalid read-only homework index')
+      }
+      options.homeworkIndex = value
       continue
     }
     throw new T005CredentialError('cli_invalid', 'Unknown or invalid read-only recon option')
@@ -299,7 +325,9 @@ async function main(options, credentials) {
       },
     }
     console.log(JSON.stringify({ phase: 'course-scan-start', courseCount: courses.length }))
-    const orderedCourses = [...courses].sort((a, b) => Number(b.current) - Number(a.current))
+    const orderedCourses = [...courses]
+      .filter((course) => !options.courseMatch || String(course.name || '').includes(options.courseMatch))
+      .sort((a, b) => Number(b.current) - Number(a.current))
     for (const course of orderedCourses) {
       try {
         let lastSwitchSecond = -1
@@ -316,6 +344,37 @@ async function main(options, credentials) {
         console.log(JSON.stringify({ phase: 'course-switch-ready', order: course.order }))
         const list = await readNoqrHomeworks(page, { refreshBudget: 3 })
         console.log(JSON.stringify({ phase: 'course-homeworks', order: course.order, count: list.length }))
+        if (options.cardsOnly) {
+          const cards = await page.locator('.work-item').evaluateAll((nodes) => {
+            const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim()
+            const label = (value) => {
+              const text = clean(value)
+              return text.includes(':') ? text.split(':', 1)[0] : text.includes('：') ? text.split('：', 1)[0] : text
+            }
+            const valueOf = (node, target) => {
+              const text = [...node.querySelectorAll('.work-info')]
+                .map((entry) => clean(entry.textContent))
+                .find((entry) => entry.startsWith(target + ':') || entry.startsWith(target + '：'))
+              if (!text) return ''
+              return clean(text.replace(/^[^:：]+[:：]\s*/, '')).slice(0, 40)
+            }
+            return nodes
+              .filter((node) => {
+                if (!(node instanceof HTMLElement)) return false
+                const style = getComputedStyle(node)
+                return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+              })
+              .map((node, index) => ({
+                order: index + 1,
+                visibleType: clean(node.querySelector('.work-type')?.textContent),
+                questionType: valueOf(node, '题目类型'),
+                infoLabels: [...node.querySelectorAll('.work-info')].map((entry) => label(entry.textContent)),
+                buttonCount: node.querySelectorAll('.work-btns .btn-item').length,
+              }))
+          })
+          console.log(JSON.stringify({ phase: 'course-card-signals', order: course.order, cards }))
+          break
+        }
         if (!list.length) continue
         report.homeworks = {
           courseOrder: course.order,
@@ -330,8 +389,10 @@ async function main(options, credentials) {
             buttons: await page.locator('.work-btns .btn-item').count(),
           },
         }
-        const target = list.find((item) => item.workType === 'onlineWork' && item.startEnabled && /无限制|不限/.test(item.attemptsText))
-          || list.find((item) => item.workType === 'onlineWork' && item.startEnabled)
+        const target = options.homeworkIndex > 0
+          ? list[options.homeworkIndex - 1]
+          : list.find((item) => item.workType === 'onlineWork' && item.startEnabled && /无限制|不限/.test(item.attemptsText))
+            || list.find((item) => item.workType === 'onlineWork' && item.startEnabled)
         if (!target) continue
         if (target.recordEnabled) report.history = await readHistoryProbe(page, target)
         const network = new NoqrNetworkActivity(page)
@@ -358,6 +419,7 @@ async function main(options, credentials) {
             reentries,
             readOk: group.ok,
             kind: group.ok ? group.group.kind : null,
+            rawTypeCode: group.ok ? group.group.rawTypeCode || null : null,
             position: group.ok ? group.group.position || null : null,
             total: group.ok ? group.group.total || null : null,
             unitCount: group.ok ? group.group.units.length : null,
@@ -372,6 +434,10 @@ async function main(options, credentials) {
               optionItem: dom.counts.optionItem,
               radio: dom.counts.radio,
               checkbox: dom.counts.checkbox,
+              textarea: dom.counts.textarea,
+              textInput: dom.counts.textInput,
+              contenteditable: dom.counts.contenteditable,
+              readonly: dom.counts.readonly,
             },
           }
           if (!group.ok) report.mismatches.push('首题结构未能按页面契约读取')

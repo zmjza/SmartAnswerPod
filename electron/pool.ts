@@ -18,12 +18,17 @@ const held = new Map<string, Held>()
 const browserMemorySamples = new Map<string, number>()
 type PoolReleaseReason = 'released' | 'context_closed' | 'launch_failed'
 type PoolReleaseEvent = { localId: string; reason: PoolReleaseReason }
+type ClosingRetryState = {
+  epoch: number
+  timer: ReturnType<typeof setTimeout> | null
+  scan: Promise<boolean> | null
+}
 const releaseListeners = new Set<(event: PoolReleaseEvent) => void>()
 const closingReleases = new Map<string, Promise<boolean>>()
 const releaseEpochs = new Map<string, number>()
 const acquireChains = new Map<string, Promise<void>>()
 const launchCleanupConfirmations = new Map<string, boolean>()
-const closingRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const closingRetryStates = new Map<string, ClosingRetryState>()
 const execFileAsync = promisify(execFile)
 export const slots = new SlotPool(2)
 let nextWindowIndex = 0
@@ -38,10 +43,6 @@ const BROWSER_FORCE_CLOSE_CONFIRM_MS = Math.max(
 const CLOSING_RETRY_MS = Math.max(
   100,
   Number(process.env.KAIDA_BROWSER_CLOSING_RETRY_MS) || 5_000,
-)
-const CLOSING_RETRY_LIMIT = Math.max(
-  1,
-  Number(process.env.KAIDA_BROWSER_CLOSING_RETRY_LIMIT) || 24,
 )
 
 export function onPoolRelease(listener: (event: PoolReleaseEvent) => void): () => void {
@@ -299,10 +300,19 @@ async function tileContextForE2e(context: BrowserContext, index: number) {
   }
 }
 
-async function acquireUnlocked(local_id: string, visual: boolean): Promise<{ ok: boolean; queued?: boolean; context?: BrowserContext; error?: string }> {
+async function acquireUnlocked(
+  local_id: string,
+  visual: boolean,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; queued?: boolean; context?: BrowserContext; error?: string }> {
   const mode: BrowserMode = visual ? 'visual' : 'headless'
   const state = slots.request(local_id)
   if (state === 'queued' || state === 'closing') return { ok: false, queued: true }
+  if (signal?.aborted) {
+    slots.release(local_id)
+    slots.promoteQueued()
+    return { ok: false, queued: true }
+  }
   const existing = held.get(local_id)
   if (existing) {
     if (existing.mode !== mode) {
@@ -331,10 +341,29 @@ async function acquireUnlocked(local_id: string, visual: boolean): Promise<{ ok:
     })
   } catch (error) {
     bumpReleaseEpoch(local_id)
-    launchCleanupConfirmations.set(local_id, true)
-    slots.release(local_id)
-    slots.promoteQueued()
-    notifyPoolRelease(local_id, 'launch_failed')
+    const closingEpoch = currentReleaseEpoch(local_id)
+    slots.closing(local_id)
+    clearClosingRetry(local_id)
+    let closeConfirmed = false
+    const cleanupTask = confirmClosedProfile(dir)
+      .catch(() => false)
+      .then((confirmed) => {
+        closeConfirmed = confirmed
+        return confirmed
+      })
+      .finally(() => {
+        if (closingReleases.get(local_id) === cleanupTask) {
+          closingReleases.delete(local_id)
+        }
+        if (slots.get(local_id) !== 'closing') return
+        if (closeConfirmed) {
+          finalizeClosingRelease(local_id, closingEpoch)
+        } else {
+          scheduleClosingRetry(local_id, closingEpoch)
+        }
+      })
+    closingReleases.set(local_id, cleanupTask)
+    void cleanupTask.catch(() => false)
     throw error
   }
   if (
@@ -376,21 +405,35 @@ async function acquireUnlocked(local_id: string, visual: boolean): Promise<{ ok:
     held.delete(local_id)
     browserMemorySamples.delete(local_id)
     slots.closing(local_id)
-    notifyPoolRelease(local_id, 'context_closed')
-    void confirmClosedProfile(dir, context).then((confirmed) => {
-      if (confirmed) {
-        finalizeClosingRelease(local_id, closingEpoch)
-      } else {
+    const closeTask = confirmClosedProfile(dir, context)
+      .catch(() => false)
+      .then((confirmed) => {
+        if (closingReleases.get(local_id) === closeTask) {
+          closingReleases.delete(local_id)
+        }
+        if (confirmed) return finalizeClosingRelease(local_id, closingEpoch)
         scheduleClosingRetry(local_id, closingEpoch)
-      }
-    })
+        return false
+      })
+      .finally(() => {
+        if (closingReleases.get(local_id) === closeTask) {
+          closingReleases.delete(local_id)
+        }
+      })
+    closingReleases.set(local_id, closeTask)
+    notifyPoolRelease(local_id, 'context_closed')
+    void closeTask
   })
   slots.occupy(local_id)
   if (visual) await tileContextForE2e(context, windowIndex)
   return { ok: true, context }
 }
 
-export async function acquire(local_id: string, visual: boolean): Promise<{ ok: boolean; queued?: boolean; context?: BrowserContext; error?: string }> {
+export async function acquire(
+  local_id: string,
+  visual: boolean,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; queued?: boolean; context?: BrowserContext; error?: string }> {
   const previous = acquireChains.get(local_id) || Promise.resolve()
   let finishCurrent!: () => void
   const current = new Promise<void>((resolve) => {
@@ -399,8 +442,13 @@ export async function acquire(local_id: string, visual: boolean): Promise<{ ok: 
   const chain = previous.then(() => current)
   acquireChains.set(local_id, chain)
   await previous
+  if (signal?.aborted) {
+    finishCurrent()
+    if (acquireChains.get(local_id) === chain) acquireChains.delete(local_id)
+    return { ok: false, queued: true }
+  }
   try {
-    return await acquireUnlocked(local_id, visual)
+    return await acquireUnlocked(local_id, visual, signal)
   } finally {
     finishCurrent()
     if (acquireChains.get(local_id) === chain) acquireChains.delete(local_id)
@@ -421,9 +469,7 @@ export function markOccupied(local_id: string) {
 }
 
 function finalizePoolRelease(local_id: string): boolean {
-  const retry = closingRetryTimers.get(local_id)
-  if (retry) clearTimeout(retry)
-  closingRetryTimers.delete(local_id)
+  clearClosingRetry(local_id)
   launchCleanupConfirmations.delete(local_id)
   const released = slots.release(local_id)
   slots.promoteQueued()
@@ -438,34 +484,106 @@ function finalizeClosingRelease(local_id: string, expectedEpoch: number): boolea
   return finalizePoolRelease(local_id)
 }
 
-function scheduleClosingRetry(local_id: string, expectedEpoch: number) {
-  if (closingRetryTimers.has(local_id) || held.has(local_id)) return
-  let attempts = 0
-  const tick = async () => {
-    closingRetryTimers.delete(local_id)
-    if (
-      held.has(local_id) ||
-      slots.get(local_id) !== 'closing' ||
-      currentReleaseEpoch(local_id) !== expectedEpoch
-    ) return
-    const confirmed = await confirmClosedProfile(profileDir(local_id))
-    if (confirmed) {
-      finalizeClosingRelease(local_id, expectedEpoch)
-      return
-    }
-    attempts++
-    if (
-      attempts >= CLOSING_RETRY_LIMIT ||
-      slots.get(local_id) !== 'closing' ||
-      currentReleaseEpoch(local_id) !== expectedEpoch
-    ) return
-    const timer = setTimeout(tick, CLOSING_RETRY_MS)
-    timer.unref?.()
-    closingRetryTimers.set(local_id, timer)
+function clearClosingRetry(local_id: string) {
+  const state = closingRetryStates.get(local_id)
+  if (!state) return
+  if (state.timer) clearTimeout(state.timer)
+  state.timer = null
+  closingRetryStates.delete(local_id)
+}
+
+function ensureClosingRetryState(local_id: string, expectedEpoch: number): ClosingRetryState | null {
+  if (
+    held.has(local_id) ||
+    slots.get(local_id) !== 'closing' ||
+    currentReleaseEpoch(local_id) !== expectedEpoch
+  ) return null
+  let state = closingRetryStates.get(local_id)
+  if (!state) {
+    state = { epoch: expectedEpoch, timer: null, scan: null }
+    closingRetryStates.set(local_id, state)
+  } else if (state.epoch !== expectedEpoch) {
+    if (state.timer) clearTimeout(state.timer)
+    state.timer = null
+    state.epoch = expectedEpoch
   }
+  return state
+}
+
+function armClosingRetry(local_id: string, state: ClosingRetryState) {
+  if (
+    closingRetryStates.get(local_id) !== state ||
+    held.has(local_id) ||
+    slots.get(local_id) !== 'closing' ||
+    state.scan ||
+    state.timer
+  ) return
+  const currentEpoch = currentReleaseEpoch(local_id)
+  if (state.epoch !== currentEpoch) state.epoch = currentEpoch
   const timer = setTimeout(tick, CLOSING_RETRY_MS)
   timer.unref?.()
-  closingRetryTimers.set(local_id, timer)
+  state.timer = timer
+
+  function tick() {
+    if (closingRetryStates.get(local_id) !== state || state.timer !== timer) return
+    state.timer = null
+    void startClosingRetry(local_id, state)
+  }
+}
+
+function startClosingRetry(local_id: string, state: ClosingRetryState): Promise<boolean> {
+  if (
+    closingRetryStates.get(local_id) !== state ||
+    held.has(local_id) ||
+    slots.get(local_id) !== 'closing'
+  ) return Promise.resolve(false)
+  if (state.scan) return state.scan
+  if (state.timer) {
+    clearTimeout(state.timer)
+    state.timer = null
+  }
+  const scanEpoch = state.epoch
+  if (currentReleaseEpoch(local_id) !== scanEpoch) return Promise.resolve(false)
+
+  let scan!: Promise<boolean>
+  scan = (async () => {
+    let confirmed = false
+    try {
+      confirmed = await confirmClosedProfile(profileDir(local_id))
+    } catch {
+      confirmed = false
+    } finally {
+      if (state.scan === scan) state.scan = null
+    }
+    if (
+      closingRetryStates.get(local_id) !== state ||
+      held.has(local_id) ||
+      slots.get(local_id) !== 'closing'
+    ) return false
+
+    const currentEpoch = currentReleaseEpoch(local_id)
+    if (state.epoch !== scanEpoch || currentEpoch !== scanEpoch) {
+      if (state.epoch !== currentEpoch) state.epoch = currentEpoch
+      armClosingRetry(local_id, state)
+      return false
+    }
+    if (confirmed) return finalizeClosingRelease(local_id, scanEpoch)
+    armClosingRetry(local_id, state)
+    return false
+  })()
+  state.scan = scan
+  return scan
+}
+
+function scheduleClosingRetry(local_id: string, expectedEpoch: number) {
+  const state = ensureClosingRetryState(local_id, expectedEpoch)
+  if (state) armClosingRetry(local_id, state)
+}
+
+function runClosingRetryNow(local_id: string, expectedEpoch: number): Promise<boolean> {
+  const state = ensureClosingRetryState(local_id, expectedEpoch)
+  if (!state) return Promise.resolve(false)
+  return startClosingRetry(local_id, state)
 }
 
 export async function release(local_id: string): Promise<boolean> {
@@ -538,15 +656,7 @@ export async function release(local_id: string): Promise<boolean> {
   }
   if (slots.get(local_id) === 'closing') {
     const closingEpoch = currentReleaseEpoch(local_id)
-    try {
-      if (await waitForBrowserProcessesGone(undefined, profileDir(local_id))) {
-        return finalizeClosingRelease(local_id, closingEpoch)
-      }
-    } catch {
-      // A failed process-table read is not proof that capacity is safe.
-    }
-    scheduleClosingRetry(local_id, closingEpoch)
-    return false
+    return await runClosingRetryNow(local_id, closingEpoch)
   }
   bumpReleaseEpoch(local_id)
   return finalizePoolRelease(local_id)

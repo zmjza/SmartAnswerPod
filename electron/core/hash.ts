@@ -37,6 +37,17 @@ export function normalizeStem(raw: string): string {
   return stripStemPrefix(collapseSpace(toHalfWidth(raw)))
 }
 
+// The legacy English matching UI stripped the visible left-item prefix before
+// building its bank identity. Keep that compatibility local to Picker so
+// ordinary question hashes remain unchanged.
+export function normalizeEnglishMatchLeft(raw: string): string {
+  return normalizeStem(String(raw || '').replace(/^\s*\d+\s*[、.)）．]\s*/, ''))
+}
+
+export function normalizeEnglishMatchOption(raw: string): string {
+  return normalizeOption(String(raw || '').replace(/^[A-Za-z]\s*[、.)）．]\s*/, ''), 'single')
+}
+
 export function englishSlotStem(shared: string, rawType: string | number, ordinal: number, child: string): string {
   return `${normalizeStem(shared)}\n[父题型 ${rawType}][子题 ${ordinal}] ${normalizeStem(child)}`
 }

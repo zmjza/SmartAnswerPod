@@ -65,3 +65,28 @@ export function isNoqrBusinessSuccess(payload: NoqrBusinessEnvelope | null | und
 export function isNoqrRequestAccepted(status: number, payload: NoqrBusinessEnvelope | null | undefined): boolean {
   return isNoqrHttpSuccess(status) && isNoqrBusinessSuccess(payload)
 }
+
+export function noqrBusinessRejectionDetail(
+  status: number,
+  payload: unknown,
+): string {
+  const safeToken = (value: unknown, fallback: string): string => {
+    const text = String(value ?? '')
+    return /^[A-Za-z0-9_.:-]{1,64}$/.test(text) ? text : fallback
+  }
+  const record = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : null
+  const result = record?.result && typeof record.result === 'object' && !Array.isArray(record.result)
+    ? record.result as Record<string, unknown>
+    : null
+  const success = typeof record?.success === 'boolean'
+    ? String(record.success)
+    : record?.success === undefined
+      ? 'missing'
+      : safeToken(record?.success, 'invalid')
+  const resultStatus = result?.status === undefined
+    ? 'missing'
+    : safeToken(result.status, 'invalid')
+  return `HTTP ${Number.isInteger(status) ? status : 'unknown'}; success=${success}; resultStatus=${resultStatus}`
+}

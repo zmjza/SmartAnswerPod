@@ -62,6 +62,14 @@
       document.querySelector('.question-cart-items').innerHTML = questions.map((_, index) =>
         `<span class="sub-question ${saved.has(index) ? 'has-answered' : ''} ${index === current ? 'is-current' : ''}">${index + 1}</span>`
       ).join('')
+      document.querySelectorAll('.question-cart-items .sub-question').forEach((row, index) => {
+        row.addEventListener('click', () => {
+          current = index
+          document.querySelector('.van-overlay').style.display = 'none'
+          document.querySelector('.van-popup--bottom').style.display = 'none'
+          render()
+        })
+      })
     }
     document.querySelector('.next-btn').addEventListener('click', async () => {
       const q = questions[current]

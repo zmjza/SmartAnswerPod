@@ -44,9 +44,11 @@ async function hasAnswerProgress(page: Page): Promise<boolean> {
     if (document.querySelector('.option-item[aria-checked="true"], .option-item.checked, .e-a.checked')) {
       return true
     }
-    return [...document.querySelectorAll('input[name="answer"], textarea[name="answer"]')]
+    return [...document.querySelectorAll('input[name="answer"]')]
       .some((node) => {
-        if (!(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)) return false
+        // Visible text/search/file controls are not objective answer progress.
+        // Only hidden form state can preserve an already-started objective page.
+        if (!(node instanceof HTMLInputElement) || node.type !== 'hidden') return false
         return node.value.trim().length > 0
       })
   }).catch(() => true)
@@ -77,9 +79,6 @@ export async function recoverNoqrCourseWorkWithoutLogin(
       if (surface === 'auth_blocked' || surface === 'login' || surface === 'login_failed') {
         throw new NoqrSessionError('auth_blocked', '页面已回到登录或人工认证状态，禁止自动重新登录')
       }
-      if (surface === 'error') {
-        throw new NoqrSessionError('page_error', '页面显示明确错误')
-      }
 
       if (isNoqrAnswerPath(page.url())) {
         if (await hasAnswerProgress(page)) {
@@ -90,7 +89,7 @@ export async function recoverNoqrCourseWorkWithoutLogin(
         }
         const back = page.locator(NOQR_SEL.navBack).first()
         if (!(await back.count().catch(() => 0))) {
-          throw new NoqrSessionError('answer_interrupted', '空白答题页缺少返回按钮，已保留当前页面')
+          throw new NoqrSessionError('page_error', '空白答题页缺少返回按钮，无法原位恢复')
         }
         await back.click()
         await waitForNoqrCourseWorkReady(page, {
@@ -103,6 +102,9 @@ export async function recoverNoqrCourseWorkWithoutLogin(
           network,
         })
         break
+      }
+      if (surface === 'error') {
+        throw new NoqrSessionError('page_error', '页面显示明确错误')
       }
 
       const path = normalizedPath(page.url())

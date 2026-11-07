@@ -1,3 +1,16 @@
+## 2.9（2026-11-07，无码模式仅客观题、答题卡边界与失败续流修复）
+
+- T007 CHG-004：无码模式取消所有主观题支持，包括普通填空题、简答题、问答题、论述题、主观题、富文本、多字段文本和文件上传；遇到这些控件时整份作业隔离，不填写、不保存、不交卷。
+- 删除主观题 AI 文本提示词、`answerContent` 保存、文本/文件控件填写、多字段主观答题卡、教师批阅等待和“主观题分数待确认”路径；非客观题保存/交卷/题库写均为 0。
+- 首题保存前逐答题卡题位读取真实控件：每张卡至少一个可点击题位；空壳卡、目标题号非数字、缺少页面题号 x/y、标题伪装客观题但实际含 textarea 时 fail-closed；预检完成后回到首题。非客观控件扫描覆盖题面外层，答题卡标题子树不参与当前题型判断，文本 input 不冒充客观进度。
+- 英语复合题答题卡使用逻辑题组真实 `group.position` 和同题型 occurrence，不使用全局 `cardIndex`；第一篇支持页面题号 `1 -> 2`，第二篇当前态不能冒充。答题卡入口短暂遮罩在总时限内无点击等待并重试，永久遮罩有界失败。
+- CHG-007：修复同卡多复合逻辑组唯一行 1、2 借用第一组、重复局部题号绑定、缺 x/y 误归 `submit_failed`、隐藏预渲染卡误判和 `goTo` 行元数据未贯通；新增 `RT18g2-g9`、`RT18h2` 与 failure-isolation 零 mutation 串联。
+- 客观题保留单选、多选、判断、选择填空及大学英语语法、听力、完型、Picker、阅读；英语完型仍为 `english_cloze`。题库继续 GET-only，答题页已有进度零刷新，非答题页使用 60/90/120 秒有界恢复。
+- 最终离线门禁：T005 `330/330`、runtime `133/133`、P0 `82/82`、T006 scheduler+pool 全 true、T007 failure isolation 全 true、build/tsc/git diff check 通过；E3 exit0：100 分、题库写0、平均 `3008.75ms`、最长 `3010ms`、总 `14661ms`、停止延迟 `687ms`、最终 released；UI 全字段 true。
+- 最终 9/9 真机账号均 100 分、题库写0、released：`NOQR-01` 25 题位、`NOQR-04` 40 题位（20单选/20判断）、`NOQR-06` 35 题位（10/10/15），两英语账号各 45 题位；selected 三账号各 25 题位/100 分、GET75/写0、`submit_one=78` 全部 accepted、Finish 3/3、最终全释放。
+- 账号并发 `1/2/visual2/3/4/5/6/8` 全部 exit0；visual2 `visualLoginObserved=true`、32 个可见采样。课程并发 2/3/4/5/6 和 NOQR-07 selected forceretry 全课程 8 并发通过（`candidateCount=8`、`maxActiveCoursePages=8`、`active=0`、`released`）；自然不足和 scope-all 未达峰日志保留为历史。机械自然样本 14 个作业 `skip_non_objective`，answerPageRequests=2，submit/Finish/题库写均为 0；旧模式 settings/accounts/run-lock/T002/CHG-026/workbench/display/course-selection/browser-pool 全部 exit0。
+- 源码和 lock 为 `2.9`。2.9 最终包已重打并核验：DMG 299667264 bytes/SHA256 `44c86f3f9f2b62de62fc190a125df2dc4e346d6e2ad1922df3c8b599c8dcdb5b`；ZIP 298859965 bytes/SHA256 `d674bb508bae2bafa48d59c16be1b4f4353294cfc82d7338ec9568d26cb5ef64`；Windows EXE 240190376 bytes/SHA256 `90a7df46150b8a000ab22ce653c3df2f4a3fd0592ef48c7cb4cf22db70a66ffb`。`SHA256SUMS` 3/3 OK，DMG/ZIP/codesign/架构通过；两平台 asar 一致 size `31621587`、SHA256 `aa996c299387ec3d459da209ae3d2a0c4b5934d5d0d0d2f8e35b3c5936aca931`，asar `package.json=2.9.0`，artifact/manifest=`2.9`。提交、`origin/main` 推送和远端 SHA 尚未执行；Windows 只声明构建/静态核验，不声明真机安装通过。
+
 ## 2.8（2026-11-03，无码答题并发与队列流转修复）
 
 - 修复浏览器池释放通知、FIFO 排队票号、`closing` 容量生命周期、同学生启动合流和停止竞态；账号并发 2/3/4/5/6/8 全部达到配置峰值，排队账号自动补位，最终 queue/browser/context 清零。

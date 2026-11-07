@@ -126,12 +126,12 @@ test('T005-C03 页面恢复只在可刷新页面刷新，答题启动返回重�
   assert.equal(decideNoqrRecovery({ ...base, page: 'answer', activeRequest: true, hasAnswerProgress: true }), 'wait')
 })
 
-test('T005-C03b 登录失败、空白、页面错误和作业不支持使用不同终端状态', () => {
+test('T005-C03b 登录失败、可隔离页面错误和需人工处理使用不同终端状态', () => {
   assert.equal(terminalNoqrPhase(new NoqrSessionError('login_failed', 'fixture')), 'login_failed')
   assert.equal(terminalNoqrPhase(new NoqrSessionError('auth_blocked', 'fixture')), 'needs_user')
   assert.equal(terminalNoqrPhase(new NoqrSessionError('credentials_missing', 'fixture')), 'needs_user')
-  assert.equal(terminalNoqrPhase(new NoqrSessionError('blank_page', 'fixture')), 'needs_user')
-  assert.equal(terminalNoqrPhase(new NoqrSessionError('page_error', 'fixture')), 'needs_user')
+  assert.equal(terminalNoqrPhase(new NoqrSessionError('blank_page', 'fixture')), 'not_full')
+  assert.equal(terminalNoqrPhase(new NoqrSessionError('page_error', 'fixture')), 'not_full')
   assert.equal(terminalNoqrPhase(new NoqrSessionError('answer_interrupted', 'fixture')), 'needs_user')
   assert.equal(terminalNoqrPhase(new NoqrSessionError('submitted_uncertain', 'fixture')), 'needs_user')
   assert.equal(terminalNoqrPhase(new NoqrSessionError('homework_contract', 'fixture')), 'unsupported')

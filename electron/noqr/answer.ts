@@ -8,13 +8,15 @@ import {
   withNoqrHardDeadline,
 } from './limits.ts'
 import {
-  buildNoqrQuestionIdentity,
+  buildNoqrQuestionIdentityCandidates,
+  noqrQuestionBankDiagnostic,
   readNoqrQuestionGroup,
   resolveNoqrAnswers,
   type NoqrAnswerCandidate,
   type NoqrQuestionGroup,
   type NoqrResolvedAnswer,
 } from './question.ts'
+import { normalizeEnglishMatchOption, sameAnswerTexts } from '../core/hash.ts'
 import { NOQR_SEL } from './selectors.ts'
 import {
   NoqrMutationObserver,
@@ -22,8 +24,17 @@ import {
   type NoqrMutationRequest,
   type NoqrMutationResult,
 } from './network.ts'
-import { evaluateNoqrSaveEvidence, isNoqrRequestAccepted } from './save.ts'
-import { NoqrNetworkActivity, NoqrSessionError, sleepNoqr } from './session.ts'
+import {
+  evaluateNoqrSaveEvidence,
+  isNoqrRequestAccepted,
+  noqrBusinessRejectionDetail,
+} from './save.ts'
+import {
+  NoqrNetworkActivity,
+  NoqrSessionError,
+  sleepNoqr,
+} from './session.ts'
+import { NoqrUnsupportedNonObjectiveError } from './workflow-errors.ts'
 
 export type NoqrAnswerProgress = {
   phase: 'bank' | 'ai' | 'waiting'
@@ -137,7 +148,9 @@ async function selectPickerValues(
     if (!unit || !target) throw new Error('词汇匹配答案无法映射当前候选')
     const row = rows.nth(answer.ordinal - 1)
     const input = row.locator(NOQR_SEL.pickerInput)
-    if ((await input.inputValue().catch(() => '')) === target.text) continue
+    const pickerValueMatches = (value: string) =>
+      normalizeEnglishMatchOption(value) === normalizeEnglishMatchOption(target.text)
+    if (pickerValueMatches(await input.inputValue().catch(() => ''))) continue
     if (stopRequested()) throw new Error('任务已停止')
     await row.click()
     const picker = page.locator('.van-picker').last()
@@ -148,11 +161,10 @@ async function selectPickerValues(
     }
     if (!(await picker.isVisible().catch(() => false))) throw new Error('词汇 Picker 未打开')
     if (stopRequested()) throw new Error('任务已停止')
-    const indexes = await picker.locator(NOQR_SEL.pickerColumnItem).evaluateAll((nodes, expected) =>
-      nodes
-        .map((node, index) => ({ index, text: (node.textContent || '').replace(/\s+/g, ' ').trim() }))
-        .filter((item) => item.text === expected)
-        .map((item) => item.index), target.text)
+    const indexes = (await picker.locator(NOQR_SEL.pickerColumnItem).allTextContents())
+      .map((text, index) => ({ index, text: normalizeEnglishMatchOption(text) }))
+      .filter((item) => item.text === normalizeEnglishMatchOption(target.text))
+      .map((item) => item.index)
     if (indexes.length !== 1) throw new Error('词汇 Picker 目标候选不唯一')
     if (stopRequested()) throw new Error('任务已停止')
     await picker.locator(NOQR_SEL.pickerColumnItem).nth(indexes[0]).click()
@@ -160,15 +172,118 @@ async function selectPickerValues(
     await page.locator(NOQR_SEL.pickerConfirm).last().click()
     for (let poll = 0; poll < 100; poll++) {
       if (stopRequested()) throw new Error('任务已停止')
-      if ((await input.inputValue().catch(() => '')) === target.text) break
+      if (pickerValueMatches(await input.inputValue().catch(() => ''))) break
       await sleepNoqr(page, 50)
     }
-    if ((await input.inputValue().catch(() => '')) !== target.text) throw new Error('词汇 Picker 保存到页面后的值不一致')
+    if (!pickerValueMatches(await input.inputValue().catch(() => ''))) throw new Error('词汇 Picker 保存到页面后的值不一致')
   }
 }
 
 function missingUnits(group: NoqrQuestionGroup, candidates: ReadonlyMap<string, NoqrAnswerCandidate>): NoqrQuestionGroup['units'] {
   return group.units.filter((unit) => !(candidates.get(unit.id)?.bankTexts?.length))
+}
+
+function bankQuerySummary(bank: ReadOnlyBankClient): string {
+  const stats = typeof (bank as unknown as { queryStats?: () => unknown }).queryStats === 'function'
+    ? (bank as unknown as {
+        queryStats: () => {
+          requests: number
+          hashLookups: number
+          hitHashes: number
+          conflictHashes: number
+          budgetExceeded: number
+        }
+      }).queryStats()
+    : null
+  return stats
+    ? ` · GET ${stats.requests} · hash ${stats.hashLookups} · 命中 ${stats.hitHashes}` +
+      ` · 冲突 ${stats.conflictHashes} · 预算耗尽 ${stats.budgetExceeded}`
+    : ''
+}
+
+async function resolveNoqrBankCandidate(
+  bank: ReadOnlyBankClient,
+  unit: NoqrQuestionGroup['units'][number],
+  hashes: string[],
+  stopRequested: () => boolean,
+): Promise<
+  | { status: 'hit'; texts: string[] }
+  | { status: 'miss' }
+  | { status: 'error'; reason: string }
+  | { status: 'conflict'; reason: string }
+> {
+  const rows: Array<{ qtype: typeof unit.qtype; options: string[]; answer_texts: string[] }> = []
+  const batch = (bank as unknown as {
+    getByHashes?: (values: string[]) => Promise<
+      | {
+          ok: true
+          rows: Array<{ qtype: typeof unit.qtype; options: string[]; answer_texts: string[] }>
+          conflicts: number
+        }
+      | { ok: false; error: string }
+    >
+  }).getByHashes
+
+  if (typeof batch === 'function') {
+    const result = await batch.call(bank, hashes)
+    if (!result.ok) return { status: 'error', reason: result.error }
+    if (result.conflicts > 0) return { status: 'conflict', reason: '题库候选身份包含冲突记录' }
+    rows.push(...result.rows)
+  } else {
+    for (const hash of hashes) {
+      if (stopRequested()) throw new Error('任务已停止')
+      const result = await bank.getByHash(hash)
+      if (!result.ok) return { status: 'error', reason: result.error }
+      if (result.row) rows.push(result.row)
+    }
+  }
+
+  if (!rows.length) return { status: 'miss' }
+  if (unit.options.length > 0 && rows.some((row) => row.options.length === 0)) {
+    return { status: 'miss' }
+  }
+  for (const row of rows) {
+    if (row.qtype !== unit.qtype) {
+      return { status: 'conflict', reason: '题库命中题型与当前页面不一致' }
+    }
+  }
+  const texts = rows[0].answer_texts
+  if (rows.some((row) => !sameAnswerTexts(texts, row.answer_texts, unit.qtype))) {
+    return { status: 'conflict', reason: '题库候选身份命中不同答案' }
+  }
+  return { status: 'hit', texts }
+}
+
+async function collectNoqrBankCandidates(opts: {
+  group: NoqrQuestionGroup
+  bank: ReadOnlyBankClient
+  stopRequested: () => boolean
+  onProgress?: (progress: NoqrAnswerProgress) => void
+}): Promise<Map<string, NoqrAnswerCandidate>> {
+  const candidates = new Map<string, NoqrAnswerCandidate>()
+  for (const unit of opts.group.units) {
+    if (opts.stopRequested()) throw new Error('任务已停止')
+    const hashes = buildNoqrQuestionIdentityCandidates(opts.group, unit)
+    const resolved = await resolveNoqrBankCandidate(
+      opts.bank,
+      unit,
+      hashes,
+      opts.stopRequested,
+    )
+    if (resolved.status === 'hit') {
+      candidates.set(unit.id, { bankTexts: resolved.texts })
+      continue
+    }
+    if (resolved.status === 'conflict' || resolved.status === 'error') {
+      opts.onProgress?.({
+        phase: 'waiting',
+        questionNo: opts.group.position ?? null,
+        questionTotal: opts.group.total ?? null,
+        message: `题库候选不可用，转为 AI · ${resolved.reason}`,
+      })
+    }
+  }
+  return candidates
 }
 
 export async function answerNoqrGroup(opts: {
@@ -188,33 +303,19 @@ export async function answerNoqrGroup(opts: {
   if (opts.stopRequested()) throw new Error('任务已停止')
   opts.onProgress?.({ phase: 'waiting', questionNo: null, questionTotal: null, message: '读取当前题目' })
   const read = await readNoqrQuestionGroup(opts.page)
-  if (!read.ok) throw new Error(read.reason)
-  const group = read.group
-  const candidates = new Map<string, NoqrAnswerCandidate>()
-
-  for (const unit of group.units) {
-    if (opts.stopRequested()) throw new Error('任务已停止')
-    const hash = buildNoqrQuestionIdentity(group, unit)
-    const hit = await opts.bank.getByHash(hash)
-    if (!hit.ok) {
-      opts.onProgress?.({
-        phase: 'waiting',
-        questionNo: group.position ?? null,
-        questionTotal: group.total ?? null,
-        message: `题库读取失败，转为 AI · ${hit.error}`,
-      })
-      candidates.set(unit.id, {})
-      continue
+  if (!read.ok) {
+    if (read.code === 'unsupported_non_objective') {
+      throw new NoqrUnsupportedNonObjectiveError(read.reason)
     }
-    if (!hit.row) {
-      candidates.set(unit.id, {})
-      continue
-    }
-    if (hit.row.qtype !== unit.qtype) {
-      throw new Error('题库命中题型与当前页面不一致，已停止当前作业')
-    }
-    candidates.set(unit.id, { bankTexts: hit.row.answer_texts })
+    throw new Error(read.reason)
   }
+  const group = read.group
+  const candidates = await collectNoqrBankCandidates({
+    group,
+    bank: opts.bank,
+    stopRequested: opts.stopRequested,
+    onProgress: opts.onProgress,
+  })
 
   const missing = missingUnits(group, candidates)
   if (opts.stopRequested()) throw new Error('任务已停止')
@@ -227,7 +328,11 @@ export async function answerNoqrGroup(opts: {
       phase: 'ai',
       questionNo: group.position ?? null,
       questionTotal: group.total ?? null,
-      message: `题库缺 ${missing.length} 项，调用独立 AI`,
+      message: `题库缺 ${missing.length} 项，调用独立 AI` +
+        bankQuerySummary(opts.bank) +
+        (process.env.KAIDA_T005_DEBUG_DIAGNOSTICS === '1'
+          ? ` · ${noqrQuestionBankDiagnostic(group)}`
+          : ''),
     })
     if (group.units.length > 1) {
       const ai = await opts.ai.answerGroup({
@@ -295,7 +400,8 @@ export async function answerNoqrGroup(opts: {
     phase: bankCount ? 'bank' : 'ai',
     questionNo: group.position ?? null,
     questionTotal: group.total ?? null,
-    message: bankCount ? `题库命中 ${bankCount} 项` : `AI 完成 ${aiCount} 项`,
+    message: (bankCount ? `题库命中 ${bankCount} 项` : `AI 完成 ${aiCount} 项`) +
+      bankQuerySummary(opts.bank),
     bankCount,
     aiCount,
   })
@@ -321,6 +427,7 @@ async function questionSignature(page: Page): Promise<string> {
     const subItems = [...(info?.querySelectorAll('.sub-questions > .sub-item') || [])]
       .map((item) => (item.textContent || '').replace(/\s+/g, ' ').trim())
       .join('|')
+    if (!text && !position && !title && !subItems) return ''
     return `${label}|${position?.[1] || ''}/${position?.[2] || ''}|${title}|${subItems}`
   })
 }
@@ -344,12 +451,12 @@ function requestIdentityMismatch(
   answer: Record<string, unknown> | null | undefined,
   unit: NoqrQuestionGroup['units'][number],
 ): string {
-  if (!answer) return '保存请求缺少当前题目身份'
+  if (!answer) return '保存请求缺少当前题组身份'
   if (unit.bigQuestionId && String(answer.bigQuestionId || '') !== unit.bigQuestionId) {
-    return '保存请求 bigQuestionId 与当前题目不一致'
+    return '保存请求 bigQuestionId 与当前题组不一致'
   }
   if (unit.questionId && String(answer.questionId || '') !== unit.questionId) {
-    return '保存请求 questionId 与当前题目不一致'
+    return '保存请求 questionId 与当前题组不一致'
   }
   return ''
 }
@@ -472,6 +579,15 @@ function requestMatchesAnswer(result: Pick<NoqrMutationResult | NoqrMutationRequ
   return { ok: true, homeWorkUniqueFlag: flag }
 }
 
+export function noqrSaveRequestMatchesAnswer(
+  body: Record<string, unknown>,
+  group: NoqrQuestionGroup,
+  answers: NoqrResolvedAnswer[],
+  workId: string,
+) {
+  return requestMatchesAnswer({ body }, group, answers, workId)
+}
+
 async function saveNoqrAnswerAndAdvanceInner(opts: {
   page: Page
   observer: NoqrMutationObserver
@@ -480,6 +596,7 @@ async function saveNoqrAnswerAndAdvanceInner(opts: {
   answers: NoqrResolvedAnswer[]
   stopRequested: () => boolean
   onWaiting?: (state: string, elapsedMs: number) => void
+  onMismatch?: (reason: string) => void
   onClickAttempt?: (attempt: number) => void
   noRequestRetryBudgetMs?: number
   pageChangeRequestWaitMs?: number
@@ -520,6 +637,7 @@ async function saveNoqrAnswerAndAdvanceInner(opts: {
   const requestMatchWindowMs = Math.max(50, Number(opts.requestMatchWindowMs) || 2_000)
   let pageChangedSince = 0
   let candidateSince = 0
+  let lastMismatchReason = ''
   let request: ReturnType<NoqrMutationObserver['findRequest']> = null
   try {
     if (opts.stopRequested()) throw new Error('任务已停止')
@@ -557,6 +675,16 @@ async function saveNoqrAnswerAndAdvanceInner(opts: {
       if (candidate) {
         candidateSince ||= Date.now()
         if (Date.now() - candidateSince >= requestMatchWindowMs) {
+          const candidateMatch = requestMatchesAnswer(
+            candidate,
+            opts.group,
+            opts.answers,
+            opts.workId,
+          )
+          if (!candidateMatch.ok && candidateMatch.reason !== lastMismatchReason) {
+            lastMismatchReason = candidateMatch.reason || '保存请求未通过当前答案校验'
+            opts.onMismatch?.(lastMismatchReason)
+          }
           opts.onWaiting?.(
             '等待匹配当前答案的保存请求',
             Date.now() - requestWaitStartedAt,
@@ -681,8 +809,10 @@ async function saveNoqrAnswerAndAdvanceInner(opts: {
   const accepted = isNoqrRequestAccepted(Number(result.httpStatus) || 0, result.payload as never)
   const match = requestMatchesAnswer(result, opts.group, opts.answers, opts.workId)
   if (!accepted || !match.ok) {
-    const reason = !match.ok ? match.reason : result.requestError || '保存响应未通过 HTTP 与业务校验'
-    throw new Error(reason || '答案保存失败')
+    const reason = !accepted
+      ? `保存响应未被业务接受 [${noqrBusinessRejectionDetail(Number(result.httpStatus), result.payload)}]`
+      : match.reason || '保存响应内容与当前答案不一致'
+    throw new NoqrSessionError('submitted_uncertain', reason)
   }
 
   const pageAdvanceBudgetMs = Math.max(
@@ -820,9 +950,12 @@ export async function waitForNoqrAnswerReady(opts: {
         '.option-item[aria-checked="true"], .option-item.checked, .e-a.checked',
       )
       if (selectedOption) return true
-      return [...document.querySelectorAll('input[name="answer"], textarea[name="answer"]')]
+      return [...document.querySelectorAll('input[name="answer"]')]
         .some((node) => {
-          if (!(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)) return false
+          // Only hidden form state is objective progress evidence. A visible
+          // text/search/file control is a non-objective surface and must not
+          // turn a recoverable answer boot into answer_interrupted.
+          if (!(node instanceof HTMLInputElement) || node.type !== 'hidden') return false
           return node.value.trim().length > 0
         })
     }, NOQR_SEL).catch(() => true)

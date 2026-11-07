@@ -80,43 +80,6 @@ export type NoqrHomework = {
   recordEnabled: boolean
 }
 
-export type NoqrOption = {
-  index: number
-  text: string
-  role: 'radio' | 'checkbox'
-  checked: boolean
-}
-
-export type NoqrQuestionKind =
-  | 'single'
-  | 'multiple'
-  | 'judge'
-  | 'grammar'
-  | 'listening'
-  | 'picker'
-  | 'cloze'
-  | 'reading_judge'
-  | 'unknown'
-
-export type NoqrSubQuestion = {
-  ordinal: number
-  stem: string
-  options: NoqrOption[]
-}
-
-export type NoqrQuestionGroup = {
-  kind: NoqrQuestionKind
-  title: string
-  position: number
-  total: number
-  sharedStem: string
-  stem: string
-  options: NoqrOption[]
-  subQuestions: NoqrSubQuestion[]
-  pickerValues: string[]
-  lastQuestion: boolean
-}
-
 export type NoqrAnswerSource = 'bank' | 'ai'
 
 export type NoqrQuestionAnswer = {

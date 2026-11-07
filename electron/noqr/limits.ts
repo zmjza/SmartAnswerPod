@@ -7,6 +7,10 @@ export const NOQR_HISTORY_RESPONSE_HARD_WAIT_MS = 240_000
 export const NOQR_MUTATION_RESPONSE_HARD_WAIT_MS = 240_000
 export const NOQR_RETURN_HARD_WAIT_MS = 240_000
 export const NOQR_SUBMIT_HARD_WAIT_MS = 240_000
+// A submitted homework can remain "待批阅" for a long time. Do not hold the
+// account forever when the site never exposes a fresh score; record the
+// uncertainty and continue instead.
+export const NOQR_SCORE_PENDING_WAIT_MS = 600_000
 
 export function withNoqrHardDeadline<T>(
   task: Promise<T>,

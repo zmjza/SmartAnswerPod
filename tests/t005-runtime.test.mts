@@ -11,6 +11,7 @@ import {
   selectionMismatchDetailCode,
   waitForNoqrAnswerReady,
 } from '../electron/noqr/answer.ts'
+import { NoqrUnsupportedNonObjectiveError } from '../electron/noqr/workflow-errors.ts'
 import type { NoqrAiClient } from '../electron/noqr/ai-client.ts'
 import type { ReadOnlyBankClient } from '../electron/noqr/bank-readonly.ts'
 import { readNoqrHistoryAfterOpen, waitForNoqrHistoryDomMatch, type NoqrHistoryRecord } from '../electron/noqr/history.ts'
@@ -26,13 +27,907 @@ import {
   noqrAnswerCardExpectedSlots,
   noqrAnswerCardExpectedKeyGroups,
   noqrAnswerCardKey,
+  noqrAnswerCardObjectiveOnlyIssue,
+  preflightNoqrObjectiveOnlyAnswerCard,
+  readNoqrAnswerCardDiagnostic,
   returnToNoqrCourseWork,
   submitNoqrHomework,
 } from '../electron/noqr/submit.ts'
+import { waitForNoqrAnswerSurfaceBeforeSubmit } from '../electron/noqr/submit-surface.ts'
 import { noqrPacingDelayMs } from '../electron/noqr/timing.ts'
 
 const ORIGIN = 'https://noqr.fixture.local'
 const ANSWER_URL = `${ORIGIN}/course_work_detail/index.html?workId=work-1&courseId=course-1&workType=onlineWork`
+
+test('T007-RT18a 客观题答题卡标题只接受已确认题型', () => {
+  for (const title of ['单选题', '多项选择题', '判断题', '选择填空题', '完型填空', '阅读理解']) {
+    assert.equal(noqrAnswerCardObjectiveOnlyIssue(title), null, title)
+  }
+  assert.match(noqrAnswerCardObjectiveOnlyIssue('第 5 大题：简答题') || '', /非客观/)
+  assert.match(noqrAnswerCardObjectiveOnlyIssue('第 4 大题：填空题') || '', /非客观/)
+  assert.match(noqrAnswerCardObjectiveOnlyIssue('第 4 大题：选择填空题：简答题') || '', /非客观/)
+  assert.match(noqrAnswerCardObjectiveOnlyIssue('第 5 大题：完型填空 文件上传') || '', /非客观/)
+  assert.match(noqrAnswerCardObjectiveOnlyIssue('第 6 大题：未知综合题') || '', /未支持/)
+})
+
+test('T007-RT18b 整卷预检在首题保存前发现后续非客观题组', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div class="question-info">
+          <span class="question-title">当前客观题</span>
+          <div class="question-options">
+            <div role="radio" aria-checked="false" class="option-item">A. 甲</div>
+            <div role="radio" aria-checked="false" class="option-item">B. 乙</div>
+          </div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question">1</div>
+          </div>
+          <div class="question-card">
+            <div class="question-cart-title">第 5 大题: 简答题</div>
+            <div class="sub-question">2</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(page, () => false)
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'unsupported_non_objective')
+      assert.match(result.reason, /非客观题组.*简答/)
+    }
+    assert.equal(await page.locator('.option-item[aria-checked="true"], .option-item.checked').count(), 0)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('T007-RT18b2 混合空标题题组不能被静默过滤', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question">1</div>
+          </div>
+          <div class="question-card">
+            <div class="question-cart-title"></div>
+            <div class="sub-question">2</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(page, () => false)
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'page_error')
+      assert.equal(result.titles.length, 2)
+      assert.match(result.reason, /标题缺失/)
+    }
+  } finally {
+    await browser.close()
+  }
+})
+
+test('T007-RT18b3 预检发现已有进度必须走 answer_interrupted', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question has-answered">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(page, () => false)
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'answer_interrupted')
+      assert.match(result.reason, /存在作答进度/)
+    }
+  } finally {
+    await browser.close()
+  }
+})
+
+test('T007-RT18h 选项已选但答题卡未标记已答时也必须阻断预检', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div class="question-info">
+          <span class="question-title">单选题 1/1</span>
+          <div class="question-options">
+            <div role="radio" aria-checked="true" class="option-item">A. 甲</div>
+            <div role="radio" aria-checked="false" class="option-item">B. 乙</div>
+          </div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'answer_interrupted')
+      assert.match(result.reason, /存在作答进度/)
+    }
+  } finally {
+    await browser.close()
+  }
+})
+
+test('T007-RT18h2 隐藏预渲染答题卡不得阻断新一轮预检', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div class="question-info">
+          <span class="question-title">单选题 1/1</span>
+          <div class="question-options">
+            <div role="radio" aria-checked="false" class="option-item">A. 甲</div>
+            <div role="radio" aria-checked="false" class="option-item">B. 乙</div>
+          </div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question">1</div>
+          </div>
+          <div class="question-card" style="display:none">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question has-answered">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, true)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('T007-RT18b4 任一答题卡题组为空壳时整卷预检必须失败', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question">1</div>
+          </div>
+          <div class="question-card">
+            <div class="question-cart-title">第 2 大题: 多选题</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'page_error')
+      assert.match(result.reason, /标题缺失|题目结构/)
+    }
+  } finally {
+    await browser.close()
+  }
+})
+
+test('T007-RT18g 复合题答题卡子题行可按局部题号通过预检', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    await page.setContent(`
+      <div class="content-area">
+        <div>阅读理解 1/1</div>
+        <div class="question-info">
+          <span class="question-title">阅读材料</span>
+          <div class="sub-questions">${subItems}</div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 阅读理解</div>
+            <div class="sub-question">1</div>
+            <div class="sub-question">2</div>
+            <div class="sub-question">3</div>
+            <div class="sub-question">4</div>
+            <div class="sub-question">5</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, true)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18g2 复合题第二张卡未导航时不能借用第一组局部题号', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    await page.setContent(`
+      <div class="content-area">
+        <div>阅读理解 1/2</div>
+        <div class="question-info">
+          <span class="question-title">阅读材料</span>
+          <div class="sub-questions">${subItems}</div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 阅读理解</div>
+            <div class="sub-question">1</div>
+          </div>
+          <div class="question-card">
+            <div class="question-cart-title">第 2 大题: 阅读理解</div>
+            <div class="sub-question">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 1_500 },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'unsupported_non_objective')
+      assert.match(result.reason, /无法证明/)
+    }
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18g3 复合题缺少页面题号时不能只凭局部题号通过预检', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    await page.setContent(`
+      <div class="content-area">
+        <div>阅读理解</div>
+        <div class="question-info">
+          <span class="question-title">阅读材料</span>
+          <div class="sub-questions">${subItems}</div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 阅读理解</div>
+            <div class="sub-question">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 1_500 },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'unsupported_non_objective')
+      assert.match(result.reason, /无法证明/)
+    }
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18g4 复合题第一组同页局部题位必须可通过预检和跳转', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    const html = `<div class="content-area">
+      <div id="position">阅读理解 1/2</div>
+      <div class="question-info">
+        <span class="question-title">阅读材料</span>
+        <div class="sub-questions">${subItems}</div>
+      </div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:none">
+      <div class="question-card">
+        <div class="question-cart-title">第 1 大题: 阅读理解</div>
+        <span class="sub-question">1</span>
+        <span class="sub-question">2</span>
+        <span class="sub-question">3</span>
+        <span class="sub-question">4</span>
+        <span class="sub-question">5</span>
+      </div>
+    </div>
+    <script>
+      document.querySelectorAll('.btn-item')[0].addEventListener('click', () => {
+        document.querySelector('.van-popup').style.display = 'block'
+      })
+      document.querySelectorAll('.sub-question')[2].addEventListener('click', (event) => {
+        document.querySelectorAll('.sub-question').forEach((node) => node.classList.remove('is-current'))
+        event.currentTarget.classList.add('is-current')
+        document.querySelector('.van-popup').style.display = 'none'
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const preflight = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(preflight.ok, true)
+    await goToNoqrAnswerCardQuestion(
+      page,
+      noqrAnswerCardKey('english_reading', 3, 1),
+      () => false,
+      { verifyBudgetMs: 500 },
+    )
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18g5 复合题合并全局题号必须绑定当前题组并通过预检和跳转', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    const html = `<div class="content-area">
+      <div id="position">阅读理解 2/2</div>
+      <div class="question-info">
+        <span class="question-title">第二篇阅读材料</span>
+        <div class="sub-questions">${subItems}</div>
+      </div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:none">
+      <div class="question-card">
+        <div class="question-cart-title">第 2 大题: 阅读理解</div>
+        <span class="sub-question">6</span>
+        <span class="sub-question">7</span>
+        <span class="sub-question">8</span>
+        <span class="sub-question">9</span>
+        <span class="sub-question">10</span>
+      </div>
+    </div>
+    <script>
+      document.querySelectorAll('.btn-item')[0].addEventListener('click', () => {
+        document.querySelector('.van-popup').style.display = 'block'
+      })
+      document.querySelectorAll('.sub-question')[0].addEventListener('click', (event) => {
+        document.querySelectorAll('.sub-question').forEach((node) => node.classList.remove('is-current'))
+        event.currentTarget.classList.add('is-current')
+        document.querySelector('.van-popup').style.display = 'none'
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const preflight = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(preflight.ok, true)
+    await goToNoqrAnswerCardQuestion(
+      page,
+      noqrAnswerCardKey('english_reading', 6, 1),
+      () => false,
+      { verifyBudgetMs: 500 },
+    )
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18g6 同卡第二逻辑组未导航时局部题号不得通过预检', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    await page.setContent(`
+      <div class="content-area">
+        <div id="position">阅读理解 1/2</div>
+        <div class="question-info">
+          <span class="question-title">阅读材料</span>
+          <div class="sub-questions">${subItems}</div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 阅读理解</div>
+            <div class="sub-question">1</div>
+            <div class="sub-question">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 1_500 },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'unsupported_non_objective')
+      assert.match(result.reason, /无法证明/)
+    }
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18g7 同卡重复局部题号可按页面题组唯一绑定后通过预检', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    const html = `<div class="content-area">
+      <div id="position">阅读理解 1/2</div>
+      <div class="question-info">
+        <span class="question-title">阅读材料</span>
+        <div class="sub-questions">${subItems}</div>
+      </div>
+      <div class="btn-item">答题卡</div>
+      <div class="van-popup van-popup--bottom" style="display:none">
+        <div class="question-card">
+          <div class="question-cart-title">第 1 大题: 阅读理解</div>
+          <div class="sub-question" data-group="1">1</div>
+          <div class="sub-question" data-group="2">1</div>
+        </div>
+      </div>
+      <script>
+        document.querySelector('.btn-item').addEventListener('click', () => {
+          document.querySelector('.van-popup').style.display = 'block'
+        })
+        document.querySelectorAll('.sub-question').forEach((row) => {
+          row.addEventListener('click', () => {
+            document.querySelector('#position').textContent =
+              '阅读理解 ' + row.dataset.group + '/2'
+            document.querySelector('.van-popup').style.display = 'none'
+          })
+        })
+      </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, true)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18g8 同卡唯一行 1、2 的第二逻辑组未导航时必须失败', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    await page.setContent(`
+      <div class="content-area">
+        <div id="position">阅读理解 1/2</div>
+        <div class="question-info">
+          <span class="question-title">阅读材料</span>
+          <div class="sub-questions">${subItems}</div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 阅读理解</div>
+            <div class="sub-question">1</div>
+            <div class="sub-question">2</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 1_500 },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'unsupported_non_objective')
+      assert.match(result.reason, /无法证明/)
+    }
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18g9 同卡唯一行按 rowIndex 分别导航时可正确通过', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    const html = `<div class="content-area">
+      <div id="position">阅读理解 1/2</div>
+      <div class="question-info">
+        <span class="question-title">阅读材料</span>
+        <div class="sub-questions">${subItems}</div>
+      </div>
+      <div class="btn-item">答题卡</div>
+      <div class="van-popup van-popup--bottom" style="display:none">
+        <div class="question-card">
+          <div class="question-cart-title">第 1 大题: 阅读理解</div>
+          <div class="sub-question" data-group="1">1</div>
+          <div class="sub-question is-current" data-group="2">2</div>
+        </div>
+      </div>
+      <script>
+        document.querySelector('.btn-item').addEventListener('click', () => {
+          document.querySelector('.van-popup').style.display = 'block'
+        })
+        document.querySelectorAll('.sub-question').forEach((row) => {
+          row.addEventListener('click', () => {
+            document.querySelector('#position').textContent =
+              '阅读理解 ' + row.dataset.group + '/2'
+            document.querySelector('.van-popup').style.display = 'none'
+          })
+        })
+      </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const preflight = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(preflight.ok, true)
+    await goToNoqrAnswerCardQuestion(
+      page,
+      noqrAnswerCardKey('english_reading', 2, 1),
+      () => false,
+      { verifyBudgetMs: 500 },
+    )
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18i 复合题答题卡不能用全局卡片序号代替题目位置', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 甲</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 乙</div>
+        </div>
+      </div>`).join('')
+    await page.setContent(`
+      <div class="content-area">
+        <div>听力理解 1/1</div>
+        <div class="question-info">
+          <span class="question-title">听力材料</span>
+          <a data-url="fixture-audio"></a>
+          <div class="sub-questions">${subItems}</div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 3 大题: 听力理解。</div>
+            <div class="sub-question">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, true)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('T007-RT18c 纯客观题答题卡预检通过且不改变选项', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div>单选题 1/1</div>
+        <div class="question-info">
+          <span class="question-title">当前客观题</span>
+          <div class="question-options">
+            <div role="radio" aria-checked="false" class="option-item">A. 甲</div>
+            <div role="radio" aria-checked="false" class="option-item">B. 乙</div>
+          </div>
+        </div>
+        <div class="btn-item">答题卡</div>
+        <div class="van-popup van-popup--bottom">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, true)
+    assert.equal(await page.locator('.option-item[aria-checked="true"], .option-item.checked').count(), 0)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('T007-RT18f 后续题卡标题伪装成客观题也必须读取真实控件后整卷隔离', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let mutationRequests = 0
+  try {
+    page.on('request', (request) => {
+      if (/Submit(?:All)?JsonAsync|FinishJsonAsync/.test(request.url())) mutationRequests++
+    })
+    await page.setContent(`
+      <div class="content-area">
+        <div id="position">单选题 1/1</div>
+        <div id="question-surface">
+          <div class="question-info">
+            <span class="question-title">客观题</span>
+            <div class="question-options">
+              <div role="radio" aria-checked="false" class="option-item">A. 甲</div>
+              <div role="radio" aria-checked="false" class="option-item">B. 乙</div>
+            </div>
+          </div>
+        </div>
+        <button class="btn-item">答题卡</button>
+        <div class="van-popup van-popup--bottom" style="display:block">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question" data-target="objective">1</div>
+          </div>
+          <div class="question-card">
+            <div class="question-cart-title">第 2 大题: 单选题</div>
+            <div class="sub-question" data-target="subjective">2</div>
+          </div>
+        </div>
+      </div>
+      <script>
+        const popup = document.querySelector('.van-popup')
+        const surface = document.querySelector('#question-surface')
+        document.querySelector('.btn-item').addEventListener('click', () => {
+          popup.style.display = 'block'
+        })
+        document.querySelectorAll('.sub-question').forEach((row) => {
+          row.addEventListener('click', () => {
+            popup.style.display = 'none'
+            document.querySelector('#position').textContent = row.dataset.target === 'subjective'
+              ? '单选题 2/2'
+              : '单选题 1/2'
+            surface.innerHTML = row.dataset.target === 'subjective'
+              ? '<div class="question-info"><span class="question-title">客观题外壳</span><textarea>主观文本</textarea></div>'
+              : '<div class="question-info"><span class="question-title">客观题</span><div class="question-options"><div role="radio" aria-checked="false" class="option-item">A. 甲</div><div role="radio" aria-checked="false" class="option-item">B. 乙</div></div></div>'
+          })
+        })
+      </script>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'unsupported_non_objective')
+      assert.match(result.reason, /主观|仅支持客观题/)
+    }
+    assert.equal(await page.locator('.option-item[aria-checked="true"], .option-item.checked').count(), 0)
+    assert.equal(mutationRequests, 0)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18j 没有题组容器时可见文本控件仍按主观题隔离', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    await page.setContent(`
+      <div class="content-area">
+        <div id="position">单选题 1/1</div>
+        <textarea>主观文本</textarea>
+        <button class="btn-item">答题卡</button>
+        <div class="van-popup van-popup--bottom" style="display:block">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 单选题</div>
+            <div class="sub-question">1</div>
+          </div>
+        </div>
+      </div>
+    `)
+    const result = await preflightNoqrObjectiveOnlyAnswerCard(
+      page,
+      () => false,
+      { deadlineAt: Date.now() + 3_000 },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.code, 'unsupported_non_objective')
+      assert.match(result.reason, /主观|仅支持客观题/)
+    }
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18d 非客观控件在题库和选项写入前整组阻断', async () => {
+  const browser = await launchBrowser()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="content-area">
+        <div class="question-info">
+          <span class="question-title">客观题外壳</span>
+          <div class="question-options">
+            <div role="radio" aria-checked="false" class="option-item">A. 甲</div>
+            <div role="radio" aria-checked="false" class="option-item">B. 乙</div>
+          </div>
+          <textarea>主观文本</textarea>
+        </div>
+      </div>
+    `)
+    let bankCalls = 0
+    const bank = {
+      getByHash: async () => {
+        bankCalls++
+        return { ok: true, row: null }
+      },
+    } as unknown as ReadOnlyBankClient
+    await assert.rejects(
+      answerNoqrGroup({
+        page,
+        bank,
+        ai: aiStub([]),
+        stopRequested: () => false,
+      }),
+      (error: unknown) => error instanceof NoqrUnsupportedNonObjectiveError,
+    )
+    assert.equal(bankCalls, 0)
+    assert.equal(await page.locator('.option-item[aria-checked="true"], .option-item.checked').count(), 0)
+    assert.equal(await page.locator('textarea').inputValue(), '主观文本')
+  } finally {
+    await browser.close()
+  }
+})
 
 function browserExecutable(): string | undefined {
   const cache = join(homedir(), 'Library/Caches/ms-playwright')
@@ -128,7 +1023,7 @@ function bankStub(answerTexts: string[], qtype = 'single'): ReadOnlyBankClient {
         id: 'fixture',
         qtype,
         stem: 'fixture',
-        options: [],
+        options: answerTexts.length ? [...answerTexts] : ['fixture-option'],
         answer_texts: answerTexts,
         course_names: [],
       },
@@ -136,20 +1031,29 @@ function bankStub(answerTexts: string[], qtype = 'single'): ReadOnlyBankClient {
   } as unknown as ReadOnlyBankClient
 }
 
-function sequenceBankStub(answerTexts: string[], qtype = 'single'): ReadOnlyBankClient {
+function sequenceBankStub(
+  answerTexts: string[],
+  qtype = 'single',
+  callsPerUnit = 1,
+): ReadOnlyBankClient {
   let index = 0
   return {
-    getByHash: async () => ({
-      ok: true,
-      row: {
-        id: 'fixture',
-        qtype,
-        stem: 'fixture',
-        options: [],
-        answer_texts: [answerTexts[Math.min(index++, answerTexts.length - 1)] || ''],
-        course_names: [],
-      },
-    }),
+    getByHash: async () => {
+      const answerIndex = Math.floor(index / Math.max(1, callsPerUnit))
+      index++
+      return {
+        ok: true,
+        row: {
+          id: 'fixture',
+          qtype,
+          stem: 'fixture',
+          options: answerTexts.length ? [...answerTexts] : ['fixture-option'],
+          answer_texts: [answerTexts[Math.min(answerIndex, answerTexts.length - 1)] || ''],
+          course_names: [],
+          conflict: false,
+        },
+      }
+    },
   } as unknown as ReadOnlyBankClient
 }
 
@@ -204,7 +1108,62 @@ test('T005-RT00c 答题卡真实题型标题别名归一为标准组键', () => 
   assert.equal(answerCardSectionFromTitle('第 1 大题: 单项选择题'), '单选题')
   assert.equal(answerCardSectionFromTitle('第 3 大题: 完型填空'), '完型填空')
   assert.equal(answerCardSectionFromTitle('第 3 大题: 完形填空'), '完型填空')
+  assert.equal(answerCardSectionFromTitle('第 5 大题: 选择填空题'), '')
   assert.equal(answerCardSectionFromTitle('第 4 大题: 未知题型'), '')
+})
+
+test('T007-RT14c8 选择填空题答题卡标题按实际客观控件结构核对', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const html = `<div class="content-area">
+      <div class="question-info"><span class="question-title">合成选择填空题</span></div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:block">
+      <div class="question-card">
+        <div class="question-cart-title">第 5 大题: 选择填空题</div>
+        <span class="sub-question has-answered">1</span>
+        <span class="sub-question has-answered">2</span>
+      </div>
+    </div>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const diagnostic = await readNoqrAnswerCardDiagnostic(page)
+    assert.deepEqual(diagnostic.sections, [''])
+    const expectedGroup = noqrAnswerCardExpectedGroups({
+      kind: 'single',
+      sharedStem: '合成选择填空题',
+      units: [1, 2].map((ordinal) => ({
+        id: `choice-fill-${ordinal}`,
+        ordinal,
+        qtype: 'single' as const,
+        stem: `空位 ${ordinal}`,
+        options: [],
+      })),
+      position: 5,
+      total: 1,
+    }, {
+      groupOrdinal: 1,
+      kindOccurrence: 1,
+      slotOffset: 0,
+    })
+    const audit = await technicalTimeout(auditNoqrAnswerCard(page, {
+      stopRequested: () => false,
+      expectedGroups: [expectedGroup],
+      savedGroupOrdinals: new Set([1]),
+      expectedCount: 2,
+      noProgressBudgetMs: 100,
+      auditDeadlineMs: 1_000,
+      maxReopens: 0,
+    }), '选择填空题真实答题卡无法按单选控件结构匹配', 3_000)
+    assert.equal(audit.ok, true)
+    assert.equal(audit.unanswered, 0)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
 })
 
 test('T005-RT00d 复合题答题卡接受父题、局部题号和合并题号三种结构', () => {
@@ -346,7 +1305,7 @@ test('T005-RT02 Picker 十槽按左侧行顺序写入并在确认后读回', asy
     const selected = Array.from({ length: 10 }, (_, index) => `候选 ${index + 1}`)
     const result = await answerNoqrGroup({
       page,
-      bank: sequenceBankStub(selected),
+      bank: sequenceBankStub(selected, 'single', 2),
       ai: aiStub([]),
       stopRequested: () => false,
     })
@@ -2195,13 +3154,103 @@ test('T005-RT05f3 合并题号的同题型大题按逻辑题位总数等待，�
   }
 })
 
+test('T007-RT17 已全部 accepted 的混合卷答案卡少渲染行时只能按严格保存组兜底', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const html = `<div class="content-area">
+      <div class="question-info"><span class="question-title">混合客观题</span></div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:block">
+      <div class="question-card"><div class="question-cart-title">第 1 大题: 单选题</div>
+        <span class="sub-question has-answered">1</span>
+      </div>
+      <div class="question-card"><div class="question-cart-title">第 2 大题: 单选题</div>
+        <span class="sub-question has-answered">2</span>
+      </div>
+      <div class="question-card"><div class="question-cart-title">第 3 大题: 阅读理解</div>
+        <span class="sub-question has-answered">1</span>
+      </div>
+    </div>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const singleOne = noqrAnswerCardExpectedGroups({
+      kind: 'single',
+      sharedStem: '',
+      units: [{ id: 's1', ordinal: 1, qtype: 'single', stem: '一', options: [] }],
+      position: 1,
+      total: 3,
+    }, { groupOrdinal: 1, kindOccurrence: 1, slotOffset: 0 })
+    const singleTwo = noqrAnswerCardExpectedGroups({
+      kind: 'single',
+      sharedStem: '',
+      units: [{ id: 's2', ordinal: 1, qtype: 'single', stem: '二', options: [] }],
+      position: 2,
+      total: 3,
+    }, { groupOrdinal: 2, kindOccurrence: 2, slotOffset: 1 })
+    const reading = noqrAnswerCardExpectedGroups({
+      kind: 'english_reading',
+      sharedStem: '阅读材料',
+      units: Array.from({ length: 5 }, (_, index) => ({
+        id: `r${index + 1}`,
+        ordinal: index + 1,
+        qtype: 'single' as const,
+        stem: `阅读子题 ${index + 1}`,
+        options: [],
+      })),
+      position: 3,
+      total: 5,
+    }, { groupOrdinal: 3, kindOccurrence: 1, slotOffset: 2 })
+    let allSaved
+    try {
+      allSaved = await technicalTimeout(auditNoqrAnswerCard(page, {
+        stopRequested: () => false,
+        expectedGroups: [singleOne, singleTwo, reading],
+        savedGroupOrdinals: new Set([1, 2, 3]),
+        expectedCount: 3,
+        noProgressBudgetMs: 100,
+        auditDeadlineMs: 1_000,
+        maxReopens: 0,
+      }), '全部保存组被少渲染行阻断', 3_000)
+    } catch (error) {
+      throw error
+    }
+    assert.equal(allSaved.ok, true)
+    assert.equal(allSaved.unanswered, 0)
+
+    await assert.rejects(
+      technicalTimeout(auditNoqrAnswerCard(page, {
+        stopRequested: () => false,
+        expectedGroups: [singleOne, singleTwo, reading],
+        savedGroupOrdinals: new Set([1, 2]),
+        expectedCount: 3,
+        noProgressBudgetMs: 100,
+        auditDeadlineMs: 1_000,
+        maxReopens: 0,
+      }), '未全部保存的混合卷没有安全阻断', 3_000),
+      /答题卡连续|答题卡结构|答题卡等待/,
+    )
+  } finally {
+    await page.close().catch(() => {})
+    await browser.close().catch(() => {})
+  }
+})
+
 test('T005-RT05g 答题卡漏题可回跳对应题号补答', async () => {
   const browser = await launchBrowser()
   const page = await browser.newPage()
   try {
     const html = `<div class="content-area">
       <div class="position">单选题 1/10</div>
-      <div class="question-info"><span class="question-title">第一题</span></div>
+      <div class="question-info">
+        <span class="question-title">第一题</span>
+        <div class="question-options">
+          <div class="option-item" role="radio"><span class="van-radio__label">甲</span></div>
+          <div class="option-item" role="radio"><span class="van-radio__label">乙</span></div>
+        </div>
+      </div>
       <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
     </div>
     <div class="van-popup van-popup--bottom" style="display:none">
@@ -2276,6 +3325,360 @@ test('T005-RT05g2 答题卡点击后未到达目标题号时必须失败，不�
   }
 })
 
+test('T007-RT05g6 复合题目标卡当前态不能替代目标题号到达证据', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    const html = `<div class="content-area">
+      <div>阅读理解 1/1</div>
+      <div class="question-info">
+        <span class="question-title">阅读材料</span>
+        <div class="sub-questions">${subItems}</div>
+      </div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:none">
+      <div class="question-card"><div class="question-cart-title">第 1 大题: 阅读理解</div>
+        <span class="sub-question">1</span><span class="sub-question">2</span>
+      </div>
+      <div class="question-card"><div class="question-cart-title">第 2 大题: 阅读理解</div>
+        <span class="sub-question">1</span><span class="sub-question">2</span>
+      </div>
+    </div>
+    <script>
+      document.querySelectorAll('.btn-item')[0].addEventListener('click', () => {
+        document.querySelector('.van-popup').style.display = 'block'
+        document.querySelectorAll('.question-card')[1]
+          .querySelectorAll('.sub-question')[1]
+          .addEventListener('click', (event) => {
+            event.currentTarget.classList.add('is-current')
+            document.querySelector('.van-popup').style.display = 'none'
+          })
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await assert.rejects(
+      technicalTimeout(
+        goToNoqrAnswerCardQuestion(
+          page,
+          noqrAnswerCardKey('english_reading', 2, 2),
+          () => false,
+          { verifyBudgetMs: 200 },
+        ),
+        '第二篇阅读卡第 2 行被错误当成目标题',
+        3_000,
+      ),
+      /未到达目标题/,
+    )
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT05g6b 复合题第一篇第二行可按页面题号到达', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const subItems = [1, 2, 3, 4, 5].map((ordinal) => `
+      <div class="sub-item">
+        <span class="question-title">陈述 ${ordinal}</span>
+        <div class="question-options">
+          <div role="radio" aria-checked="false" class="option-item">A. 正确</div>
+          <div role="radio" aria-checked="false" class="option-item">B. 错误</div>
+        </div>
+      </div>`).join('')
+    const html = `<div class="content-area">
+      <div id="position">阅读理解 1/2</div>
+      <div class="question-info">
+        <span class="question-title">阅读材料</span>
+        <div class="sub-questions">${subItems}</div>
+      </div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:none">
+      <div class="question-card">
+        <div class="question-cart-title">第 1 大题: 阅读理解</div>
+        <span class="sub-question">1</span>
+        <span class="sub-question">2</span>
+      </div>
+    </div>
+    <script>
+      document.querySelectorAll('.btn-item')[0].addEventListener('click', () => {
+        document.querySelector('.van-popup').style.display = 'block'
+      })
+      document.querySelectorAll('.sub-question')[1].addEventListener('click', () => {
+        document.querySelector('.van-popup').style.display = 'none'
+        document.querySelector('#position').textContent = '阅读理解 2/2'
+        document.querySelector('.question-title').textContent = '第二篇材料'
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await goToNoqrAnswerCardQuestion(
+      page,
+      noqrAnswerCardKey('english_reading', 2, 1),
+      () => false,
+      { verifyBudgetMs: 500 },
+    )
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT14g 答题卡目标行显示当前态但题页仍空白时不能提前返回', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const html = `<div class="content-area">
+      <div>单选题 2/3</div>
+      <div class="question-info"><span class="question-title">第三题</span><div class="question-options"><div class="option-item" role="radio"><span class="van-radio__label">甲</span></div><div class="option-item" role="radio"><span class="van-radio__label">乙</span></div></div></div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:none">
+      <div class="question-card">
+        <div class="question-cart-title">第 1 大题: 单选题</div>
+        <span class="sub-question has-answered">1</span>
+        <span class="sub-question">2</span>
+        <span class="sub-question">3</span>
+      </div>
+    </div>
+    <script>
+      document.querySelectorAll('.btn-item')[0].addEventListener('click', () => {
+        document.querySelector('.van-popup').style.display = 'block'
+      })
+      document.querySelectorAll('.sub-question')[2].addEventListener('click', () => {
+        document.querySelectorAll('.sub-question')[2].classList.add('is-current')
+        document.querySelector('.content-area').innerHTML =
+          '<div>单选题 3/3</div><div class="question-info"></div>'
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await assert.rejects(
+      technicalTimeout(
+        goToNoqrAnswerCardQuestion(
+          page,
+          noqrAnswerCardKey('single', 3, 1),
+          () => false,
+          { verifyBudgetMs: 100 },
+        ),
+        '答题卡当前态掩盖了空白题页',
+        3_000,
+      ),
+      /未到达目标题/,
+    )
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT16 交卷前短暂旧答题面和加载态不能提前通过', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const stable = `<div class="content-area">
+      <div class="question-info"><span class="question-title">稳定客观题</span>
+        <div class="question-options">
+          <div class="option-item" role="radio" aria-checked="true"><span class="van-radio__label">甲</span></div>
+          <div class="option-item" role="radio" aria-checked="false"><span class="van-radio__label">乙</span></div>
+        </div>
+      </div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>`
+    const html = `${stable}<script>
+      setTimeout(() => {
+        const toast = document.createElement('div')
+        toast.className = 'van-toast van-toast--loading'
+        toast.textContent = '提交中'
+        document.body.appendChild(toast)
+      }, 150)
+      setTimeout(() => {
+        document.body.innerHTML = '<div class="content-area"><div class="skeleton-area van-skeleton"></div></div>'
+      }, 500)
+      setTimeout(() => {
+        document.body.innerHTML = ${JSON.stringify(stable)}
+      }, 1_200)
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const controller = new AbortController()
+    const startedAt = Date.now()
+    await technicalTimeout(
+      waitForNoqrAnswerSurfaceBeforeSubmit(page, {
+        signal: controller.signal,
+        stabilityWindowMs: 400,
+      }),
+      '交卷前答题面未在恢复后稳定通过',
+      5_000,
+    )
+    assert.ok(
+      Date.now() - startedAt >= 1_400,
+      `交卷前旧答题面在加载态出现前被提前接受：${Date.now() - startedAt}ms`,
+    )
+    assert.equal(await page.locator('.content-area .btn-item').count(), 2)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT14c3 答题卡入口必须选择可见按钮而不是前面的隐藏占位', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const html = `<div class="content-area">
+      <div class="stale-actions">
+        <button class="btn-item" id="stale-card" style="display:none">答题卡</button>
+      </div>
+      <div class="question-info"><span class="question-title">合成单选题</span><div class="question-options"><div class="option-item" role="radio"><span class="van-radio__label">甲</span></div><div class="option-item" role="radio"><span class="van-radio__label">乙</span></div></div></div>
+      <div class="actions"><button class="btn-item" id="answer-card">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:none">
+      <div class="question-card">
+        <div class="question-cart-title">第 1 大题: 单选题</div>
+        <span class="sub-question has-answered">1</span>
+      </div>
+    </div>
+    <script>
+      document.documentElement.dataset.staleClicks = '0'
+      document.querySelector('#stale-card').addEventListener('click', () => {
+        document.documentElement.dataset.staleClicks =
+          String(Number(document.documentElement.dataset.staleClicks || '0') + 1)
+      })
+      document.querySelector('#answer-card').addEventListener('click', () => {
+        document.querySelector('.van-popup').style.display = 'block'
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const audit = await technicalTimeout(
+      auditNoqrAnswerCard(page, {
+        stopRequested: () => false,
+        expectedCount: 1,
+        noProgressBudgetMs: 400,
+        auditDeadlineMs: 2_000,
+        maxReopens: 0,
+      }),
+      '答题卡可见入口未被定位',
+      3_000,
+    )
+    assert.equal(audit.ok, true)
+    assert.equal(await page.locator('html').getAttribute('data-stale-clicks'), '0')
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT14c4 答题卡首次点击被页面吞掉时必须有限重试打开', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const html = `<div class="content-area">
+      <div class="question-info"><span class="question-title">合成单选题</span><div class="question-options"><div class="option-item" role="radio"><span class="van-radio__label">甲</span></div><div class="option-item" role="radio"><span class="van-radio__label">乙</span></div></div></div>
+      <div class="actions"><button class="btn-item" id="answer-card">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:none">
+      <div class="question-card">
+        <div class="question-cart-title">第 1 大题: 单选题</div>
+        <span class="sub-question has-answered">1</span>
+      </div>
+    </div>
+    <script>
+      document.documentElement.dataset.cardClicks = '0'
+      document.querySelector('#answer-card').addEventListener('click', () => {
+        const clicks = Number(document.documentElement.dataset.cardClicks || '0') + 1
+        document.documentElement.dataset.cardClicks = String(clicks)
+        if (clicks < 2) return
+        document.querySelector('.van-popup').style.display = 'block'
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const audit = await technicalTimeout(
+      auditNoqrAnswerCard(page, {
+        stopRequested: () => false,
+        expectedCount: 1,
+        noProgressBudgetMs: 5_000,
+        auditDeadlineMs: 7_000,
+        maxReopens: 0,
+      }),
+      '答题卡首次点击失效后没有有限重试',
+      8_000,
+    )
+    assert.equal(audit.ok, true)
+    assert.equal(await page.locator('html').getAttribute('data-card-clicks'), '2')
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT14c5 答题卡入口被透明遮罩覆盖时不能程序化绕过命中测试', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const html = `<div class="content-area">
+      <div class="question-info"><span class="question-title">合成单选题</span><div class="question-options"><div class="option-item" role="radio"><span class="van-radio__label">甲</span></div><div class="option-item" role="radio"><span class="van-radio__label">乙</span></div></div></div>
+      <div class="actions"><button class="btn-item" id="answer-card">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:none">
+      <div class="question-card">
+        <div class="question-cart-title">第 1 大题: 单选题</div>
+        <span class="sub-question has-answered">1</span>
+      </div>
+    </div>
+    <div id="blocker" style="position:fixed;inset:0;z-index:9999;background:transparent"></div>
+    <script>
+      document.documentElement.dataset.cardClicks = '0'
+      document.querySelector('#answer-card').addEventListener('click', () => {
+        document.documentElement.dataset.cardClicks =
+          String(Number(document.documentElement.dataset.cardClicks || '0') + 1)
+        document.querySelector('.van-popup').style.display = 'block'
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await assert.rejects(
+      technicalTimeout(
+        auditNoqrAnswerCard(page, {
+          stopRequested: () => false,
+          expectedCount: 1,
+          noProgressBudgetMs: 400,
+          auditDeadlineMs: 2_000,
+          maxReopens: 0,
+        }),
+        '答题卡入口遮挡后仍被程序化点击',
+        3_000,
+      ),
+      /答题卡入口被遮挡|答题卡.*总时限/,
+    )
+    assert.equal(await page.locator('html').getAttribute('data-card-clicks'), '0')
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
 test('T005-RT05g3 复合题跳转必须命中指定同题型大题，不能只凭题型名通过', async () => {
   const browser = await launchBrowser()
   const page = await browser.newPage()
@@ -2320,6 +3723,166 @@ test('T005-RT05g3 复合题跳转必须命中指定同题型大题，不能只�
   } finally {
     await page.close()
     await browser.close()
+  }
+})
+
+test('T005-RT05g4 复合题空白加载页不能用题型标题冒充目标题', async () => {
+  const cases = [
+    {
+      label: '听力理解',
+      key: noqrAnswerCardKey('english_listening', 1),
+    },
+    {
+      label: '词汇匹配',
+      key: noqrAnswerCardKey('picker', 1),
+    },
+    {
+      label: '完型填空',
+      key: noqrAnswerCardKey('english_cloze', 1),
+    },
+    {
+      label: '阅读理解',
+      key: noqrAnswerCardKey('english_reading', 1),
+    },
+  ] as const
+  for (const item of cases) {
+    const browser = await launchBrowser()
+    const page = await browser.newPage()
+    try {
+      const html = `<div class="content-area">
+        <div>${item.label} 1/2</div>
+        <div class="question-info"><span class="question-title">空白加载中</span></div>
+        <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+      </div>
+      <div class="van-popup van-popup--bottom" style="display:none">
+        <div class="question-card">
+          <div class="question-cart-title">第 1 大题: ${item.label}</div>
+          <span class="sub-question is-current">1</span>
+        </div>
+      </div>
+      <script>
+        document.querySelectorAll('.btn-item')[0].addEventListener('click', () => {
+          document.querySelector('.van-popup').style.display = 'block'
+          document.querySelector('.sub-question').addEventListener('click', () => {
+            document.querySelector('.van-popup').style.display = 'none'
+            document.querySelector('.content-area').innerHTML =
+              '<div>${item.label} 1/2</div><div class="question-info"><span class="question-title">空白加载中</span></div>'
+          })
+        })
+      </script>`
+      await openAnswerPage(page, html, async (route) => {
+        await route.fulfill({ status: 404, body: 'not found' })
+      })
+      await assert.rejects(
+        technicalTimeout(
+          goToNoqrAnswerCardQuestion(
+            page,
+            item.key,
+            () => false,
+            { verifyBudgetMs: 120 },
+          ),
+          `${item.label}空白题页被误判为已到达`,
+          3_000,
+        ),
+        /未到达目标题/,
+      )
+    } finally {
+      await page.close()
+      await browser.close()
+    }
+  }
+})
+
+test('T005-RT05g5 复合题真实内容控件仍可完成答题卡跳转', async () => {
+  const cases = [
+    {
+      label: '听力理解',
+      key: noqrAnswerCardKey('english_listening', 1),
+      body: `<span class="question-title">听力材料 <a data-url="/fixture-audio.mp3">播放</a></span>
+        <div class="sub-questions"><div class="sub-item">
+          <span class="question-title">子题一</span>
+          <div class="question-options">
+            ${optionHtml('A. 甲', 0, 'radio')}
+            ${optionHtml('B. 乙', 1, 'radio')}
+          </div>
+        </div></div>`,
+    },
+    {
+      label: '词汇匹配',
+      key: noqrAnswerCardKey('picker', 1),
+      body: `<span class="question-title">词汇匹配材料</span>
+        <div class="question-options"><div class="van-cell-group">
+          <div role="button" class="van-cell van-cell--clickable van-field">
+            <div class="van-field__label">左侧词条</div>
+            <input type="text" name="picker" readonly value="">
+          </div>
+        </div></div>`,
+    },
+    {
+      label: '完型填空',
+      key: noqrAnswerCardKey('english_cloze', 1),
+      body: `<span class="question-title">完型材料 <span class="spaceIndex" index="1">空位</span></span>
+        <div class="sub-questions"><div class="sub-item">
+          <span class="question-title">空位一</span>
+          <div class="question-options">
+            ${optionHtml('A. 甲', 0, 'radio')}
+            ${optionHtml('B. 乙', 1, 'radio')}
+          </div>
+        </div></div>`,
+    },
+    {
+      label: '阅读理解',
+      key: noqrAnswerCardKey('english_reading', 1),
+      body: `<span class="question-title">阅读材料</span>
+        <div class="sub-questions"><div class="sub-item">
+          <span class="question-title">陈述一</span>
+          <div class="question-options">
+            ${optionHtml('A. 正确', 0, 'radio')}
+            ${optionHtml('B. 错误', 1, 'radio')}
+          </div>
+        </div></div>`,
+    },
+  ] as const
+  for (const item of cases) {
+    const browser = await launchBrowser()
+    const page = await browser.newPage()
+    try {
+      const html = `<div class="content-area">
+        <div>${item.label} 1/2</div>
+        <div class="question-info">${item.body}</div>
+        <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+      </div>
+      <div class="van-popup van-popup--bottom" style="display:none">
+        <div class="question-card">
+          <div class="question-cart-title">第 1 大题: ${item.label}</div>
+          <span class="sub-question is-current">1</span>
+        </div>
+      </div>
+      <script>
+        document.querySelectorAll('.btn-item')[0].addEventListener('click', () => {
+          document.querySelector('.van-popup').style.display = 'block'
+          document.querySelector('.sub-question').addEventListener('click', () => {
+            document.querySelector('.van-popup').style.display = 'none'
+          })
+        })
+      </script>`
+      await openAnswerPage(page, html, async (route) => {
+        await route.fulfill({ status: 404, body: 'not found' })
+      })
+      await technicalTimeout(
+        goToNoqrAnswerCardQuestion(
+          page,
+          item.key,
+          () => false,
+          { verifyBudgetMs: 120 },
+        ),
+        `${item.label}真实题面没有被答题卡跳转识别`,
+        3_000,
+      )
+    } finally {
+      await page.close()
+      await browser.close()
+    }
   }
 })
 
@@ -3378,6 +4941,158 @@ test('T005-RT05p3 答题卡入口触发永久导航时也必须有限收口', as
   }
 })
 
+test('T007-RT14c6 停止后答题卡关闭必须立即收口而不是继续等待遮罩', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const html = `<div class="content-area">
+      <div class="question-info"><span class="question-title">合成单选题</span><div class="question-options"><div class="option-item" role="radio"><span class="van-radio__label">甲</span></div><div class="option-item" role="radio"><span class="van-radio__label">乙</span></div></div></div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-overlay" style="display:block;position:fixed;inset:0;z-index:1"></div>
+    <div class="van-popup van-popup--bottom" style="display:block">
+      <div class="question-card">
+        <div class="question-cart-title">第 1 大题: 单选题</div>
+        <span class="sub-question has-answered">1</span>
+      </div>
+    </div>
+    <script>
+      document.querySelector('.van-overlay').addEventListener('click', () => {})
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    let stopped = false
+    const startedAt = Date.now()
+    const timer = setTimeout(() => { stopped = true }, 100)
+    try {
+      await assert.rejects(
+        technicalTimeout(
+          auditNoqrAnswerCard(page, {
+            stopRequested: () => stopped,
+            expectedCount: 1,
+            noProgressBudgetMs: 5_000,
+            auditDeadlineMs: 10_000,
+            maxReopens: 0,
+          }),
+          '停止后答题卡关闭仍未收口',
+          2_000,
+        ),
+        /任务已停止/,
+      )
+      assert.ok(Date.now() - startedAt < 1_500)
+    } finally {
+      clearTimeout(timer)
+    }
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT14c7 关闭答题卡不能点击无关弹层的全局遮罩', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  try {
+    const html = `<div class="content-area">
+      <div class="question-info"><span class="question-title">合成单选题</span><div class="question-options"><div class="option-item" role="radio"><span class="van-radio__label">甲</span></div><div class="option-item" role="radio"><span class="van-radio__label">乙</span></div></div></div>
+      <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+    </div>
+    <div class="van-popup van-popup--bottom" style="display:block">
+      <div class="question-card">
+        <div class="question-cart-title">第 1 大题: 单选题</div>
+        <span class="sub-question has-answered">1</span>
+      </div>
+    </div>
+    <div class="van-overlay" id="unrelated-overlay" style="display:block;position:fixed;inset:0;z-index:1"></div>
+    <script>
+      document.documentElement.dataset.unrelatedClicks = '0'
+      document.querySelector('#unrelated-overlay').addEventListener('click', () => {
+        document.documentElement.dataset.unrelatedClicks =
+          String(Number(document.documentElement.dataset.unrelatedClicks || '0') + 1)
+      })
+    </script>`
+    await openAnswerPage(page, html, async (route) => {
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    const audit = await technicalTimeout(
+      auditNoqrAnswerCard(page, {
+        stopRequested: () => false,
+        expectedCount: 1,
+        noProgressBudgetMs: 100,
+        auditDeadlineMs: 1_000,
+        maxReopens: 0,
+      }),
+      '答题卡关闭误点了无关遮罩',
+      2_000,
+    )
+    assert.equal(audit.ok, true)
+    assert.equal(await page.locator('html').getAttribute('data-unrelated-clicks'), '0')
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT14c9 选择填空题答题卡跳转必须按预期单多选控件到达目标题', async () => {
+  const browser = await launchBrowser()
+  try {
+    for (const variant of [
+      { kind: 'single' as const, role: 'radio' },
+      { kind: 'multiple' as const, role: 'checkbox' },
+    ]) {
+      const page = await browser.newPage()
+      try {
+        const question = (ordinal: number) => `
+          <div>选择填空题 ${ordinal}/2</div>
+          <div class="question-info">
+            <span class="question-title">空位 ${ordinal}</span>
+            <div class="question-options">
+              <div class="option-item" role="${variant.role}">A. 甲</div>
+              <div class="option-item" role="${variant.role}">B. 乙</div>
+            </div>
+          </div>`
+        const html = `<div class="content-area">
+          ${question(1)}
+          <div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>
+        </div>
+        <div class="van-popup van-popup--bottom" style="display:none">
+          <div class="question-card">
+            <div class="question-cart-title">第 1 大题: 选择填空题</div>
+            <span class="sub-question has-answered">1</span>
+            <span class="sub-question">2</span>
+          </div>
+        </div>
+        <script>
+          document.querySelectorAll('.btn-item')[0].addEventListener('click', () => {
+            document.querySelector('.van-popup').style.display = 'block'
+          })
+          document.querySelectorAll('.sub-question')[1].addEventListener('click', () => {
+            document.querySelector('.van-popup').style.display = 'none'
+            document.querySelector('.content-area').innerHTML =
+              ${JSON.stringify(question(2))} +
+              '<div class="actions"><button class="btn-item">答题卡</button><button class="btn-item">交卷</button></div>'
+          })
+        </script>`
+        await openAnswerPage(page, html, async (route) => {
+          await route.fulfill({ status: 404, body: 'not found' })
+        })
+        await goToNoqrAnswerCardQuestion(
+          page,
+          noqrAnswerCardKey(variant.kind, 2, 1),
+          () => false,
+          { verifyBudgetMs: 2_000, deadlineAt: Date.now() + 3_000 },
+        )
+        assert.match(await page.locator('.content-area').innerText(), /选择填空题\s+2\/2/)
+      } finally {
+        await page.close()
+      }
+    }
+  } finally {
+    await browser.close()
+  }
+})
+
 test('T005-RT05m 已答状态抖动不能无限推迟答题卡无进展收口', async () => {
   const browser = await launchBrowser()
   const page = await browser.newPage()
@@ -3958,7 +5673,14 @@ test('T005-RT08 HTTP 失败与业务失败都不能推进页面或宣称保存�
           group: read.group,
           answers: [{ unitId: read.group.units[0].id, ordinal: 1, qtype: 'single', source: 'bank', texts: ['乙'], indices: [1], selectionValues: [1] }],
           stopRequested: () => false,
-        }), undefined, failure.name)
+        }), (error: unknown) => {
+          assert.equal(
+            (error as { code?: string }).code,
+            'submitted_uncertain',
+            `${failure.name} 没有按结果不确定收口`,
+          )
+          return true
+        }, failure.name)
         assert.notEqual(await page.locator('.question-title').innerText(), '不应出现', `${failure.name} 被误判为成功`)
       } finally {
         observer.dispose()
@@ -4811,6 +6533,54 @@ test('T005-RT14d 答题启动页检测到已答进度时禁止自动返回重进
     )
     assert.equal(answerLoads, 1)
     assert.equal(reentries, 0)
+  } finally {
+    await page.close()
+    await browser.close()
+  }
+})
+
+test('T007-RT18e 主观文本域内容不得冒充客观题已答进度', async () => {
+  const browser = await launchBrowser()
+  const page = await browser.newPage()
+  let reentries = 0
+  try {
+    await page.route(`${ORIGIN}/**`, async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname === '/course_work_detail/index.html') {
+        await route.fulfill(htmlResponse(`
+          <div class="van-nav-bar"><div class="van-nav-bar__title">记分作业一</div></div>
+          <div class="content-area">
+            <div class="skeleton-area van-skeleton">加载中</div>
+            <input type="text" name="answer" value="主观文本">
+            <textarea name="answer">主观文本</textarea>
+          </div>
+        `))
+        return
+      }
+      await route.fulfill({ status: 404, body: 'not found' })
+    })
+    await page.goto(ANSWER_URL, { waitUntil: 'domcontentloaded' })
+    await technicalTimeout(waitForNoqrAnswerReady({
+      page,
+      stopRequested: () => false,
+      reenter: async () => {
+        reentries++
+        await page.setContent(`
+          <div class="content-area">
+            <div class="question-info">
+              <span class="question-title">客观题</span>
+              <div class="question-options">
+                <div role="radio" class="option-item">A. 甲</div>
+                <div role="radio" class="option-item">B. 乙</div>
+              </div>
+            </div>
+          </div>
+        `)
+      },
+      blankSettleMs: 50,
+      skeletonBudgetMs: 50,
+    }), '主观文本域被错误当成客观题进度', 1_500)
+    assert.equal(reentries, 1)
   } finally {
     await page.close()
     await browser.close()
